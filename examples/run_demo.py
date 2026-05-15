@@ -133,14 +133,17 @@ def main() -> None:
             print("=== 上一轮执行轨迹 ===")
             for step in last_response.steps:
                 print(f"[步骤 {step.index}] 思考: {step.thought}")
-                if step.tool_call:
-                    print(f"  工具: {step.tool_call.name} {step.tool_call.arguments}")
-                if step.tool_result:
-                    print(f"  成功: {step.tool_result.success}")
-                    if step.tool_result.success:
-                        print(f"  输出: {step.tool_result.output}")
+                step_tool_calls = step.tool_calls or ([step.tool_call] if step.tool_call else [])
+                step_tool_results = step.tool_results or ([step.tool_result] if step.tool_result else [])
+
+                for tool_call in step_tool_calls:
+                    print(f"  工具: {tool_call.name} {tool_call.arguments}")
+                for tool_result in step_tool_results:
+                    print(f"  成功: {tool_result.success}")
+                    if tool_result.success:
+                        print(f"  输出: {tool_result.output}")
                     else:
-                        print(f"  错误: {step.tool_result.error_message}")
+                        print(f"  错误: {tool_result.error_message}")
                 if step.final_answer:
                     print(f"  最终答复: {step.final_answer}")
                 print()

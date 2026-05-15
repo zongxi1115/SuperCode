@@ -16,7 +16,6 @@ import type {
   WorkspaceOption,
 } from '@/lib/app-types';
 import {
-  FILE_TREE_POLL_INTERVAL,
   clearLastSession,
   findDirectoryNode,
   getLastSession,
@@ -49,10 +48,60 @@ export default function App() {
   const [isContextLoading, setIsContextLoading] = useState(false);
   const [sessionContext, setSessionContext] = useState<SessionContextPayload | null>(null);
   const [isTerminalOpen, setIsTerminalOpen] = useState(false);
+  const [hasTerminalBeenOpened, setHasTerminalBeenOpened] = useState(false);
   const [chatPanelWidth, setChatPanelWidth] = useState(820);
   const [sessionHistory, setSessionHistory] = useState<SessionHistoryItem[]>([]);
   const [isHistoryLoading, setIsHistoryLoading] = useState(false);
   const activeRequestRef = useRef<AbortController | null>(null);
+
+  const refreshFileTree = useCallback(
+    async (targetSessionId?: string) => {
+      const currentSessionId = targetSessionId ?? sessionId;
+      if (!currentSessionId) return;
+
+      try {
+        const res = await fetch(`http://localhost:8000/api/sessions/${currentSessionId}/file-tree`);
+        if (!res.ok) {
+          throw new Error('读取文件树失败');
+        }
+        const data = await res.json();
+        if (data.fileTree) {
+          setFileTree(data.fileTree);
+        }
+      } catch (error) {
+        console.error(error);
+      }
+    },
+    [sessionId]
+  );
+
+  const loadSessionContext = useCallback(
+    async (options?: { silent?: boolean; targetSessionId?: string }) => {
+      const targetSessionId = options?.targetSessionId ?? sessionId;
+      if (!targetSessionId) return;
+
+      const silent = options?.silent ?? false;
+      if (!silent) {
+        setIsContextLoading(true);
+      }
+
+      try {
+        const res = await fetch(`http://localhost:8000/api/sessions/${targetSessionId}/context`);
+        if (!res.ok) {
+          throw new Error('读取上下文失败');
+        }
+        const data: SessionContextPayload = await res.json();
+        setSessionContext(data);
+      } catch (error) {
+        console.error(error);
+      } finally {
+        if (!silent) {
+          setIsContextLoading(false);
+        }
+      }
+    },
+    [sessionId]
+  );
 
   const [shouldRestoreSession] = useState(() => {
     const lastSession = getLastSession();
@@ -104,6 +153,8 @@ export default function App() {
     setSelectedFileContent(data.selectedFileContent ?? '');
     setSessionContext(null);
     setIsContextOpen(false);
+    setIsTerminalOpen(false);
+    setHasTerminalBeenOpened(false);
     saveLastSession(data.workspace);
     setShowWorkspacePicker(false);
   }, []);
@@ -167,28 +218,7 @@ export default function App() {
   }, [loadSessionHistory]);
 
   useEffect(() => {
-    if (!sessionId) return;
-
-    const poll = async () => {
-      try {
-        const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/file-tree`);
-        if (res.ok) {
-          const data = await res.json();
-          if (data.fileTree) {
-            setFileTree(data.fileTree);
-          }
-        }
-      } catch {
-        // silent fail for polling
-      }
-    };
-
-    const intervalId = setInterval(poll, FILE_TREE_POLL_INTERVAL);
-    return () => clearInterval(intervalId);
-  }, [sessionId]);
-
-  useEffect(() => {
-    if (!sessionId) return;
+    if (!sessionId || !hasTerminalBeenOpened || !isTerminalOpen) return;
 
     const pollTerminal = async () => {
       try {
@@ -206,7 +236,7 @@ export default function App() {
     void pollTerminal();
     const intervalId = setInterval(pollTerminal, 1000);
     return () => clearInterval(intervalId);
-  }, [sessionId]);
+  }, [hasTerminalBeenOpened, isTerminalOpen, sessionId]);
 
   const createSession = async () => {
     const workspace = customWorkspace.trim() || selectedWorkspace;
@@ -265,23 +295,10 @@ export default function App() {
     }
   };
 
-  const loadSessionContext = useCallback(async () => {
+  useEffect(() => {
     if (!sessionId) return;
-
-    setIsContextLoading(true);
-    try {
-      const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/context`);
-      if (!res.ok) {
-        throw new Error('读取上下文失败');
-      }
-      const data: SessionContextPayload = await res.json();
-      setSessionContext(data);
-    } catch (error) {
-      console.error(error);
-    } finally {
-      setIsContextLoading(false);
-    }
-  }, [sessionId]);
+    void loadSessionContext({ silent: true });
+  }, [loadSessionContext, sessionId]);
 
   const sendTerminalCommand = useCallback(async () => {
     if (!sessionId || !terminalInput.trim() || isTerminalSubmitting) {
@@ -330,6 +347,11 @@ export default function App() {
       setIsTerminalSubmitting(false);
     }
   }, [isTerminalSubmitting, sessionId]);
+
+  const handleTerminalToggle = useCallback(() => {
+    setHasTerminalBeenOpened(true);
+    setIsTerminalOpen((prev) => !prev);
+  }, []);
 
   const handleContextOpenChange = useCallback(
     (open: boolean) => {
@@ -519,7 +541,9 @@ export default function App() {
           } else if (data.type === 'tool_result') {
             if (data.payload.name === 'execute' || data.payload.name === 'excecute') {
               setTerminalOutput(data.payload.output);
-              setIsTerminalOpen(true);
+            }
+            if (['write_file', 'replace_file', 'delete_file'].includes(String(data.payload.name))) {
+              void refreshFileTree();
             }
             const assistantId = data.payload.assistant_id || currentAssistantId;
             if (!assistantId) return;
@@ -572,9 +596,7 @@ export default function App() {
         activeRequestRef.current = null;
       }
       setIsLoading(false);
-      if (isContextOpen) {
-        void loadSessionContext();
-      }
+      void loadSessionContext({ silent: !isContextOpen });
       void loadSessionHistory();
     }
   };
@@ -613,6 +635,8 @@ export default function App() {
     setSessionError(null);
     setSessionContext(null);
     setIsContextOpen(false);
+    setIsTerminalOpen(false);
+    setHasTerminalBeenOpened(false);
     setShowWorkspacePicker(true);
   }, []);
 
@@ -689,7 +713,7 @@ export default function App() {
           isSubmitting={isTerminalSubmitting}
           onInputChange={setTerminalInput}
           onSubmit={() => void sendTerminalCommand()}
-          onToggle={() => setIsTerminalOpen((prev) => !prev)}
+          onToggle={handleTerminalToggle}
           onClear={() => void clearTerminal()}
         />
       </div>

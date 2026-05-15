@@ -31,6 +31,7 @@ class ToolCall:
     """记录一次工具调用请求。"""
 
     name: str
+    id: str | None = None
     arguments: dict[str, Any] = field(default_factory=dict)
 
 
@@ -40,6 +41,7 @@ class ToolResult:
 
     name: str
     output: Any
+    tool_call_id: str | None = None
     success: bool = True
     error_message: str | None = None
 
@@ -52,6 +54,8 @@ class StepRecord:
     thought: str
     tool_call: ToolCall | None = None
     tool_result: ToolResult | None = None
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    tool_results: list[ToolResult] = field(default_factory=list)
     final_answer: str | None = None
 
 

@@ -19,6 +19,8 @@ type EditorPanelProps = {
   sessionId: string | null;
 };
 
+const EDITOR_FONT = 'font-mono text-[13px] leading-[20px]';
+
 export function EditorPanel({
   fileTree,
   selectedFilePath,
@@ -33,6 +35,7 @@ export function EditorPanel({
   const [editContent, setEditContent] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setIsEditing(false);
@@ -93,6 +96,27 @@ export function EditorPanel({
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, [isEditing, handleSave]);
+
+  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      const textarea = e.currentTarget;
+      const start = textarea.selectionStart;
+      const end = textarea.selectionEnd;
+      const value = textarea.value;
+      const next = value.substring(0, start) + '  ' + value.substring(end);
+      setEditContent(next);
+      requestAnimationFrame(() => {
+        textarea.selectionStart = textarea.selectionEnd = start + 2;
+      });
+    }
+  }, []);
+
+  const syncScroll = useCallback(() => {
+    if (!textareaRef.current || !scrollRef.current) return;
+    scrollRef.current.scrollTop = textareaRef.current.scrollTop;
+    scrollRef.current.scrollLeft = textareaRef.current.scrollLeft;
+  }, []);
 
   const lineCount = isEditing
     ? editContent.split('\n').length
@@ -162,18 +186,31 @@ export function EditorPanel({
               </div>
 
               {isEditing ? (
-                <div className="flex-1 overflow-auto flex min-h-0">
-                  <div className="py-3 pr-0 pl-3 text-right select-none font-mono text-xs leading-[20px] text-muted-foreground/40 bg-muted/10 border-r shrink-0">
-                    {Array.from({ length: lineCount }, (_, i) => (
-                      <div key={i}>{i + 1}</div>
-                    ))}
+                <div className="flex-1 relative overflow-hidden min-h-0 bg-background">
+                  <div
+                    ref={scrollRef}
+                    className="absolute inset-y-0 left-0 w-[52px] overflow-hidden border-r bg-muted/20 pointer-events-none"
+                    aria-hidden="true"
+                  >
+                    <div className={`px-2 py-4 ${EDITOR_FONT} text-right text-muted-foreground/60`}>
+                      {Array.from({ length: lineCount }, (_, index) => (
+                        <div key={index + 1} className="h-[20px] leading-[20px]">
+                          {index + 1}
+                        </div>
+                      ))}
+                    </div>
                   </div>
                   <textarea
                     ref={textareaRef}
                     value={editContent}
                     onChange={(e) => setEditContent(e.target.value)}
-                    className="flex-1 p-3 font-mono text-xs leading-[20px] resize-none bg-background outline-none min-w-0"
+                    onScroll={syncScroll}
+                    onKeyDown={handleKeyDown}
+                    wrap="off"
+                    className={`absolute inset-0 h-full w-full resize-none bg-transparent py-4 pr-4 pl-[68px] ${EDITOR_FONT} text-foreground outline-none whitespace-pre overflow-auto`}
                     spellCheck={false}
+                    autoCapitalize="off"
+                    autoCorrect="off"
                   />
                 </div>
               ) : (

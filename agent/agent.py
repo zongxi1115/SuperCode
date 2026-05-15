@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
 
@@ -178,39 +179,47 @@ class CodingAgent:
             if decision.action != "tool" or not decision.tool_name:
                 raise ValueError(f"不支持的决策动作: {decision.action}")
 
-            tool_call = ToolCall(
-                name=decision.tool_name,
-                arguments=decision.tool_arguments,
-            )
-            self._emit_event(
-                on_event,
-                AgentEvent(
-                    type="tool_call",
-                    step_index=index,
-                    message=f"第 {index} 步准备调用工具 {tool_call.name}。",
-                    thought=decision.thought,
-                    tool_call=tool_call,
-                ),
-            )
-            result = self._execute_tool(tool_call, context)
-            state.add_tool_result(result)
-            self._emit_event(
-                on_event,
-                AgentEvent(
-                    type="tool_result",
-                    step_index=index,
-                    message=f"第 {index} 步工具 {tool_call.name} 已返回结果。",
-                    tool_call=tool_call,
-                    tool_result=result,
-                ),
-            )
+            tool_calls = self._build_tool_calls(decision, step_index=index)
+            for tool_call in tool_calls:
+                self._emit_event(
+                    on_event,
+                    AgentEvent(
+                        type="tool_call",
+                        step_index=index,
+                        message=(
+                            f"第 {index} 步准备并行调用工具 {tool_call.name}。"
+                            if len(tool_calls) > 1
+                            else f"第 {index} 步准备调用工具 {tool_call.name}。"
+                        ),
+                        thought=decision.thought,
+                        tool_call=tool_call,
+                    ),
+                )
+
+            results = self._execute_tool_calls(tool_calls, context)
+            tool_results: list[ToolResult] = []
+            for tool_call, result in results:
+                state.add_tool_result(result)
+                tool_results.append(result)
+                self._emit_event(
+                    on_event,
+                    AgentEvent(
+                        type="tool_result",
+                        step_index=index,
+                        message=f"第 {index} 步工具 {tool_call.name} 已返回结果。",
+                        tool_call=tool_call,
+                        tool_result=result,
+                    ),
+                )
 
             steps.append(
                 StepRecord(
                     index=index,
                     thought=decision.thought,
-                    tool_call=tool_call,
-                    tool_result=result,
+                    tool_call=tool_calls[0] if len(tool_calls) == 1 else None,
+                    tool_result=tool_results[0] if len(tool_results) == 1 else None,
+                    tool_calls=tool_calls,
+                    tool_results=tool_results,
                 )
             )
 
@@ -255,20 +264,95 @@ class CodingAgent:
             return ToolResult(
                 name=tool_call.name,
                 output=None,
+                tool_call_id=tool_call.id,
                 success=False,
                 error_message=f"未找到工具: {tool_call.name}",
             )
 
         try:
             output = tool.run(tool_call.arguments, context)
-            return ToolResult(name=tool_call.name, output=output, success=True)
+            return ToolResult(
+                name=tool_call.name,
+                output=output,
+                tool_call_id=tool_call.id,
+                success=True,
+            )
         except Exception as exc:  # noqa: BLE001 - 这里需要兜底收集工具异常
             return ToolResult(
                 name=tool_call.name,
                 output=None,
+                tool_call_id=tool_call.id,
                 success=False,
                 error_message=str(exc),
             )
+
+    def _build_tool_calls(self, decision: object, step_index: int) -> list[ToolCall]:
+        """把 brain 决策统一转成工具调用列表。"""
+
+        raw_calls = decision.normalized_tool_calls()
+        tool_calls: list[ToolCall] = []
+        for position, raw_call in enumerate(raw_calls, start=1):
+            tool_name = str(raw_call.get("tool_name", "")).strip()
+            if not tool_name:
+                raise ValueError("工具调用缺少 tool_name。")
+
+            tool_arguments = raw_call.get("tool_arguments", {})
+            if not isinstance(tool_arguments, dict):
+                raise ValueError("工具调用里的 tool_arguments 必须是对象。")
+
+            tool_calls.append(
+                ToolCall(
+                    id=f"step-{step_index}-tool-{position}-{tool_name}",
+                    name=tool_name,
+                    arguments=tool_arguments,
+                )
+            )
+
+        if not tool_calls:
+            raise ValueError("模型决定调用工具，但没有返回有效工具列表。")
+        return tool_calls
+
+    def _execute_tool_calls(
+        self,
+        tool_calls: list[ToolCall],
+        context: ToolContext,
+    ) -> list[tuple[ToolCall, ToolResult]]:
+        """执行工具调用列表，对只读工具自动并行。"""
+
+        results: list[tuple[ToolCall, ToolResult]] = []
+        parallel_buffer: list[ToolCall] = []
+
+        def flush_parallel_buffer() -> None:
+            nonlocal parallel_buffer
+            if not parallel_buffer:
+                return
+
+            worker_count = min(len(parallel_buffer), 4)
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                future_results = [
+                    executor.submit(self._execute_tool, tool_call, context)
+                    for tool_call in parallel_buffer
+                ]
+                for tool_call, future in zip(parallel_buffer, future_results, strict=True):
+                    results.append((tool_call, future.result()))
+            parallel_buffer = []
+
+        for tool_call in tool_calls:
+            if self._supports_parallel(tool_call.name):
+                parallel_buffer.append(tool_call)
+                continue
+
+            flush_parallel_buffer()
+            results.append((tool_call, self._execute_tool(tool_call, context)))
+
+        flush_parallel_buffer()
+        return results
+
+    def _supports_parallel(self, tool_name: str) -> bool:
+        """判断工具是否适合并行执行。"""
+
+        tool = self.tools.get(tool_name)
+        return bool(tool is not None and getattr(tool, "supports_parallel", False))
 
     def _emit_event(
         self,

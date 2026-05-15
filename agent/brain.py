@@ -20,6 +20,7 @@ class BrainDecision:
     thought: str
     tool_name: str | None = None
     tool_arguments: dict[str, Any] = field(default_factory=dict)
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
     final_answer: str | None = None
 
     @classmethod
@@ -39,10 +40,44 @@ class BrainDecision:
         )
 
     @classmethod
+    def call_tools(
+        cls,
+        thought: str,
+        tool_calls: list[dict[str, Any]],
+    ) -> "BrainDecision":
+        """创建一个“批量调用工具”的决策。"""
+
+        if not tool_calls:
+            raise ValueError("tool_calls 不能为空。")
+
+        first_tool = tool_calls[0]
+        return cls(
+            action="tool",
+            thought=thought,
+            tool_name=str(first_tool.get("tool_name", "")).strip() or None,
+            tool_arguments=first_tool.get("tool_arguments", {}) or {},
+            tool_calls=tool_calls,
+        )
+
+    @classmethod
     def finish(cls, thought: str, final_answer: str) -> "BrainDecision":
         """创建一个“结束并返回答案”的决策。"""
 
         return cls(action="final", thought=thought, final_answer=final_answer)
+
+    def normalized_tool_calls(self) -> list[dict[str, Any]]:
+        """把单工具和批量工具两种协议统一成列表。"""
+
+        if self.tool_calls:
+            return self.tool_calls
+        if self.tool_name is None:
+            return []
+        return [
+            {
+                "tool_name": self.tool_name,
+                "tool_arguments": self.tool_arguments,
+            }
+        ]
 
 
 @dataclass(slots=True)

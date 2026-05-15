@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 from collections.abc import Callable
 
 from .brain import AgentBrain, BrainDecision, BrainStreamingUpdate
@@ -68,15 +69,22 @@ class OpenAICompatibleBrain(AgentBrain):
                 "可用工具如下：",
                 *tool_lines,
                 "输出 JSON 格式如下：",
-                '{"action":"tool 或 final","thought":"你的当前思路","tool_name":"工具名","tool_arguments":{},"final_answer":"最终答案"}',
+                (
+                    '{"action":"tool 或 final","thought":"你的当前思路",'
+                    '"tool_name":"工具名","tool_arguments":{},'
+                    '"tool_calls":[{"tool_name":"工具名","tool_arguments":{}}],'
+                    '"final_answer":"最终答案"}'
+                ),
                 "规则：",
-                "1. 如果 action 是 tool，必须提供 tool_name 和 tool_arguments。",
+                "1. 如果 action 是 tool，优先提供 tool_calls 数组；只调用一个工具时也可退回 tool_name 和 tool_arguments。",
                 "2. 如果 action 是 final，必须提供 final_answer。",
-                "3. 优先使用最少但足够的步骤完成任务。",
-                "4. 调用工具时，参数名必须与该工具说明保持一致。",
-                "5. 如果还不了解项目结构，先调用目录或文件浏览类工具。",
-                "6. 这是一个对话式助手，必须结合历史上下文回答用户的追问。",
-                "7. 如果用户只是普通提问，不一定要调用工具，可以直接 final。",
+                "3. 多个互不依赖的只读探索动作可以放进同一个 tool_calls 里并行执行，例如同时读取多个文件或同时做多个搜索。",
+                "4. 涉及写文件、替换内容或执行命令时，除非你非常确定互不影响，否则一次只调用一个工具。",
+                "5. 优先使用最少但足够的步骤完成任务。",
+                "6. 调用工具时，参数名必须与该工具说明保持一致。",
+                "7. 如果还不了解项目结构，先调用目录或文件浏览类工具。",
+                "8. 这是一个对话式助手，必须结合历史上下文回答用户的追问。",
+                "9. 如果用户只是普通提问，不一定要调用工具，可以直接 final。",
             ]
         )
 
@@ -130,20 +138,41 @@ class OpenAICompatibleBrain(AgentBrain):
                     f"步骤 {step.index} 工具调用：{step.tool_call.name} "
                     f"{json.dumps(step.tool_call.arguments, ensure_ascii=False)}"
                 )
+            extra_tool_calls = step.tool_calls if step.tool_calls else []
+            if step.tool_call and extra_tool_calls:
+                extra_tool_calls = extra_tool_calls[1:]
+            if extra_tool_calls:
+                for tool_call in extra_tool_calls:
+                    lines.append(
+                        f"步骤 {step.index} 工具调用：{tool_call.name} "
+                        f"{json.dumps(tool_call.arguments, ensure_ascii=False)}"
+                    )
+
             if step.tool_result:
-                lines.append(f"步骤 {step.index} 工具是否成功：{step.tool_result.success}")
-                if step.tool_result.success:
-                    lines.append(
-                        f"步骤 {step.index} 工具输出："
-                        f"{self._shrink_text(step.tool_result.output)}"
-                    )
-                else:
-                    lines.append(
-                        f"步骤 {step.index} 工具错误：{step.tool_result.error_message}"
-                    )
+                lines.extend(self._format_tool_result_lines(step.index, step.tool_result))
+
+            extra_tool_results = step.tool_results if step.tool_results else []
+            if step.tool_result and extra_tool_results:
+                extra_tool_results = extra_tool_results[1:]
+            if extra_tool_results:
+                for tool_result in extra_tool_results:
+                    lines.extend(self._format_tool_result_lines(step.index, tool_result))
             if step.final_answer:
                 lines.append(f"步骤 {step.index} 最终答复：{step.final_answer}")
         return "\n".join(lines)
+
+    def _format_tool_result_lines(self, step_index: int, tool_result: Any) -> list[str]:
+        """格式化单个工具结果。"""
+
+        lines = [f"步骤 {step_index} 工具是否成功：{tool_result.success}"]
+        if tool_result.success:
+            lines.append(
+                f"步骤 {step_index} 工具输出："
+                f"{self._shrink_text(tool_result.output)}"
+            )
+        else:
+            lines.append(f"步骤 {step_index} 工具错误：{tool_result.error_message}")
+        return lines
 
     def _shrink_text(self, value: object, limit: int = 1600) -> str:
         """压缩工具输出，避免上下文膨胀太快。"""
@@ -263,6 +292,29 @@ class OpenAICompatibleBrain(AgentBrain):
         thought = str(payload.get("thought", "")).strip() or "模型未提供思路。"
 
         if action == "tool":
+            tool_calls = payload.get("tool_calls")
+            if tool_calls is not None:
+                if not isinstance(tool_calls, list) or not tool_calls:
+                    raise ValueError("模型返回的 tool_calls 必须是非空数组。")
+
+                normalized_calls: list[dict[str, Any]] = []
+                for item in tool_calls:
+                    if not isinstance(item, dict):
+                        raise ValueError("tool_calls 中的每一项都必须是对象。")
+                    tool_name = str(item.get("tool_name", "")).strip()
+                    tool_arguments = item.get("tool_arguments", {})
+                    if not tool_name:
+                        raise ValueError("tool_calls 中存在缺少 tool_name 的项。")
+                    if not isinstance(tool_arguments, dict):
+                        raise ValueError("tool_calls 中的 tool_arguments 不是对象。")
+                    normalized_calls.append(
+                        {
+                            "tool_name": tool_name,
+                            "tool_arguments": tool_arguments,
+                        }
+                    )
+                return BrainDecision.call_tools(thought=thought, tool_calls=normalized_calls)
+
             tool_name = str(payload.get("tool_name", "")).strip()
             tool_arguments = payload.get("tool_arguments", {})
             if not tool_name:

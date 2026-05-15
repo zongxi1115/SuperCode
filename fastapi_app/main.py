@@ -681,7 +681,7 @@ async def run_agent_stream(
             return
 
         if event.type == "tool_call" and event.tool_call is not None:
-            tool_id = f"step-{event.step_index}-{event.tool_call.name}"
+            tool_id = event.tool_call.id or f"step-{event.step_index}-{event.tool_call.name}"
             update_plan_steps_for_tool(session, event.step_index, event.tool_call.name)
             if event.tool_call.name == "read_file":
                 maybe_filename = event.tool_call.arguments.get("filename")
@@ -713,7 +713,7 @@ async def run_agent_stream(
             return
 
         if event.type == "tool_result" and event.tool_call is not None and event.tool_result is not None:
-            tool_id = f"step-{event.step_index}-{event.tool_call.name}"
+            tool_id = event.tool_call.id or event.tool_result.tool_call_id or f"step-{event.step_index}-{event.tool_call.name}"
             output = event.tool_result.output
             if event.tool_result.name in {"execute", "excecute"} and isinstance(output, str):
                 session.terminal_output = output

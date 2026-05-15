@@ -48,6 +48,7 @@ class ListFileTool(CodingBaseTool):
 
     name = "list_file"
     description = "列举指定目录下的文件和目录路径，参数：path 可选。"
+    supports_parallel = True
 
     def run(self, arguments: dict[str, object], context: ToolContext) -> str:
         relative_path = str(arguments.get("path", "."))
@@ -76,6 +77,7 @@ class ReadFileTool(CodingBaseTool):
 
     name = "read_file"
     description = "读取文件内容，可传 filename、start_line、end_line，返回内容带行号。"
+    supports_parallel = True
 
     def run(self, arguments: dict[str, object], context: ToolContext) -> str:
         filename = str(arguments["filename"])
@@ -108,6 +110,7 @@ class GrepFileTool(CodingBaseTool):
         "按正则搜索文件内容，参数：regex 必填，context_line 可选默认 30，"
         "search_path 可选默认当前目录，返回带行号的上下文。"
     )
+    supports_parallel = True
 
     def run(self, arguments: dict[str, object], context: ToolContext) -> str:
         regex = str(arguments["regex"])

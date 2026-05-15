@@ -30,6 +30,7 @@ class BaseTool(ABC):
 
     name: str = ""
     description: str = ""
+    supports_parallel: bool = False
 
     @abstractmethod
     def run(self, arguments: dict[str, Any], context: ToolContext) -> Any:

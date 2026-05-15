@@ -1,5 +1,5 @@
 import { ContextViewer } from '@/components/app/context-viewer';
-import { ConversationEmptyState } from '@/components/ai-elements/conversation';
+import { Conversation, ConversationContent, ConversationEmptyState } from '@/components/ai-elements/conversation';
 import {
   ChainOfThought,
   ChainOfThoughtContent,
@@ -8,6 +8,7 @@ import {
 } from '@/components/ai-elements/chain-of-thought';
 import { CodeBlock, CodeBlockDiff } from '@/components/ai-elements/code-block';
 import { Message, MessageContent, MessageResponse } from '@/components/ai-elements/message';
+import { Persona, type PersonaState } from '@/components/ai-elements/persona';
 import {
   Queue,
   QueueItem,
@@ -41,7 +42,7 @@ import {
 } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
 import type React from 'react';
-import { useState } from 'react';
+import { memo, useMemo, useState } from 'react';
 
 type ChatPanelProps = {
   contextData: SessionContextPayload | null;
@@ -247,6 +248,166 @@ function PlanToggle({ planSteps, isStreaming }: { planSteps: PlanStep[]; isStrea
   );
 }
 
+const personaLabels: Record<PersonaState, string> = {
+  asleep: 'Asleep',
+  idle: 'Idle',
+  listening: 'Listening',
+  thinking: 'Thinking',
+  speaking: 'Speaking',
+};
+
+const PERSONA_LAYOUT_ID = 'chat-persona-shell';
+
+const PersonaShell = memo(function PersonaShell({ state }: { state: PersonaState }) {
+  return (
+    <motion.div
+      layoutId={PERSONA_LAYOUT_ID}
+      transition={{ type: 'spring', stiffness: 320, damping: 30 }}
+      aria-label={`AI status: ${personaLabels[state]}`}
+      className="pointer-events-none inline-flex items-center justify-start"
+    >
+      <Persona variant="glint" state={state} className="size-12" />
+    </motion.div>
+  );
+});
+
+const PersonaRail = memo(function PersonaRail({ state }: { state: PersonaState }) {
+  return (
+    <motion.div layout className="flex justify-start py-2">
+      <PersonaShell state={state} />
+    </motion.div>
+  );
+});
+
+const EmptyStateWithPersona = memo(function EmptyStateWithPersona({
+  state,
+}: {
+  state: PersonaState;
+}) {
+  return (
+    <ConversationEmptyState className="min-h-[38vh]">
+      <motion.div layout className="flex items-center gap-4 text-left">
+        <PersonaShell state={state} />
+        <div className="space-y-1">
+          <h3 className="font-medium text-sm">智能代码助手</h3>
+          <p className="text-muted-foreground text-sm">描述您的需求，我将为您生成代码并执行</p>
+        </div>
+      </motion.div>
+    </ConversationEmptyState>
+  );
+});
+
+const MessageList = memo(function MessageList({
+  isLoading,
+  messages,
+}: {
+  isLoading: boolean;
+  messages: ChatMessage[];
+}) {
+  return (
+    <>
+      {messages.map((msg, idx) => (
+        <Message key={msg.id || idx} from={msg.role}>
+          <MessageContent>
+            {msg.role === 'assistant' && idx === messages.length - 1 && (
+              <>
+                {msg.thoughts?.trim() || (msg.toolCalls?.length ?? 0) > 0 || (isLoading && !msg.content) ? (
+                  <ChainOfThought defaultOpen={isLoading}>
+                    <ChainOfThoughtHeader>
+                      {isLoading ? (
+                        <Shimmer duration={1}>正在思考...</Shimmer>
+                      ) : (
+                        <span>思考过程</span>
+                      )}
+                    </ChainOfThoughtHeader>
+                    <ChainOfThoughtContent>
+                      {msg.thoughts?.trim() ? (
+                        <ChainOfThoughtStep
+                          label={msg.thoughts}
+                          status={isLoading ? 'active' : 'complete'}
+                        />
+                      ) : null}
+
+                      {(msg.toolCalls?.length ?? 0) > 0 ? (
+                        <div className="space-y-2">
+                          {msg.toolCalls?.map((tc) => {
+                            const statusLabel =
+                              tc.state === 'completed' ? '已完成' :
+                              tc.state === 'error' ? '出错' : '执行中';
+
+                            return (
+                              <Task key={tc.id}>
+                                <TaskTrigger
+                                  title={`${tc.name} · ${statusLabel}`}
+                                  icon={getToolIcon(tc.name)}
+                                />
+                                <TaskContent>
+                                  <TaskItem>
+                                    <ToolBody toolCall={tc} />
+                                  </TaskItem>
+                                </TaskContent>
+                              </Task>
+                            );
+                          })}
+                        </div>
+                      ) : null}
+                    </ChainOfThoughtContent>
+                  </ChainOfThought>
+                ) : null}
+              </>
+            )}
+            {msg.role === 'assistant' && idx !== messages.length - 1 && (msg.toolCalls?.length ?? 0) > 0 && (
+              <div className="space-y-2">
+                {msg.toolCalls?.map((tc) => {
+                  const statusLabel =
+                    tc.state === 'completed' ? '已完成' :
+                    tc.state === 'error' ? '出错' : '执行中';
+
+                  return (
+                    <Task key={tc.id}>
+                      <TaskTrigger
+                        title={`${tc.name} · ${statusLabel}`}
+                        icon={getToolIcon(tc.name)}
+                      />
+                      <TaskContent>
+                        <TaskItem>
+                          <ToolBody toolCall={tc} />
+                        </TaskItem>
+                      </TaskContent>
+                    </Task>
+                  );
+                })}
+              </div>
+            )}
+            {msg.content ? <MessageResponse>{msg.content}</MessageResponse> : null}
+          </MessageContent>
+        </Message>
+      ))}
+    </>
+  );
+});
+
+const ChatStreamBody = memo(function ChatStreamBody({
+  isLoading,
+  messages,
+  personaState,
+}: {
+  isLoading: boolean;
+  messages: ChatMessage[];
+  personaState: PersonaState;
+}) {
+  if (messages.length === 0) {
+    return <EmptyStateWithPersona state={personaState} />;
+  }
+
+  return (
+    <>
+      <MessageList isLoading={isLoading} messages={messages} />
+      <PersonaRail state={personaState} />
+    </>
+  );
+});
+
 export function ChatPanel({
   contextData,
   messages,
@@ -261,98 +422,51 @@ export function ChatPanel({
   onStopMessage,
 }: ChatPanelProps) {
   const planSteps = contextData?.planSteps ?? [];
+  const [isFocused, setIsFocused] = useState(false);
+
+  const lastAssistantMessage = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'assistant') {
+        return messages[i];
+      }
+    }
+    return null;
+  }, [messages]);
+
+  const hasDraftInput = isFocused && input.trim().length > 0;
+  const hasStreamingResponse = isLoading && Boolean(lastAssistantMessage?.content?.trim());
+  const hasCompletedConversation = messages.length > 0 && !isLoading;
+
+  const personaState = useMemo<PersonaState>(() => {
+    if (hasStreamingResponse) {
+      return 'speaking';
+    }
+    if (isLoading) {
+      return 'thinking';
+    }
+    if (hasDraftInput) {
+      return 'listening';
+    }
+    if (hasCompletedConversation) {
+      return 'idle';
+    }
+    if (!isFocused) {
+      return 'asleep';
+    }
+    return 'idle';
+  }, [hasCompletedConversation, hasDraftInput, hasStreamingResponse, isFocused, isLoading]);
 
   return (
     <div className="h-full flex flex-col min-w-0 border-r">
-      <div className="flex-1 overflow-auto p-4 space-y-4">
-        {messages.length === 0 ? (
-          <ConversationEmptyState title="智能代码助手" description="描述您的需求，我将为您生成代码并执行" />
-        ) : (
-          messages.map((msg, idx) => (
-            <Message key={msg.id || idx} from={msg.role}>
-              <MessageContent>
-                {msg.role === 'assistant' && idx === messages.length - 1 && (
-                  <>
-                    {msg.thoughts?.trim() || (msg.toolCalls?.length ?? 0) > 0 || (isLoading && !msg.content) ? (
-                      <ChainOfThought defaultOpen={isLoading}>
-                        <ChainOfThoughtHeader>
-                          {isLoading ? (
-                            <Shimmer duration={1}>正在思考...</Shimmer>
-                          ) : (
-                            <span>思考过程</span>
-                          )}
-                        </ChainOfThoughtHeader>
-                        <ChainOfThoughtContent>
-                          {msg.thoughts?.trim() ? (
-                            <ChainOfThoughtStep
-                              label={msg.thoughts}
-                              status={isLoading ? 'active' : 'complete'}
-                            />
-                          ) : null}
-
-                          {(msg.toolCalls?.length ?? 0) > 0 ? (
-                            <div className="space-y-2">
-                              {msg.toolCalls?.map((tc) => {
-                                const statusLabel =
-                                  tc.state === 'completed' ? '已完成' :
-                                  tc.state === 'error' ? '出错' : '执行中';
-
-                                return (
-                                  <Task key={tc.id}>
-                                    <TaskTrigger
-                                      title={`${tc.name} · ${statusLabel}`}
-                                      icon={getToolIcon(tc.name)}
-                                    />
-                                    <TaskContent>
-                                      <TaskItem>
-                                        <ToolBody toolCall={tc} />
-                                      </TaskItem>
-                                    </TaskContent>
-                                  </Task>
-                                );
-                              })}
-                            </div>
-                          ) : null}
-
-                          {isLoading && !msg.thoughts?.trim() && (msg.toolCalls?.length ?? 0) === 0 && !msg.content ? (
-                            <div className="px-3 py-1 text-sm text-muted-foreground">
-                              <Shimmer duration={1.5}>正在分析...</Shimmer>
-                            </div>
-                          ) : null}
-                        </ChainOfThoughtContent>
-                      </ChainOfThought>
-                    ) : null}
-                  </>
-                )}
-                {msg.role === 'assistant' && idx !== messages.length - 1 && (msg.toolCalls?.length ?? 0) > 0 && (
-                  <div className="space-y-2">
-                    {msg.toolCalls?.map((tc) => {
-                      const statusLabel =
-                        tc.state === 'completed' ? '已完成' :
-                        tc.state === 'error' ? '出错' : '执行中';
-
-                      return (
-                        <Task key={tc.id}>
-                          <TaskTrigger
-                            title={`${tc.name} · ${statusLabel}`}
-                            icon={getToolIcon(tc.name)}
-                          />
-                          <TaskContent>
-                            <TaskItem>
-                              <ToolBody toolCall={tc} />
-                            </TaskItem>
-                          </TaskContent>
-                        </Task>
-                      );
-                    })}
-                  </div>
-                )}
-                {msg.content ? <MessageResponse>{msg.content}</MessageResponse> : null}
-              </MessageContent>
-            </Message>
-          ))
-        )}
-      </div>
+      <Conversation className="flex-1">
+        <ConversationContent className="gap-4 pb-4">
+          <ChatStreamBody
+            isLoading={isLoading}
+            messages={messages}
+            personaState={personaState}
+          />
+        </ConversationContent>
+      </Conversation>
 
       <div className="shrink-0 border-t bg-background">
         <PlanToggle planSteps={planSteps} isStreaming={isLoading} />
@@ -363,6 +477,8 @@ export function ChatPanel({
               value={input}
               onChange={(e) => onInputChange(e.target.value)}
               onKeyDown={onKeyDown}
+              onFocus={() => setIsFocused(true)}
+              onBlur={() => setIsFocused(false)}
               placeholder="告诉我想实现什么，或粘贴代码、截图、提问..."
               className="min-h-[80px] resize-none border-0 bg-transparent px-1 py-1.5 shadow-none focus-visible:ring-0"
               rows={3}
