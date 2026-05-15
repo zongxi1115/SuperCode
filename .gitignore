@@ -1,4 +1,5 @@
 .env
 __pycache__/
 *.pyc
-examples/demo_workspace/reports/
+examples/demo_workspace/
+!examples/demo_workspace/plan.md

@@ -12,12 +12,9 @@ from agent import (
     AgentLLMConfig,
     ChatSession,
     CodingAgent,
-    ListFilesTool,
-    OpenAICompatibleBrain,
     OpenAICompatibleClient,
-    ReadFileTool,
-    WriteFileTool,
 )
+from coding_agent import CodingPromptBrain, build_coding_tools
 
 
 def render_live_event(event: AgentEvent) -> None:
@@ -78,8 +75,8 @@ def main() -> None:
 
     client = OpenAICompatibleClient(config)
     agent = CodingAgent(
-        brain=OpenAICompatibleBrain(client),
-        tools=[ListFilesTool(), ReadFileTool(), WriteFileTool()],
+        brain=CodingPromptBrain(client),
+        tools=build_coding_tools(),
         workspace=workspace,
         max_steps=config.max_steps,
     )

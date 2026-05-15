@@ -49,8 +49,8 @@ class OpenAICompatibleBrain(AgentBrain):
                 "1. 如果 action 是 tool，必须提供 tool_name 和 tool_arguments。",
                 "2. 如果 action 是 final，必须提供 final_answer。",
                 "3. 优先使用最少但足够的步骤完成任务。",
-                "4. read_file 需要传 path，write_file 至少需要传 path 和 content。",
-                "5. 如果还不了解项目结构，先调用 list_files。",
+                "4. 调用工具时，参数名必须与该工具说明保持一致。",
+                "5. 如果还不了解项目结构，先调用目录或文件浏览类工具。",
                 "6. 这是一个对话式助手，必须结合历史上下文回答用户的追问。",
                 "7. 如果用户只是普通提问，不一定要调用工具，可以直接 final。",
             ]

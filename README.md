@@ -1,23 +1,29 @@
 # SuperCode
 
-## agent
+## agent / coding_agent
 
-仓库里已经放入一个最小可运行的 Python 编码智能体框架，目录如下：
+仓库里已经放入两层结构：
 
 ```text
 agent/
+coding_agent/
 examples/
 ```
+
+- `agent/`：通用智能体框架，只保留抽象接口和执行循环
+- `coding_agent/`：编码场景专用 brain、提示词和工具实现
 
 特点：
 
 1. 调用入口简单，支持单轮 `agent.run("任务")`
 2. 也支持多轮 `session.ask("问题")`
 3. 用户可以连续追问，自动保留上下文
-4. 运行时可以实时看到思考、工具调用和工具结果
-5. 不依赖复杂链式 API
-6. 注释和文档采用中文
-7. 自带一个可接真实 API 的多轮对话 demo
+4. `agent` 不绑定具体工具实现，工具可被场景包替换
+5. `coding_agent` 使用独立提示词和编码专用工具
+6. 运行时可以实时看到思考、工具调用和工具结果
+7. 不依赖复杂链式 API
+8. 注释和文档采用中文
+9. 自带一个可接真实 API 的多轮对话 demo
 
 ### 运行 demo
 
@@ -43,19 +49,16 @@ from agent import (
     AgentLLMConfig,
     ChatSession,
     CodingAgent,
-    ListFilesTool,
-    OpenAICompatibleBrain,
     OpenAICompatibleClient,
-    ReadFileTool,
-    WriteFileTool,
 )
+from coding_agent import CodingPromptBrain, build_coding_tools
 
 config = AgentLLMConfig.from_env(".env")
 client = OpenAICompatibleClient(config)
 
 agent = CodingAgent(
-    brain=OpenAICompatibleBrain(client),
-    tools=[ListFilesTool(), ReadFileTool(), WriteFileTool()],
+    brain=CodingPromptBrain(client),
+    tools=build_coding_tools(),
     workspace="examples/demo_workspace",
     max_steps=config.max_steps,
 )
@@ -81,6 +84,17 @@ def on_event(event: AgentEvent) -> None:
 
 response = session.ask("先看看项目结构", on_event=on_event)
 ```
+
+### coding_agent 工具接口
+
+`coding_agent` 当前提供这些工具名：
+
+- `list_file(path)`
+- `read_file(filename, start_line, end_line)`
+- `grep_file(regex, context_line, search_path)`
+- `write_file(filename, content)`
+- `replace_file(filename, old_content, new_content)`
+- `excecute(content)`
 
 ### 配置项说明
 
