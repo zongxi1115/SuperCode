@@ -1,0 +1,4 @@
+.env
+__pycache__/
+*.pyc
+examples/demo_workspace/reports/

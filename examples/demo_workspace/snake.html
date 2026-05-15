@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>贪吃蛇</title>
+  <style>
+    body {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      margin: 0;
+      background: #333;
+      font-family: Arial, sans-serif;
+      color: #fff;
+    }
+    canvas {
+      border: 2px solid #fff;
+      background: #111;
+    }
+    #score {
+      margin-bottom: 10px;
+      font-size: 24px;
+    }
+    #game-over {
+      margin-top: 10px;
+      font-size: 20px;
+      color: red;
+      height: 30px;
+    }
+  </style>
+</head>
+<body>
+  <div id="score">得分: 0</div>
+  <canvas id="game" width="400" height="400"></canvas>
+  <div id="game-over"></div>
+
+  <script>
+    (function() {
+      const canvas = document.getElementById('game');
+      const ctx = canvas.getContext('2d');
+      const scoreDisplay = document.getElementById('score');
+      const gameOverDisplay = document.getElementById('game-over');
+
+      const gridSize = 20;
+      const tileCount = canvas.width / gridSize; // 20x20
+
+      let snake = [
+        {x: 10, y: 10}
+      ];
+      let dx = 0;
+      let dy = 0;
+      let food = {};
+      let score = 0;
+      let gameOver = false;
+      let gameLoop;
+
+      // 随机生成食物
+      function randomFood() {
+        return {
+          x: Math.floor(Math.random() * tileCount),
+          y: Math.floor(Math.random() * tileCount)
+        };
+      }
+
+      // 初始化游戏
+      function initGame() {
+        snake = [{x: 10, y: 10}];
+        dx = 0;
+        dy = 0;
+        score = 0;
+        gameOver = false;
+        gameOverDisplay.textContent = '';
+        scoreDisplay.textContent = '得分: 0';
+        food = randomFood();
+        // 避免食物生成在蛇身上
+        while (snake.some(segment => segment.x === food.x && segment.y === food.y)) {
+          food = randomFood();
+        }
+        if (gameLoop) clearInterval(gameLoop);
+        gameLoop = setInterval(update, 100);
+      }
+
+      // 绘制
+      function draw() {
+        // 背景
+        ctx.fillStyle = '#111';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // 画蛇
+        snake.forEach((segment, index) => {
+          ctx.fillStyle = index === 0 ? '#0f0' : '#0a0'; // 蛇头亮一点
+          ctx.fillRect(segment.x * gridSize, segment.y * gridSize, gridSize - 2, gridSize - 2);
+        });
+
+        // 画食物
+        ctx.fillStyle = '#f00';
+        ctx.fillRect(food.x * gridSize, food.y * gridSize, gridSize - 2, gridSize - 2);
+      }
+
+      // 更新逻辑
+      function update() {
+        if (gameOver) return;
+
+        // 移动蛇头
+        const head = {x: snake[0].x + dx, y: snake[0].y + dy};
+
+        // 检查墙壁碰撞
+        if (head.x < 0 || head.x >= tileCount || head.y < 0 || head.y >= tileCount) {
+          endGame();
+          return;
+        }
+
+        // 检查自身碰撞
+        if (snake.some(segment => segment.x === head.x && segment.y === head.y)) {
+          endGame();
+          return;
+        }
+
+        snake.unshift(head);
+
+        // 检查是否吃到食物
+        if (head.x === food.x && head.y === food.y) {
+          score += 10;
+          scoreDisplay.textContent = '得分: ' + score;
+          food = randomFood();
+          // 避免食物生成在蛇身上
+          while (snake.some(segment => segment.x === food.x && segment.y === food.y)) {
+            food = randomFood();
+          }
+        } else {
+          snake.pop();
+        }
+
+        draw();
+      }
+
+      function endGame() {
+        gameOver = true;
+        clearInterval(gameLoop);
+        gameOverDisplay.textContent = '游戏结束! 按空格键重新开始';
+      }
+
+      // 键盘控制
+      document.addEventListener('keydown', (e) => {
+        // 阻止方向键滚动页面
+        if (e.key.startsWith('Arrow') || e.key === ' ') {
+          e.preventDefault();
+        }
+
+        // 方向控制，禁止反向
+        if (!gameOver) {
+          switch (e.key) {
+            case 'ArrowUp':
+              if (dy === 0) { dx = 0; dy = -1; }
+              break;
+            case 'ArrowDown':
+              if (dy === 0) { dx = 0; dy = 1; }
+              break;
+            case 'ArrowLeft':
+              if (dx === 0) { dx = -1; dy = 0; }
+              break;
+            case 'ArrowRight':
+              if (dx === 0) { dx = 1; dy = 0; }
+              break;
+          }
+        }
+
+        // 空格重新开始
+        if (e.key === ' ' && gameOver) {
+          initGame();
+        }
+      });
+
+      // 启动游戏
+      initGame();
+      draw();
+    })();
+  </script>
+</body>
+</html>
