@@ -275,9 +275,7 @@ class ExecuteTool(CodingBaseTool):
             ".git",
             "git push --force",
             "curl ",
-            "| bash",
-            "pnpm build",
-            "npm run build",
+            "| bash"
         ]
         for fragment in blocked_fragments:
             if fragment in normalized:

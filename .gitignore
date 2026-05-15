@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 examples/demo_workspace/
 !examples/demo_workspace/plan.md
+node_modules/
+.agents
+skills-lock.json
