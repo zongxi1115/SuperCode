@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from urllib import error, request
 
 from .config import AgentLLMConfig
@@ -19,6 +20,84 @@ class OpenAICompatibleClient:
     def chat(self, system_prompt: str, user_prompt: str) -> str:
         """向模型发送一轮对话并返回文本内容。"""
 
+        try:
+            response_body = self._send_chat_request(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                stream=False,
+            )
+        except error.HTTPError as exc:
+            error_body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"模型接口请求失败: HTTP {exc.code} - {error_body}") from exc
+        except error.URLError as exc:
+            raise RuntimeError(f"模型接口连接失败: {exc.reason}") from exc
+
+        return self._parse_chat_response(response_body)
+
+    def chat_stream(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> str:
+        """以 OpenAI 兼容 SSE 方式流式获取文本。
+
+        如果对端不支持流式接口，会自动回退到普通请求，并把完整文本一次性回调出去。
+        """
+
+        try:
+            api_url = f"{self.config.base_url}/chat/completions"
+            http_request = self._build_request(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                stream=True,
+                api_url=api_url,
+            )
+            with request.urlopen(http_request, timeout=self.config.timeout) as response:
+                content_type = response.headers.get("Content-Type", "")
+                if "text/event-stream" not in content_type.lower():
+                    response_body = response.read().decode("utf-8")
+                    text = self._parse_chat_response(response_body)
+                    if text and on_delta is not None:
+                        on_delta(text)
+                    return text
+
+                parts: list[str] = []
+                for event_text in self._iter_sse_events(response):
+                    if event_text == "[DONE]":
+                        break
+
+                    payload = json.loads(event_text)
+                    delta_text = self._extract_stream_text(payload)
+                    if not delta_text:
+                        continue
+
+                    parts.append(delta_text)
+                    if on_delta is not None:
+                        on_delta(delta_text)
+
+                text = "".join(parts).strip()
+                if not text:
+                    raise RuntimeError("模型流式接口没有返回可用文本内容。")
+                return text
+        except error.HTTPError as exc:
+            error_body = exc.read().decode("utf-8", errors="replace")
+            if self._should_fallback_to_non_stream(exc.code, error_body):
+                text = self.chat(system_prompt=system_prompt, user_prompt=user_prompt)
+                if text and on_delta is not None:
+                    on_delta(text)
+                return text
+            raise RuntimeError(f"模型接口请求失败: HTTP {exc.code} - {error_body}") from exc
+        except error.URLError as exc:
+            raise RuntimeError(f"模型接口连接失败: {exc.reason}") from exc
+
+    def _build_request(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        stream: bool,
+        api_url: str,
+    ) -> request.Request:
         payload = {
             "model": self.config.model,
             "temperature": 0.2,
@@ -26,31 +105,133 @@ class OpenAICompatibleClient:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
+            "stream": stream,
         }
         body = json.dumps(payload).encode("utf-8")
-        api_url = f"{self.config.base_url}/chat/completions"
         headers = {
             "Authorization": f"Bearer {self.config.api_key}",
             "Content-Type": "application/json",
         }
-        http_request = request.Request(api_url, data=body, headers=headers, method="POST")
+        return request.Request(api_url, data=body, headers=headers, method="POST")
 
-        try:
-            with request.urlopen(http_request, timeout=self.config.timeout) as response:
-                response_body = response.read().decode("utf-8")
-        except error.HTTPError as exc:
-            error_body = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"模型接口请求失败: HTTP {exc.code} - {error_body}") from exc
-        except error.URLError as exc:
-            raise RuntimeError(f"模型接口连接失败: {exc.reason}") from exc
+    def _send_chat_request(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        stream: bool,
+    ) -> str:
+        api_url = f"{self.config.base_url}/chat/completions"
+        http_request = self._build_request(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            stream=stream,
+            api_url=api_url,
+        )
+        with request.urlopen(http_request, timeout=self.config.timeout) as response:
+            return response.read().decode("utf-8")
 
+    def _parse_chat_response(self, response_body: str) -> str:
         data = json.loads(response_body)
         choices = data.get("choices", [])
         if not choices:
             raise RuntimeError("模型接口返回中没有 `choices` 字段内容。")
 
         message = choices[0].get("message", {})
-        content = message.get("content")
-        if not isinstance(content, str) or not content.strip():
+        content = self._flatten_content(message.get("content"))
+        if not content.strip():
+            content = self._flatten_content(choices[0].get("text"))
+        if not content.strip():
             raise RuntimeError("模型接口没有返回可用文本内容。")
         return content.strip()
+
+    def _iter_sse_events(self, response: object):
+        current_lines: list[str] = []
+
+        for raw_line in response:  # type: ignore[assignment]
+            line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+            if not line:
+                if current_lines:
+                    data_text = "\n".join(
+                        line_part.removeprefix("data:").lstrip()
+                        for line_part in current_lines
+                        if line_part.startswith("data:")
+                    )
+                    if data_text:
+                        yield data_text
+                    current_lines = []
+                continue
+
+            if line.startswith(":"):
+                continue
+            current_lines.append(line)
+
+        if current_lines:
+            data_text = "\n".join(
+                line_part.removeprefix("data:").lstrip()
+                for line_part in current_lines
+                if line_part.startswith("data:")
+            )
+            if data_text:
+                yield data_text
+
+    def _extract_stream_text(self, payload: dict[str, object]) -> str:
+        choices = payload.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return ""
+
+        first_choice = choices[0]
+        if not isinstance(first_choice, dict):
+            return ""
+
+        delta = first_choice.get("delta")
+        if isinstance(delta, dict):
+            content = self._flatten_content(delta.get("content"))
+            if content:
+                return content
+
+        message = first_choice.get("message")
+        if isinstance(message, dict):
+            content = self._flatten_content(message.get("content"))
+            if content:
+                return content
+
+        return self._flatten_content(first_choice.get("text"))
+
+    def _flatten_content(self, value: object) -> str:
+        if isinstance(value, str):
+            return value
+        if not isinstance(value, list):
+            return ""
+
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, str):
+                parts.append(item)
+                continue
+            if not isinstance(item, dict):
+                continue
+
+            text = item.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+                continue
+
+            nested_text = item.get("content")
+            if isinstance(nested_text, str):
+                parts.append(nested_text)
+        return "".join(parts)
+
+    def _should_fallback_to_non_stream(self, status_code: int, error_body: str) -> bool:
+        if status_code not in {400, 404, 405, 415, 422, 501}:
+            return False
+
+        normalized = error_body.lower()
+        hints = [
+            "stream",
+            "sse",
+            "event-stream",
+            "not support",
+            "unsupported",
+            "invalid parameter",
+        ]
+        return any(hint in normalized for hint in hints)

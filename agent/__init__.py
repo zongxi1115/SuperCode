@@ -11,7 +11,7 @@
 """
 
 from .agent import CodingAgent
-from .brain import AgentBrain, BrainDecision
+from .brain import AgentBrain, BrainDecision, BrainStreamingUpdate
 from .config import AgentLLMConfig
 from .llm_brain import OpenAICompatibleBrain
 from .llm_client import OpenAICompatibleClient
@@ -35,6 +35,7 @@ __all__ = [
     "AgentState",
     "BaseTool",
     "BrainDecision",
+    "BrainStreamingUpdate",
     "ChatSession",
     "CodingAgent",
     "ConversationMessage",

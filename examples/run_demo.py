@@ -30,6 +30,10 @@ def render_live_event(event: AgentEvent) -> None:
         print(f"{prefix}思考> {event.thought}")
         return
 
+    if event.type == "final_answer_delta" and event.delta is not None:
+        print(event.delta, end="", flush=True)
+        return
+
     if event.type == "tool_call" and event.tool_call is not None:
         print(f"{prefix}工具调用> {event.tool_call.name} {event.tool_call.arguments}")
         return

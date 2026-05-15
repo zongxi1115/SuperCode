@@ -11,6 +11,7 @@ class AgentEvent:
     type: str
     step_index: int | None = None
     message: str = ""
+    delta: str | None = None
     thought: str | None = None
     tool_call: "ToolCall | None" = None
     tool_result: "ToolResult | None" = None

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 
-from .brain import AgentBrain, BrainDecision
+from .brain import AgentBrain, BrainDecision, BrainStreamingUpdate
 from .llm_client import OpenAICompatibleClient
 from .schema import AgentState, ConversationMessage, StepRecord
 
@@ -21,12 +22,35 @@ class OpenAICompatibleBrain(AgentBrain):
         self,
         state: AgentState,
         tool_descriptions: dict[str, str],
+        on_stream: Callable[[BrainStreamingUpdate], None] | None = None,
     ) -> BrainDecision:
         """调用真实模型，决定下一步动作。"""
 
         system_prompt = self._build_system_prompt(tool_descriptions)
         user_prompt = self._build_user_prompt(state)
-        raw_output = self.client.chat(system_prompt=system_prompt, user_prompt=user_prompt)
+        if on_stream is None:
+            raw_output = self.client.chat(system_prompt=system_prompt, user_prompt=user_prompt)
+        else:
+            raw_chunks: list[str] = []
+
+            def handle_delta(delta: str) -> None:
+                raw_chunks.append(delta)
+                current_output = "".join(raw_chunks)
+                on_stream(
+                    BrainStreamingUpdate(
+                        raw_output=current_output,
+                        action=self._extract_partial_string_field(current_output, "action"),
+                        thought=self._extract_partial_string_field(current_output, "thought"),
+                        tool_name=self._extract_partial_string_field(current_output, "tool_name"),
+                        final_answer=self._extract_partial_string_field(current_output, "final_answer"),
+                    )
+                )
+
+            raw_output = self.client.chat_stream(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                on_delta=handle_delta,
+            )
         payload = self._parse_json_output(raw_output)
         return self._to_decision(payload)
 
@@ -154,6 +178,83 @@ class OpenAICompatibleBrain(AgentBrain):
         if not isinstance(payload, dict):
             raise ValueError(f"模型返回的 JSON 根节点必须是对象: {raw_output}")
         return payload
+
+    def _extract_partial_string_field(self, text: str, field_name: str) -> str | None:
+        marker = f'"{field_name}"'
+        start = text.find(marker)
+        if start == -1:
+            return None
+
+        colon_index = text.find(":", start + len(marker))
+        if colon_index == -1:
+            return None
+
+        cursor = colon_index + 1
+        while cursor < len(text) and text[cursor].isspace():
+            cursor += 1
+        if cursor >= len(text) or text[cursor] != '"':
+            return None
+
+        cursor += 1
+        buffer: list[str] = []
+        escape = False
+        unicode_digits: str | None = None
+
+        while cursor < len(text):
+            char = text[cursor]
+
+            if unicode_digits is not None:
+                if char.lower() in "0123456789abcdef":
+                    unicode_digits += char
+                    if len(unicode_digits) == 4:
+                        buffer.append(chr(int(unicode_digits, 16)))
+                        unicode_digits = None
+                        escape = False
+                else:
+                    unicode_digits = None
+                    escape = False
+                cursor += 1
+                continue
+
+            if escape:
+                mapped = {
+                    '"': '"',
+                    "\\": "\\",
+                    "/": "/",
+                    "b": "\b",
+                    "f": "\f",
+                    "n": "\n",
+                    "r": "\r",
+                    "t": "\t",
+                }.get(char)
+                if mapped is not None:
+                    buffer.append(mapped)
+                    escape = False
+                    cursor += 1
+                    continue
+
+                if char == "u":
+                    unicode_digits = ""
+                    cursor += 1
+                    continue
+
+                buffer.append(char)
+                escape = False
+                cursor += 1
+                continue
+
+            if char == "\\":
+                escape = True
+                cursor += 1
+                continue
+
+            if char == '"':
+                return "".join(buffer)
+
+            buffer.append(char)
+            cursor += 1
+
+        return "".join(buffer) if buffer else None
 
     def _to_decision(self, payload: dict[str, object]) -> BrainDecision:
         """把 JSON 结构转换成框架里的决策对象。"""

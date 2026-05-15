@@ -1,196 +1,39 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { ScrollArea } from '@/components/ui/scroll-area';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { ConversationEmptyState } from '@/components/ai-elements/conversation';
-import { Message, MessageContent, MessageResponse } from '@/components/ai-elements/message';
-import { Plan, PlanHeader, PlanTitle } from '@/components/ai-elements/plan';
-import { Tool, ToolHeader, ToolContent, ToolInput, ToolOutput } from '@/components/ai-elements/tool';
-import { FileTree, FileTreeFile, FileTreeFolder } from '@/components/ai-elements/file-tree';
-import { CodeBlock } from '@/components/ai-elements/code-block';
-import { Textarea } from '@/components/ui/textarea';
-import { ChevronRight, Plus, Terminal as TerminalIcon, FileCode, PanelLeftClose, PanelLeftOpen, FolderOpen } from 'lucide-react';
-import { motion, AnimatePresence } from 'motion/react';
-
-type ChatMessage = {
-  id: string;
-  role: 'user' | 'assistant';
-  content: string;
-};
-
-type ToolCallRecord = {
-  id: string;
-  name: string;
-  arguments?: Record<string, unknown>;
-  output?: unknown;
-  errorMessage?: string;
-  error_message?: string | null;
-  success?: boolean;
-  state: 'running' | 'completed' | 'error';
-};
-
-type PlanStep = {
-  id: string;
-  title: string;
-  description: string;
-  status: string;
-};
-
-type FileTreeNode = {
-  path: string;
-  name: string;
-  type: 'folder' | 'file';
-  children?: FileTreeNode[];
-};
-
-type SessionPayload = {
-  sessionId: string;
-  mode: 'agent' | 'demo';
-  startupError?: string | null;
-  workspace: string;
-  workspaceOptions: WorkspaceOption[];
-  messages?: ChatMessage[];
-  toolCalls?: ToolCallRecord[];
-  thoughts?: string[];
-  terminalOutput?: string;
-  fileTree?: FileTreeNode[];
-  selectedFilePath?: string | null;
-  selectedFileContent?: string;
-  planSteps?: PlanStep[];
-};
-
-type WorkspaceOption = {
-  value: string;
-  label: string;
-};
-
-type DirectoryNode = {
-  path: string;
-  name: string;
-  children?: DirectoryNode[];
-  loaded?: boolean;
-};
-
-interface LastSession {
-  workspace: string;
-  timestamp: number;
-}
-
-const LAST_SESSION_KEY = 'supercode_last_session';
-
-function getLastSession(): LastSession | null {
-  try {
-    const raw = localStorage.getItem(LAST_SESSION_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as LastSession;
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
-function saveLastSession(workspace: string) {
-  try {
-    localStorage.setItem(LAST_SESSION_KEY, JSON.stringify({ workspace, timestamp: Date.now() }));
-  } catch {
-    // silent fail
-  }
-}
-
-function clearLastSession() {
-  try {
-    localStorage.removeItem(LAST_SESSION_KEY);
-  } catch {
-    // silent fail
-  }
-}
-
-function renderFileTreeNodes(nodes: FileTreeNode[]): JSX.Element[] {
-  return nodes.map((node) =>
-    node.type === 'folder' ? (
-      <FileTreeFolder key={node.path} path={node.path} name={node.name}>
-        {renderFileTreeNodes(node.children ?? [])}
-      </FileTreeFolder>
-    ) : (
-      <FileTreeFile key={node.path} path={node.path} name={node.name} />
-    )
-  );
-}
-
-function renderDirectoryNodes(nodes: DirectoryNode[]): JSX.Element[] {
-  return nodes.map((node) => (
-    <FileTreeFolder key={node.path} path={node.path} name={node.name}>
-      {renderDirectoryNodes(node.children ?? [])}
-    </FileTreeFolder>
-  ));
-}
-
-function workspaceOptionsToDirectoryNodes(options: WorkspaceOption[]): DirectoryNode[] {
-  return options.map((option) => ({
-    path: option.value,
-    name: option.label,
-    children: [],
-    loaded: false
-  }));
-}
-
-function updateDirectoryNodeTree(
-  nodes: DirectoryNode[],
-  targetPath: string,
-  updater: (node: DirectoryNode) => DirectoryNode
-): DirectoryNode[] {
-  return nodes.map((node) => {
-    if (node.path === targetPath) {
-      return updater(node);
-    }
-    if (!node.children?.length) {
-      return node;
-    }
-    return {
-      ...node,
-      children: updateDirectoryNodeTree(node.children, targetPath, updater)
-    };
-  });
-}
-
-function findDirectoryNode(nodes: DirectoryNode[], targetPath: string): DirectoryNode | null {
-  for (const node of nodes) {
-    if (node.path === targetPath) {
-      return node;
-    }
-    if (node.children?.length) {
-      const childMatch = findDirectoryNode(node.children, targetPath);
-      if (childMatch) {
-        return childMatch;
-      }
-    }
-  }
-  return null;
-}
-
-function getFileLanguage(path: string): string {
-  const ext = path.split('.').pop()?.toLowerCase() ?? '';
-  const langMap: Record<string, string> = {
-    tsx: 'tsx', jsx: 'jsx', ts: 'typescript', js: 'javascript',
-    py: 'python', json: 'json', css: 'css', scss: 'scss',
-    html: 'html', md: 'markdown', yaml: 'yaml', yml: 'yaml',
-    toml: 'toml', rs: 'rust', go: 'go', sql: 'sql', sh: 'bash',
-  };
-  return langMap[ext] ?? 'text';
-}
-
-const FILE_TREE_POLL_INTERVAL = 5000;
+import { ChatPanel } from '@/components/app/chat-panel';
+import { EditorPanel } from '@/components/app/editor-panel';
+import { ResizableHandle } from '@/components/app/resizable-handle';
+import { Sidebar } from '@/components/app/sidebar';
+import { TerminalPanel } from '@/components/app/terminal-panel';
+import { WorkspacePicker } from '@/components/app/workspace-picker';
+import type {
+  ChatMessage,
+  DirectoryNode,
+  FileTreeNode,
+  SessionContextPayload,
+  SessionHistoryItem,
+  SessionPayload,
+  TerminalSnapshotPayload,
+  WorkspaceOption,
+} from '@/lib/app-types';
+import {
+  FILE_TREE_POLL_INTERVAL,
+  clearLastSession,
+  findDirectoryNode,
+  getLastSession,
+  hydrateMessages,
+  saveLastSession,
+  updateDirectoryNodeTree,
+  workspaceOptionsToDirectoryNodes,
+} from '@/lib/app-utils';
 
 export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
-  const [thoughts, setThoughts] = useState<string[]>([]);
-  const [toolCalls, setToolCalls] = useState<ToolCallRecord[]>([]);
-  const [planSteps, setPlanSteps] = useState<PlanStep[]>([]);
   const [fileTree, setFileTree] = useState<FileTreeNode[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [terminalOutput, setTerminalOutput] = useState('');
+  const [terminalInput, setTerminalInput] = useState('');
+  const [isTerminalSubmitting, setIsTerminalSubmitting] = useState(false);
   const [selectedFileContent, setSelectedFileContent] = useState('');
   const [selectedFilePath, setSelectedFilePath] = useState('');
   const [backendMode, setBackendMode] = useState<'agent' | 'demo'>('demo');
@@ -201,6 +44,15 @@ export default function App() {
   const [isSessionBooting, setIsSessionBooting] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [isFileTreeCollapsed, setIsFileTreeCollapsed] = useState(false);
+  const [isContextOpen, setIsContextOpen] = useState(false);
+  const [isContextLoading, setIsContextLoading] = useState(false);
+  const [sessionContext, setSessionContext] = useState<SessionContextPayload | null>(null);
+  const [isTerminalOpen, setIsTerminalOpen] = useState(false);
+  const [chatPanelWidth, setChatPanelWidth] = useState(820);
+  const [sessionHistory, setSessionHistory] = useState<SessionHistoryItem[]>([]);
+  const [isHistoryLoading, setIsHistoryLoading] = useState(false);
+  const activeRequestRef = useRef<AbortController | null>(null);
 
   const [shouldRestoreSession] = useState(() => {
     const lastSession = getLastSession();
@@ -229,16 +81,48 @@ export default function App() {
 
   useEffect(() => {
     fetch('http://localhost:8000/api/workspaces')
-    .then(res => res.json())
-    .then((data: { workspaces: WorkspaceOption[] }) => {
-      const options = data.workspaces ?? [];
-      setDirectoryTree(workspaceOptionsToDirectoryNodes(options));
-      if (data.workspaces?.length && !initialWorkspace) {
-        setSelectedWorkspace(data.workspaces[0].value);
-      }
-    })
-    .catch(console.error);
+      .then((res) => res.json())
+      .then((data: { workspaces: WorkspaceOption[] }) => {
+        const options = data.workspaces ?? [];
+        setDirectoryTree(workspaceOptionsToDirectoryNodes(options));
+        if (data.workspaces?.length && !initialWorkspace) {
+          setSelectedWorkspace(data.workspaces[0].value);
+        }
+      })
+      .catch(console.error);
   }, [initialWorkspace]);
+
+  const applySessionPayload = useCallback((data: SessionPayload) => {
+    setSessionId(data.sessionId);
+    setBackendMode(data.mode);
+    setStartupError(data.startupError ?? null);
+    setSelectedWorkspace(data.workspace);
+    setMessages(hydrateMessages(data.messages ?? [], data.thoughts, data.toolCalls));
+    setFileTree(data.fileTree ?? []);
+    setTerminalOutput(data.terminalOutput ?? '');
+    setSelectedFilePath(data.selectedFilePath ?? '');
+    setSelectedFileContent(data.selectedFileContent ?? '');
+    setSessionContext(null);
+    setIsContextOpen(false);
+    saveLastSession(data.workspace);
+    setShowWorkspacePicker(false);
+  }, []);
+
+  const loadSessionHistory = useCallback(async () => {
+    setIsHistoryLoading(true);
+    try {
+      const res = await fetch('http://localhost:8000/api/sessions/history');
+      if (!res.ok) {
+        throw new Error('读取历史会话失败');
+      }
+      const data = await res.json();
+      setSessionHistory(data.sessions ?? []);
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setIsHistoryLoading(false);
+    }
+  }, []);
 
   const createSessionWithWorkspace = useCallback(async (workspace: string) => {
     setIsSessionBooting(true);
@@ -255,27 +139,15 @@ export default function App() {
         throw new Error(errorText || '创建会话失败');
       }
       const data: SessionPayload = await res.json();
-      setSessionId(data.sessionId);
-      setBackendMode(data.mode);
-      setStartupError(data.startupError ?? null);
-      setSelectedWorkspace(data.workspace);
-      if (data.messages) setMessages(data.messages);
-      if (data.toolCalls) setToolCalls(data.toolCalls);
-      if (data.thoughts) setThoughts(data.thoughts);
-      if (data.planSteps) setPlanSteps(data.planSteps);
-      if (data.fileTree) setFileTree(data.fileTree);
-      if (data.terminalOutput) setTerminalOutput(data.terminalOutput);
-      if (data.selectedFilePath) setSelectedFilePath(data.selectedFilePath);
-      if (data.selectedFileContent) setSelectedFileContent(data.selectedFileContent);
-      saveLastSession(data.workspace);
-      setShowWorkspacePicker(false);
+      applySessionPayload(data);
+      await loadSessionHistory();
     } catch (error) {
       console.error(error);
       setSessionError(error instanceof Error ? error.message : '创建会话失败');
     } finally {
       setIsSessionBooting(false);
     }
-  }, []);
+  }, [applySessionPayload, loadSessionHistory]);
 
   const hasRestoredRef = useRef(false);
 
@@ -289,6 +161,10 @@ export default function App() {
     }, 0);
     return () => clearTimeout(id);
   }, [shouldRestoreSession, initialWorkspace, createSessionWithWorkspace]);
+
+  useEffect(() => {
+    void loadSessionHistory();
+  }, [loadSessionHistory]);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -308,6 +184,27 @@ export default function App() {
     };
 
     const intervalId = setInterval(poll, FILE_TREE_POLL_INTERVAL);
+    return () => clearInterval(intervalId);
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (!sessionId) return;
+
+    const pollTerminal = async () => {
+      try {
+        const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/terminal`);
+        if (!res.ok) {
+          return;
+        }
+        const data: TerminalSnapshotPayload = await res.json();
+        setTerminalOutput(data.output ?? '');
+      } catch {
+        // silent fail for polling
+      }
+    };
+
+    void pollTerminal();
+    const intervalId = setInterval(pollTerminal, 1000);
     return () => clearInterval(intervalId);
   }, [sessionId]);
 
@@ -368,19 +265,169 @@ export default function App() {
     }
   };
 
+  const loadSessionContext = useCallback(async () => {
+    if (!sessionId) return;
+
+    setIsContextLoading(true);
+    try {
+      const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/context`);
+      if (!res.ok) {
+        throw new Error('读取上下文失败');
+      }
+      const data: SessionContextPayload = await res.json();
+      setSessionContext(data);
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setIsContextLoading(false);
+    }
+  }, [sessionId]);
+
+  const sendTerminalCommand = useCallback(async () => {
+    if (!sessionId || !terminalInput.trim() || isTerminalSubmitting) {
+      return;
+    }
+
+    const command = terminalInput.trim();
+    setTerminalInput('');
+    setIsTerminalSubmitting(true);
+    try {
+      const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/terminal/input`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command }),
+      });
+      if (!res.ok) {
+        throw new Error('终端命令发送失败');
+      }
+      const data: TerminalSnapshotPayload = await res.json();
+      setTerminalOutput(data.output ?? '');
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setIsTerminalSubmitting(false);
+    }
+  }, [isTerminalSubmitting, sessionId, terminalInput]);
+
+  const clearTerminal = useCallback(async () => {
+    if (!sessionId || isTerminalSubmitting) {
+      return;
+    }
+
+    setIsTerminalSubmitting(true);
+    try {
+      const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/terminal/clear`, {
+        method: 'POST',
+      });
+      if (!res.ok) {
+        throw new Error('终端清空失败');
+      }
+      const data: TerminalSnapshotPayload = await res.json();
+      setTerminalOutput(data.output ?? '');
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setIsTerminalSubmitting(false);
+    }
+  }, [isTerminalSubmitting, sessionId]);
+
+  const handleContextOpenChange = useCallback(
+    (open: boolean) => {
+      setIsContextOpen(open);
+      if (open) {
+        void loadSessionContext();
+      }
+    },
+    [loadSessionContext]
+  );
+
+  const restoreSession = useCallback(
+    async (targetSessionId: string) => {
+      if (!targetSessionId || targetSessionId === sessionId) {
+        return;
+      }
+
+      setIsSessionBooting(true);
+      setSessionError(null);
+      try {
+        const res = await fetch(`http://localhost:8000/api/sessions/${targetSessionId}`);
+        if (!res.ok) {
+          throw new Error('恢复历史会话失败');
+        }
+        const data: SessionPayload = await res.json();
+        applySessionPayload(data);
+      } catch (error) {
+        console.error(error);
+        setSessionError(error instanceof Error ? error.message : '恢复历史会话失败');
+      } finally {
+        setIsSessionBooting(false);
+      }
+    },
+    [applySessionPayload, sessionId]
+  );
+
+  const handleNewSession = useCallback(() => {
+    void createSessionWithWorkspace(selectedWorkspace);
+  }, [createSessionWithWorkspace, selectedWorkspace]);
+
+  const handleDeleteHistory = useCallback(
+    async (targetSessionId: string) => {
+      try {
+        const res = await fetch(`http://localhost:8000/api/sessions/${targetSessionId}`, {
+          method: 'DELETE',
+        });
+        if (!res.ok) {
+          throw new Error('删除历史会话失败');
+        }
+
+        const remainingItems = sessionHistory.filter((item) => item.sessionId !== targetSessionId);
+        setSessionHistory(remainingItems);
+
+        if (targetSessionId !== sessionId) {
+          return;
+        }
+
+        const nextItem = remainingItems[0];
+        if (nextItem) {
+          await restoreSession(nextItem.sessionId);
+          return;
+        }
+
+        setSessionId(null);
+        setMessages([]);
+        setFileTree([]);
+        setTerminalOutput('');
+        setSelectedFileContent('');
+        setSelectedFilePath('');
+        setSessionContext(null);
+        setIsContextOpen(false);
+        setShowWorkspacePicker(true);
+        clearLastSession();
+      } catch (error) {
+        console.error(error);
+        setSessionError(error instanceof Error ? error.message : '删除历史会话失败');
+      } finally {
+        void loadSessionHistory();
+      }
+    },
+    [loadSessionHistory, restoreSession, sessionHistory, sessionId]
+  );
+
   const sendMessage = async (msg: string) => {
     if (!msg.trim() || !sessionId || isLoading) return;
-    
+
     setInput('');
     setIsLoading(true);
-    
-    setMessages(prev => [...prev, { id: Math.random().toString(), role: 'user', content: msg }]);
+    const abortController = new AbortController();
+    activeRequestRef.current = abortController;
+    setMessages((prev) => [...prev, { id: Math.random().toString(), role: 'user', content: msg }]);
 
     try {
       const res = await fetch('http://localhost:8000/api/chat/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: sessionId, message: msg })
+        body: JSON.stringify({ session_id: sessionId, message: msg }),
+        signal: abortController.signal,
       });
 
       if (!res.body) return;
@@ -388,57 +435,108 @@ export default function App() {
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
-      let incomingContent = '';
       let currentAssistantId = '';
+
+      const updateAssistantMessage = (
+        assistantId: string,
+        updater: (message: ChatMessage) => ChatMessage
+      ) => {
+        setMessages((prev) => {
+          let found = false;
+          const next = prev.map((message) => {
+            if (message.id === assistantId && message.role === 'assistant') {
+              found = true;
+              return updater(message);
+            }
+            return message;
+          });
+
+          if (found) {
+            return next;
+          }
+
+          return [
+            ...next,
+            updater({ id: assistantId, role: 'assistant', content: '', thoughts: '', toolCalls: [] })
+          ];
+        });
+      };
+
       const processEvent = async (eventStr: string) => {
         if (!eventStr.startsWith('data: ')) return;
 
         try {
           const data = JSON.parse(eventStr.replace('data: ', ''));
 
-          if (data.type === 'assistant_delta') {
+          if (data.type === 'assistant_started') {
             currentAssistantId = data.payload.id || currentAssistantId || Math.random().toString();
-            incomingContent += data.payload.delta;
-            setMessages(prev => {
-              const msgs = [...prev];
-              const last = msgs[msgs.length - 1];
-              if (last && last.role === 'assistant' && last.id === currentAssistantId) {
-                last.content = incomingContent;
-                return msgs;
-              }
-              return [...msgs, { id: currentAssistantId, role: 'assistant', content: incomingContent }];
-            });
+            updateAssistantMessage(currentAssistantId, (message) => message);
+          } else if (data.type === 'assistant_delta') {
+            currentAssistantId = data.payload.id || currentAssistantId || Math.random().toString();
+            updateAssistantMessage(currentAssistantId, (message) => ({
+              ...message,
+              content: `${message.content}${data.payload.delta ?? ''}`
+            }));
           } else if (data.type === 'assistant_reset') {
             currentAssistantId = data.payload.id || currentAssistantId || Math.random().toString();
-            incomingContent = '';
-            setMessages(prev => prev.map((msg) =>
-              msg.id === currentAssistantId && msg.role === 'assistant'
-                ? { ...msg, content: '' }
-                : msg
-            ));
+            updateAssistantMessage(currentAssistantId, (message) => ({
+              ...message,
+              content: ''
+            }));
+          } else if (data.type === 'thought_delta') {
+            const assistantId = data.payload.assistant_id || currentAssistantId;
+            if (!assistantId) return;
+            currentAssistantId = assistantId;
+            updateAssistantMessage(assistantId, (message) => ({
+              ...message,
+              thoughts: `${message.thoughts ?? ''}${data.payload.delta ?? ''}`
+            }));
           } else if (data.type === 'thought') {
-            setThoughts(prev => [...prev, data.payload.thought]);
+            const assistantId = data.payload.assistant_id || currentAssistantId;
+            if (!assistantId) return;
+            currentAssistantId = assistantId;
+            updateAssistantMessage(assistantId, (message) => {
+              const nextThought = String(data.payload.thought ?? '');
+              if (!nextThought || message.thoughts?.trim()) {
+                return message;
+              }
+              return {
+                ...message,
+                thoughts: nextThought
+              };
+            });
           } else if (data.type === 'tool_call') {
-            setToolCalls(prev => [...prev, { ...data.payload, state: 'running' }]);
+            const assistantId = data.payload.assistant_id || currentAssistantId;
+            if (!assistantId) return;
+            currentAssistantId = assistantId;
+            updateAssistantMessage(assistantId, (message) => ({
+              ...message,
+              toolCalls: [...(message.toolCalls ?? []), { ...data.payload, state: 'running' }]
+            }));
             if (data.payload.name === 'read_file' && typeof data.payload.arguments?.filename === 'string') {
               void loadFile(data.payload.arguments.filename);
             }
           } else if (data.type === 'tool_result') {
             if (data.payload.name === 'execute' || data.payload.name === 'excecute') {
               setTerminalOutput(data.payload.output);
+              setIsTerminalOpen(true);
             }
-            setToolCalls(prev => prev.map(tc =>
-              tc.id === data.payload.id
-                ? {
-                    ...tc,
-                    ...data.payload,
-                    errorMessage: data.payload.error_message ?? tc.errorMessage,
-                    state: data.payload.success ? 'completed' : 'error'
-                  }
-                : tc
-            ));
-          } else if (data.type === 'plan_steps') {
-            setPlanSteps(data.payload.steps);
+            const assistantId = data.payload.assistant_id || currentAssistantId;
+            if (!assistantId) return;
+            currentAssistantId = assistantId;
+            updateAssistantMessage(assistantId, (message) => ({
+              ...message,
+              toolCalls: (message.toolCalls ?? []).map((tc) =>
+                tc.id === data.payload.id
+                  ? {
+                      ...tc,
+                      ...data.payload,
+                      errorMessage: data.payload.error_message ?? tc.errorMessage,
+                      state: data.payload.success ? 'completed' : 'error'
+                    }
+                  : tc
+              )
+            }));
           }
         } catch (error) {
           console.error('Failed to parse SSE event', error, eventStr);
@@ -455,7 +553,7 @@ export default function App() {
         buffer += decoder.decode(value, { stream: true });
         const events = buffer.split('\n\n');
         buffer = events.pop() ?? '';
-        
+
         for (const eventStr of events) {
           await processEvent(eventStr);
         }
@@ -465,9 +563,19 @@ export default function App() {
         await processEvent(buffer);
       }
     } catch (e) {
+      if (e instanceof DOMException && e.name === 'AbortError') {
+        return;
+      }
       console.error(e);
     } finally {
+      if (activeRequestRef.current === abortController) {
+        activeRequestRef.current = null;
+      }
       setIsLoading(false);
+      if (isContextOpen) {
+        void loadSessionContext();
+      }
+      void loadSessionHistory();
     }
   };
 
@@ -478,17 +586,24 @@ export default function App() {
     }
   };
 
+  const stopMessage = useCallback(() => {
+    activeRequestRef.current?.abort();
+    activeRequestRef.current = null;
+    setIsLoading(false);
+  }, []);
+
   const toggleSidebar = useCallback(() => {
-    setIsSidebarCollapsed(prev => !prev);
+    setIsSidebarCollapsed((prev) => !prev);
+  }, []);
+
+  const toggleFileTree = useCallback(() => {
+    setIsFileTreeCollapsed((prev) => !prev);
   }, []);
 
   const handleSelectOtherProject = useCallback(() => {
     clearLastSession();
     setSessionId(null);
     setMessages([]);
-    setThoughts([]);
-    setToolCalls([]);
-    setPlanSteps([]);
     setFileTree([]);
     setTerminalOutput('');
     setSelectedFileContent('');
@@ -496,309 +611,87 @@ export default function App() {
     setBackendMode('demo');
     setStartupError(null);
     setSessionError(null);
+    setSessionContext(null);
+    setIsContextOpen(false);
     setShowWorkspacePicker(true);
   }, []);
 
-  const sidebarWidth = isSidebarCollapsed ? 48 : 256;
-
   if (showWorkspacePicker || !sessionId) {
-    if (shouldRestoreSession) {
-      return (
-        <div className="min-h-screen bg-background text-foreground flex items-center justify-center p-6">
-          <div className="w-full max-w-xl rounded-2xl border bg-card p-6 shadow-sm space-y-5">
-            <div className="space-y-2">
-              <div className="text-sm font-medium text-muted-foreground">正在恢复上次的工作区</div>
-              <h1 className="text-2xl font-semibold">加载中...</h1>
-              <p className="text-sm text-muted-foreground">
-                工作区：{customWorkspace}
-              </p>
-            </div>
-            <div className="flex justify-center py-8">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
-            </div>
-          </div>
-        </div>
-      );
-    }
-
     return (
-      <div className="min-h-screen bg-background text-foreground flex items-center justify-center p-6">
-        <div className="w-full max-w-xl rounded-2xl border bg-card p-6 shadow-sm space-y-5">
-          <div className="space-y-2">
-            <div className="text-sm font-medium text-muted-foreground">初始化工作区</div>
-            <h1 className="text-2xl font-semibold">先打开一个工作区</h1>
-            <p className="text-sm text-muted-foreground">
-              选定后，文件树、代码预览和后端 agent 都会围绕这个目录工作。
-            </p>
-          </div>
-
-          <div className="space-y-3">
-            <label className="text-sm font-medium">树形选择目录</label>
-            <ScrollArea className="h-72 rounded-lg border">
-              <div className="p-3">
-                <FileTree
-                  expanded={directoryExpanded}
-                  onExpandedChange={handleDirectoryExpandedChange}
-                  selectedPath={selectedWorkspace}
-                  onSelect={(path) => {
-                    setSelectedWorkspace(path);
-                    setCustomWorkspace('');
-                  }}
-                >
-                  {renderDirectoryNodes(directoryTree)}
-                </FileTree>
-              </div>
-            </ScrollArea>
-            <p className="text-xs text-muted-foreground">
-              点击目录名选中工作区，点左侧箭头继续展开下一层。
-            </p>
-          </div>
-
-          <div className="space-y-3">
-            <label className="text-sm font-medium">或直接输入系统绝对路径</label>
-            <Input
-              value={customWorkspace}
-              onChange={(e) => setCustomWorkspace(e.target.value)}
-              placeholder="例如 D:\\vibe_projs\\SuperCode 或 C:\\Users\\32980\\Desktop"
-            />
-            <p className="text-xs text-muted-foreground">
-              留空时使用上面的选项；输入系统绝对路径时会覆盖下拉选择。
-            </p>
-          </div>
-
-          {sessionError && (
-            <div className="rounded border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-              {sessionError}
-            </div>
-          )}
-
-          <Button className="w-full" onClick={createSession} disabled={isSessionBooting}>
-            {isSessionBooting ? '正在打开工作区...' : '打开工作区'}
-          </Button>
-        </div>
-      </div>
+      <WorkspacePicker
+        shouldRestoreSession={shouldRestoreSession}
+        customWorkspace={customWorkspace}
+        sessionError={sessionError}
+        isSessionBooting={isSessionBooting}
+        selectedWorkspace={selectedWorkspace}
+        directoryTree={directoryTree}
+        directoryExpanded={directoryExpanded}
+        onDirectoryExpandedChange={handleDirectoryExpandedChange}
+        onCustomWorkspaceChange={setCustomWorkspace}
+        onSelectWorkspace={(path) => {
+          setSelectedWorkspace(path);
+          setCustomWorkspace('');
+        }}
+        onCreateSession={createSession}
+      />
     );
   }
 
   return (
     <div className="flex h-screen bg-background text-foreground text-sm font-sans w-full overflow-hidden">
-      {/* 1. Left Sidebar - Collapsible with motion */}
-      <motion.div
-        animate={{ width: sidebarWidth }}
-        transition={{ duration: 0.25, ease: [0.25, 0.1, 0.25, 1] }}
-        className="border-r bg-muted/20 flex flex-col flex-shrink-0 overflow-hidden"
-      >
-        {/* Toggle button - always visible */}
-        <div className="flex items-center justify-between p-2 border-b">
-          <AnimatePresence mode="wait">
-            {!isSidebarCollapsed && (
-              <motion.div
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.15 }}
-                className="flex-1 space-y-2"
-              >
-                <Button variant="default" className="w-full justify-start gap-2" onClick={() => window.location.reload()}>
-                  <Plus className="w-4 h-4" /> 新建任务
-                </Button>
-                <Button variant="outline" className="w-full justify-start gap-2" onClick={handleSelectOtherProject}>
-                  <FolderOpen className="w-4 h-4" /> 选择其他项目
-                </Button>
-              </motion.div>
-            )}
-          </AnimatePresence>
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={toggleSidebar}
-            className="shrink-0 h-8 w-8"
-          >
-            {isSidebarCollapsed ? <PanelLeftOpen className="w-4 h-4" /> : <PanelLeftClose className="w-4 h-4" />}
-          </Button>
-        </div>
-
-        <AnimatePresence mode="wait">
-          {!isSidebarCollapsed && (
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.2 }}
-              className="flex-1 flex flex-col min-h-0"
-            >
-              <div className="px-4 pt-3">
-                <div className="text-xs text-muted-foreground">
-                  当前模式：{backendMode === 'agent' ? '真实 Agent' : 'Demo 回退'}
-                </div>
-                <div className="mt-1 text-xs text-muted-foreground truncate" title={selectedWorkspace}>
-                  工作区：{selectedWorkspace}
-                </div>
-                {startupError && (
-                  <div className="mt-2 rounded border border-amber-300 bg-amber-50 px-2 py-1 text-[11px] text-amber-900">
-                    启动提示：{startupError}
-                  </div>
-                )}
-              </div>
-              <ScrollArea className="flex-1">
-                <div className="p-4">
-                  <h3 className="text-xs font-semibold text-muted-foreground mb-4">项目结构</h3>
-                  {fileTree.length > 0 && (
-                    <div>
-                      <FileTree selectedPath={selectedFilePath} onSelect={loadFile}>
-                        {renderFileTreeNodes(fileTree)}
-                      </FileTree>
-                    </div>
-                  )}
-                  {!fileTree.length && (
-                    <div className="text-muted-foreground text-center py-4">暂无文件结构</div>
-                  )}
-                </div>
-              </ScrollArea>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        {isSidebarCollapsed && (
-          <div className="flex-1 flex flex-col items-center pt-3 gap-2">
-            <div className="w-6 h-6 rounded bg-muted/80 flex items-center justify-center" title={selectedWorkspace}>
-              <FileCode className="w-3.5 h-3.5 text-muted-foreground" />
-            </div>
-          </div>
-        )}
-      </motion.div>
-
-      {/* 2. Chat Panel */}
-      <div className="flex-1 flex flex-col min-w-0 border-r relative">
-        <div className="flex-1 overflow-auto p-4 space-y-4">
-           {messages.length === 0 ? (
-             <ConversationEmptyState title="智能代码助手" description="描述您的需求，我将为您生成代码并执行" />
-           ) : (
-              messages.map((msg, idx) => (
-                <Message key={msg.id || idx} from={msg.role}>
-                  <MessageContent>
-                    <MessageResponse>{msg.content}</MessageResponse>
-                  </MessageContent>
-                </Message>
-             ))
-           )}
-        </div>
-        
-        <div className="p-4 bg-background">
-          <div className="flex bg-muted/30 border rounded-lg p-2 gap-2 shadow-sm focus-within:ring-1 focus-within:ring-ring">
-             <Textarea 
-               value={input}
-               onChange={(e) => setInput(e.target.value)}
-               onKeyDown={handleKeyDown}
-               placeholder="告诉我想实现什么，或粘贴代码、截图、提问..."
-               className="min-h-[44px] resize-none border-0 shadow-none focus-visible:ring-0 bg-transparent flex-1 py-1.5"
-               rows={1}
-             />
-             <Button size="icon" onClick={() => sendMessage(input)} disabled={isLoading}>
-                <ChevronRight className="w-4 h-4" />
-             </Button>
-          </div>
-        </div>
+      <Sidebar
+        currentSessionId={sessionId}
+        historyItems={sessionHistory}
+        isHistoryLoading={isHistoryLoading}
+        isCollapsed={isSidebarCollapsed}
+        selectedWorkspace={selectedWorkspace}
+        backendMode={backendMode}
+        startupError={startupError}
+        onNewSession={handleNewSession}
+        onSelectHistory={(targetSessionId) => void restoreSession(targetSessionId)}
+        onDeleteHistory={(targetSessionId) => void handleDeleteHistory(targetSessionId)}
+        onToggle={toggleSidebar}
+        onSelectOtherProject={handleSelectOtherProject}
+      />
+      <div style={{ width: chatPanelWidth }} className="flex-shrink-0">
+        <ChatPanel
+        contextData={sessionContext}
+        isContextLoading={isContextLoading}
+        isContextOpen={isContextOpen}
+        messages={messages}
+        input={input}
+        isLoading={isLoading}
+        onContextOpenChange={handleContextOpenChange}
+        onInputChange={setInput}
+        onKeyDown={handleKeyDown}
+        onSendMessage={() => void sendMessage(input)}
+        onStopMessage={stopMessage}
+        />
       </div>
-
-      {/* 3. Editor & Terminal Column */}
-      <div className="w-1/3 flex flex-col min-w-0 border-r">
-         <Tabs defaultValue="editor" className="flex-1 flex flex-col h-full w-full">
-           <div className="border-b px-2 flex items-center shrink-0">
-             <TabsList className="h-10 bg-transparent">
-               <TabsTrigger value="editor" className="data-[state=active]:bg-muted/50 rounded-none border-b-2 border-transparent data-[state=active]:border-primary shadow-none">代码预览</TabsTrigger>
-               <TabsTrigger value="terminal" className="data-[state=active]:bg-muted/50 rounded-none border-b-2 border-transparent data-[state=active]:border-primary shadow-none">终端 & 日志</TabsTrigger>
-             </TabsList>
-           </div>
-           
-           <TabsContent value="editor" className="flex-1 p-0 m-0 overflow-hidden relative">
-             {selectedFilePath && selectedFileContent ? (
-               <div className="absolute inset-0 p-4 overflow-auto">
-                 <div className="flex items-center gap-2 mb-2 text-muted-foreground font-mono text-xs">
-                   <FileCode className="w-4 h-4" /> {selectedFilePath}
-                 </div>
-                 <CodeBlock language={getFileLanguage(selectedFilePath) as 'tsx'} className="w-full text-sm">
-                   {selectedFileContent}
-                 </CodeBlock>
-               </div>
-             ) : (
-               <div className="absolute inset-0 flex items-center justify-center text-muted-foreground">
-                 <div className="text-center space-y-2">
-                   <FileCode className="w-10 h-10 mx-auto opacity-30" />
-                   <p className="text-xs">选择左侧文件以预览代码</p>
-                 </div>
-               </div>
-             )}
-           </TabsContent>
-           
-           <TabsContent value="terminal" className="flex-1 p-0 m-0 overflow-auto bg-black text-white p-4 font-mono text-xs">
-              <div className="flex items-center gap-2 mb-4 text-gray-400">
-                 <TerminalIcon className="w-4 h-4" /> 终端输出
-              </div>
-              <pre className="whitespace-pre-wrap">{terminalOutput || '> 等待命令执行...'}</pre>
-           </TabsContent>
-         </Tabs>
-      </div>
-
-      {/* 4. Right Sidebar (Plan & Tools) */}
-      <div className="w-80 bg-muted/10 flex flex-col flex-shrink-0">
-         <ScrollArea className="flex-1 p-4">
-            <h3 className="font-semibold text-sm mb-4 flex items-center gap-2">
-               🎯 实现计划
-            </h3>
-            <Plan className="mb-8">
-               <PlanHeader><PlanTitle>执行步骤</PlanTitle></PlanHeader>
-               {planSteps.map(step => (
-                 <div key={step.id} className="p-4 border-t first:border-0 flex flex-col gap-2">
-                   <div className="flex items-center gap-2">
-                     <div className="w-6 h-6 rounded-full border flex items-center justify-center text-xs font-mono shrink-0 font-bold bg-background">
-                       {step.id}
-                     </div>
-                     <span className="font-semibold text-sm">{step.title}</span>
-                     <span className="ml-auto text-xs text-muted-foreground">{step.status}</span>
-                   </div>
-                   <div className="text-xs text-muted-foreground pl-8">{step.description}</div>
-                 </div>
-               ))}
-               {!planSteps.length && <div className="text-muted-foreground text-xs p-4">等待生成计划...</div>}
-            </Plan>
-
-            <h3 className="font-semibold text-sm mb-4 mt-8 flex items-center gap-2">
-               🧠 思维链与检索链
-            </h3>
-            <div className="space-y-4">
-              {thoughts.map((t, idx) => (
-                <div key={idx} className="bg-muted px-3 py-2 rounded-md text-xs text-muted-foreground border">
-                   {t}
-                </div>
-              ))}
-            </div>
-
-            <h3 className="font-semibold text-sm mb-4 mt-8 flex items-center gap-2">
-               🛠️ 工具调用链
-            </h3>
-            <div className="space-y-3">
-               {toolCalls.map(tc => {
-                 const errorText = tc.state === 'error' ? String(tc.errorMessage || tc.error_message || tc.output) : undefined;
-                 const output = tc.state === 'completed' ? tc.output : undefined;
-                 const mappedState = tc.state === 'completed' ? 'output-available' : 
-                                    tc.state === 'error' ? 'output-error' : 
-                                    tc.state === 'running' ? 'input-available' : 'input-streaming';
-                 return (
-                   <Tool key={tc.id} className="text-xs bg-background rounded border">
-                     <ToolHeader type="dynamic-tool" toolName={tc.name} state={mappedState} />
-                     <ToolContent>
-                       <ToolInput input={tc.arguments || {}} />
-                       {(output || errorText) && (
-                         <ToolOutput output={output} errorText={errorText} />
-                       )}
-                     </ToolContent>
-                   </Tool>
-                 );
-               })}
-               {!toolCalls.length && <div className="text-muted-foreground text-xs">暂无调用记录...</div>}
-            </div>
-         </ScrollArea>
+      <ResizableHandle
+        side="left"
+        onResize={(delta) => setChatPanelWidth((prev) => Math.min(Math.max(prev + delta, 400), 1000))}
+      />
+      <div className="flex-1 flex flex-col min-w-0">
+        <EditorPanel
+          fileTree={fileTree}
+          selectedFilePath={selectedFilePath}
+          selectedFileContent={selectedFileContent}
+          isFileTreeCollapsed={isFileTreeCollapsed}
+          onToggleFileTree={toggleFileTree}
+          onLoadFile={loadFile}
+          sessionId={sessionId}
+        />
+        <TerminalPanel
+          output={terminalOutput}
+          input={terminalInput}
+          isOpen={isTerminalOpen}
+          isSubmitting={isTerminalSubmitting}
+          onInputChange={setTerminalInput}
+          onSubmit={() => void sendTerminalCommand()}
+          onToggle={() => setIsTerminalOpen((prev) => !prev)}
+          onClear={() => void clearTerminal()}
+        />
       </div>
     </div>
   );

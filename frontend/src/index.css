@@ -119,3 +119,26 @@
   --sidebar-border: oklch(0.269 0 0);
   --sidebar-ring: oklch(0.439 0 0);
 }
+
+[data-streamdown="code-block"] {
+  position: relative;
+  gap: 0.5rem;
+}
+
+[data-streamdown="code-block-header"] {
+  min-height: 1.75rem;
+}
+
+[data-streamdown="code-block"] > div:has(> [data-streamdown="code-block-actions"]) {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  z-index: 10;
+  margin-top: 0;
+  height: auto;
+  pointer-events: none;
+}
+
+[data-streamdown="code-block-actions"] {
+  pointer-events: auto;
+}

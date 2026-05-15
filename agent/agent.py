@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 
-from .brain import AgentBrain
+from .brain import AgentBrain, BrainStreamingUpdate
 from .schema import AgentEvent, AgentResponse, AgentState, StepRecord, ToolCall, ToolResult
 from .tools import BaseTool, ToolContext
 
@@ -77,7 +77,60 @@ class CodingAgent:
         )
 
         for index in range(1, self.max_steps + 1):
-            decision = self.brain.decide(state=state, tool_descriptions=tool_descriptions)
+            streamed_final_answer = ""
+            streamed_thought = ""
+
+            def on_brain_stream(update: BrainStreamingUpdate) -> None:
+                nonlocal streamed_final_answer, streamed_thought
+
+                if update.thought:
+                    if update.thought.startswith(streamed_thought):
+                        thought_delta = update.thought[len(streamed_thought) :]
+                    else:
+                        thought_delta = update.thought
+
+                    if thought_delta:
+                        streamed_thought = update.thought
+                        self._emit_event(
+                            on_event,
+                            AgentEvent(
+                                type="thought_delta",
+                                step_index=index,
+                                message=f"第 {index} 步正在流式输出思考。",
+                                thought=update.thought,
+                                delta=thought_delta,
+                            ),
+                        )
+
+                if update.action != "final" or update.final_answer is None:
+                    return
+
+                if update.final_answer.startswith(streamed_final_answer):
+                    delta = update.final_answer[len(streamed_final_answer) :]
+                else:
+                    delta = update.final_answer
+
+                if not delta:
+                    return
+
+                streamed_final_answer = update.final_answer
+                self._emit_event(
+                    on_event,
+                    AgentEvent(
+                        type="final_answer_delta",
+                        step_index=index,
+                        message=f"第 {index} 步正在流式输出最终答复。",
+                        thought=update.thought,
+                        final_answer=update.final_answer,
+                        delta=delta,
+                    ),
+                )
+
+            decision = self.brain.decide(
+                state=state,
+                tool_descriptions=tool_descriptions,
+                on_stream=on_brain_stream,
+            )
             self._emit_event(
                 on_event,
                 AgentEvent(

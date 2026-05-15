@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from .schema import AgentState
 
@@ -45,6 +45,17 @@ class BrainDecision:
         return cls(action="final", thought=thought, final_answer=final_answer)
 
 
+@dataclass(slots=True)
+class BrainStreamingUpdate:
+    """记录 brain 在流式生成决策时的增量状态。"""
+
+    raw_output: str
+    action: str | None = None
+    thought: str | None = None
+    tool_name: str | None = None
+    final_answer: str | None = None
+
+
 class AgentBrain(ABC):
     """智能体决策接口。
 
@@ -58,6 +69,6 @@ class AgentBrain(ABC):
         self,
         state: AgentState,
         tool_descriptions: dict[str, str],
+        on_stream: Callable[[BrainStreamingUpdate], None] | None = None,
     ) -> BrainDecision:
         """根据当前状态决定下一步动作。"""
-
