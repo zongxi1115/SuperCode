@@ -759,11 +759,56 @@ async def run_agent_stream(
                 },
             )
 
-    response = await asyncio.to_thread(
-        session.chat_session.ask,
-        user_message,
-        on_event,
-    )
+    try:
+        response = await asyncio.to_thread(
+            session.chat_session.ask,
+            user_message,
+            on_event,
+        )
+    except Exception as exc:  # noqa: BLE001 - 流式接口需要兜底，避免 SSE 半路中断
+        finalize_plan_steps(session)
+        await queue.put(
+            {
+                "type": "plan_steps",
+                "payload": {
+                    "steps": session.plan_steps,
+                },
+            }
+        )
+
+        failure_message = (
+            f"\n\n后端处理在流式阶段失败：{exc}"
+            if assistant_stream_started
+            else f"后端处理失败：{exc}"
+        )
+        if not assistant_stream_started:
+            await queue.put({"type": "assistant_reset", "payload": {"id": assistant_id}})
+
+        for chunk in chunk_text(failure_message):
+            if not chunk:
+                continue
+            await queue.put(
+                {
+                    "type": "assistant_delta",
+                    "payload": {
+                        "id": assistant_id,
+                        "delta": chunk,
+                    },
+                }
+            )
+
+        session.history_messages.append(
+            {
+                "id": assistant_id,
+                "role": "assistant",
+                "content": failure_message.strip(),
+            }
+        )
+        session.touch()
+        await queue.put({"type": "assistant_done", "payload": {"id": assistant_id}})
+        await queue.put(None)
+        return
+
     session.history_messages.append(
         {
             "id": assistant_id,

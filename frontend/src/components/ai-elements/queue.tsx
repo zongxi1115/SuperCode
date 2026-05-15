@@ -147,7 +147,7 @@ export const QueueItemTitle = ({
       className={cn("text-sm font-medium leading-none", className)}
       {...props}
     >
-      {isStreaming ? <Shimmer>{children}</Shimmer> : children}
+      {isStreaming ? <Shimmer as="span">{children}</Shimmer> : children}
     </p>
   );
 };
@@ -169,7 +169,7 @@ export const QueueItemDescription = ({
       className={cn("mt-1 text-xs text-muted-foreground", className)}
       {...props}
     >
-      {isStreaming ? <Shimmer>{children}</Shimmer> : children}
+      {isStreaming ? <Shimmer as="span">{children}</Shimmer> : children}
     </p>
   );
 };

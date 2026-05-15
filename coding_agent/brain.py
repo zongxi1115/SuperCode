@@ -45,7 +45,7 @@ class CodingPromptBrain(OpenAICompatibleBrain):
                         "4. 如果 action 是 final，必须提供 final_answer。",
                         "5. 在真正修改文件前，优先先探索相关目录、文件和引用关系。",
                         "6. 普通答疑可以直接 final；需要查看或修改项目时再调用工具。",
-                        "7. 命令执行工具优先使用 `excecute`；如果输出里提到 `execute`，可视为同义工具。",
+                        "7. 命令执行工具优先使用 `excecute`；如果输出里提到 `execute`，可视为同义工具。调用时必须提供 `content` 和 `timeout`（秒）。",
                     ]
                 ),
             ]

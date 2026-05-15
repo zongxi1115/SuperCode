@@ -193,20 +193,20 @@ class OpenAICompatibleBrain(AgentBrain):
                 cleaned = cleaned[:-3]
             cleaned = cleaned.strip()
 
-        start = cleaned.find("{")
-        end = cleaned.rfind("}")
-        if start == -1 or end == -1 or end < start:
-            raise ValueError(f"模型返回不是合法 JSON 对象: {raw_output}")
+        decoder = json.JSONDecoder()
+        for start_index, char in enumerate(cleaned):
+            if char != "{":
+                continue
 
-        json_text = cleaned[start : end + 1]
-        try:
-            payload = json.loads(json_text)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"模型返回 JSON 解析失败: {raw_output}") from exc
+            try:
+                payload, _ = decoder.raw_decode(cleaned[start_index:])
+            except json.JSONDecodeError:
+                continue
 
-        if not isinstance(payload, dict):
-            raise ValueError(f"模型返回的 JSON 根节点必须是对象: {raw_output}")
-        return payload
+            if isinstance(payload, dict):
+                return payload
+
+        raise ValueError(f"模型返回 JSON 解析失败: {raw_output}")
 
     def _extract_partial_string_field(self, text: str, field_name: str) -> str | None:
         marker = f'"{field_name}"'

@@ -3,6 +3,7 @@ import { ChatPanel } from '@/components/app/chat-panel';
 import { EditorPanel } from '@/components/app/editor-panel';
 import { ResizableHandle } from '@/components/app/resizable-handle';
 import { Sidebar } from '@/components/app/sidebar';
+import { WebPreviewPanel } from '@/components/app/web-preview-panel';
 import { TerminalPanel } from '@/components/app/terminal-panel';
 import { WorkspacePicker } from '@/components/app/workspace-picker';
 import type {
@@ -49,6 +50,7 @@ export default function App() {
   const [sessionContext, setSessionContext] = useState<SessionContextPayload | null>(null);
   const [isTerminalOpen, setIsTerminalOpen] = useState(false);
   const [hasTerminalBeenOpened, setHasTerminalBeenOpened] = useState(false);
+  const [isWebPreviewOpen, setIsWebPreviewOpen] = useState(false);
   const [chatPanelWidth, setChatPanelWidth] = useState(820);
   const [sessionHistory, setSessionHistory] = useState<SessionHistoryItem[]>([]);
   const [isHistoryLoading, setIsHistoryLoading] = useState(false);
@@ -705,6 +707,8 @@ export default function App() {
           onToggleFileTree={toggleFileTree}
           onLoadFile={loadFile}
           sessionId={sessionId}
+          isWebPreviewOpen={isWebPreviewOpen}
+          onToggleWebPreview={() => setIsWebPreviewOpen((prev) => !prev)}
         />
         <TerminalPanel
           output={terminalOutput}
@@ -717,6 +721,7 @@ export default function App() {
           onClear={() => void clearTerminal()}
         />
       </div>
+      <WebPreviewPanel isOpen={isWebPreviewOpen} onToggle={() => setIsWebPreviewOpen((prev) => !prev)} />
     </div>
   );
 }

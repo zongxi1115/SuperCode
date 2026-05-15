@@ -107,17 +107,14 @@ class GrepFileTool(CodingBaseTool):
 
     name = "grep_file"
     description = (
-        "按正则搜索文件内容，参数：regex 必填，context_line 可选默认 30，"
-        "search_path 可选默认当前目录，返回带行号的上下文。"
+        "按正则搜索文件内容，参数：regex 必填，search_path 可选默认当前目录，"
+        "只返回命中的文件、行号和对应行内容。"
     )
     supports_parallel = True
 
     def run(self, arguments: dict[str, object], context: ToolContext) -> str:
         regex = str(arguments["regex"])
-        context_line = int(arguments.get("context_line", 30))
         search_path = str(arguments.get("search_path", "."))
-        if context_line < 0:
-            raise ValueError("context_line 不能小于 0。")
 
         target = self._resolve_path(search_path, context)
         if not target.exists():
@@ -137,19 +134,14 @@ class GrepFileTool(CodingBaseTool):
             if not match_line_numbers:
                 continue
 
-            merged_ranges = self._merge_line_ranges(match_line_numbers, context_line, len(lines))
             relative_path = str(file_path.relative_to(workspace)).replace("\\", "/")
             rendered.append(f"# File: {relative_path}")
-            for range_start, range_end in merged_ranges:
-                for line_number in range(range_start, range_end + 1):
-                    rendered.append(f"{line_number} | {lines[line_number - 1]}")
-                rendered.append("---")
+            for line_number in match_line_numbers:
+                rendered.append(f"{line_number} | {lines[line_number - 1]}")
 
         if not rendered:
             return f"未找到匹配项: {regex}"
 
-        if rendered[-1] == "---":
-            rendered.pop()
         return "\n".join(rendered)
 
     def _find_matching_line_numbers(self, pattern: re.Pattern[str], lines: list[str]) -> list[int]:
@@ -160,30 +152,6 @@ class GrepFileTool(CodingBaseTool):
             if pattern.search(line):
                 matched_lines.append(line_number)
         return matched_lines
-
-    def _merge_line_ranges(
-        self,
-        match_lines: list[int],
-        context_line: int,
-        max_line: int,
-    ) -> list[tuple[int, int]]:
-        """把多个命中行的上下文区间合并。"""
-
-        ranges: list[tuple[int, int]] = []
-        for line_number in match_lines:
-            start = max(1, line_number - context_line)
-            end = min(max_line, line_number + context_line)
-            if not ranges:
-                ranges.append((start, end))
-                continue
-
-            last_start, last_end = ranges[-1]
-            if start <= last_end + 1:
-                ranges[-1] = (last_start, max(last_end, end))
-            else:
-                ranges.append((start, end))
-        return ranges
-
 
 class WriteFileTool(CodingBaseTool):
     """创建新文件。"""
@@ -235,27 +203,32 @@ class ExecuteTool(CodingBaseTool):
     """执行命令。"""
 
     name = "execute"
-    description = "在工作区内执行命令，参数：content。会阻止危险命令。"
+    description = "在工作区内执行命令，参数：content、timeout（必填，单位秒）。会阻止危险命令。"
 
     def run(self, arguments: dict[str, object], context: ToolContext) -> str:
         command = str(arguments["content"]).strip()
+        timeout = self._parse_timeout(arguments)
         if not command:
             raise ValueError("命令内容不能为空。")
         self._validate_command(command)
 
-        completed = subprocess.run(
-            [
-                "powershell",
-                "-NoProfile",
-                "-Command",
-                command,
-            ],
-            cwd=context.workspace,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=120,
-        )
+        try:
+            completed = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    command,
+                ],
+                cwd=context.workspace,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise TimeoutError(f"命令执行超时（>{timeout} 秒）: {command}") from exc
+
         stdout = completed.stdout.strip()
         stderr = completed.stderr.strip()
         lines = [
@@ -266,6 +239,22 @@ class ExecuteTool(CodingBaseTool):
             stderr or "(empty)",
         ]
         return "\n".join(lines)
+
+    def _parse_timeout(self, arguments: dict[str, object]) -> int:
+        """解析并校验超时时间。"""
+
+        raw_timeout = arguments.get("timeout")
+        if raw_timeout is None:
+            raise ValueError("timeout 为必填参数，单位秒。")
+
+        try:
+            timeout = int(raw_timeout)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("timeout 必须是正整数秒数。") from exc
+
+        if timeout <= 0:
+            raise ValueError("timeout 必须大于 0。")
+        return timeout
 
     def _validate_command(self, command: str) -> None:
         """阻止明显危险的命令。"""
@@ -289,7 +278,7 @@ class ExcecuteTool(ExecuteTool):
     """兼容用户给出的工具名拼写。"""
 
     name = "excecute"
-    description = "在工作区内执行命令，参数：content。与 execute 同义。"
+    description = "在工作区内执行命令，参数：content、timeout（必填，单位秒）。与 execute 同义。"
 
 
 class GreepToolCompat(GrepFileTool):

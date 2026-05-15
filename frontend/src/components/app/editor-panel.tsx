@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button';
 import { getFileLanguage } from '@/lib/app-utils';
 import type { FileTreeNode } from '@/lib/app-types';
 import { AnimatePresence, motion } from 'motion/react';
-import { FileCode, PanelLeftClose, PanelLeftOpen, Pencil, Save, X } from 'lucide-react';
+import { FileCode, Globe, PanelLeftClose, PanelLeftOpen, Pencil, Save, X } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 type EditorPanelProps = {
@@ -17,6 +17,8 @@ type EditorPanelProps = {
   onLoadFile: (path: string) => void | Promise<void>;
   onSaveFile?: (path: string, content: string) => void | Promise<void>;
   sessionId: string | null;
+  isWebPreviewOpen?: boolean;
+  onToggleWebPreview?: () => void;
 };
 
 const EDITOR_FONT = 'font-mono text-[13px] leading-[20px]';
@@ -30,6 +32,8 @@ export function EditorPanel({
   onLoadFile,
   onSaveFile,
   sessionId,
+  isWebPreviewOpen,
+  onToggleWebPreview,
 }: EditorPanelProps) {
   const [isEditing, setIsEditing] = useState(false);
   const [editContent, setEditContent] = useState('');
@@ -135,6 +139,11 @@ export function EditorPanel({
             <Button variant="ghost" size="icon" onClick={onToggleFileTree} className="h-6 w-6 shrink-0">
               {isFileTreeCollapsed ? <PanelLeftOpen className="w-3.5 h-3.5" /> : <PanelLeftClose className="w-3.5 h-3.5" />}
             </Button>
+            {onToggleWebPreview && (
+              <Button variant={isWebPreviewOpen ? 'secondary' : 'ghost'} size="icon" onClick={onToggleWebPreview} className="h-6 w-6 shrink-0" title="浏览器预览">
+                <Globe className="w-3.5 h-3.5" />
+              </Button>
+            )}
           </div>
           <AnimatePresence mode="wait">
             {!isFileTreeCollapsed && (

@@ -14,10 +14,10 @@
 
 list_file(path?)            # 浏览目录结构
 read_file(filename, start_line?, end_line?)  # 阅读文件（返回带行号）
-grep_file(regex, context_line?=30, search_path?='.')  # 正则搜索
+grep_file(regex, search_path?='.')  # 正则搜索，只返回命中行
 write_file(filename, content)    # 创建/覆写文件
 replace_file(filename, old_content, new_content)  # 局部替换
-execute(content)             # 执行命令
+execute(content, timeout)    # 执行命令，timeout 必填，单位秒
 
 # 工作流程
 
