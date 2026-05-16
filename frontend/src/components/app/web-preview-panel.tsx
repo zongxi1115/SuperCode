@@ -56,6 +56,7 @@ function getElementSelector(el: HTMLElement): string {
 export function WebPreviewPanel({ isOpen, onToggle, url, onUrlChange, onSelectElement }: WebPreviewPanelProps) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [isSelectMode, setIsSelectMode] = useState(false);
+  const cleanupRef = useRef<(() => void) | null>(null);
 
   const handleRefresh = useCallback(() => {
     if (iframeRef.current) {
@@ -68,6 +69,15 @@ export function WebPreviewPanel({ isOpen, onToggle, url, onUrlChange, onSelectEl
       window.open(url, '_blank');
     }
   }, [url]);
+
+  const cancelSelectMode = useCallback(() => {
+    if (!iframeRef.current?.contentDocument) return;
+    const doc = iframeRef.current.contentDocument;
+    doc.querySelectorAll('.__highlight-hover').forEach((el) => el.classList.remove('__highlight-hover'));
+    doc.querySelectorAll('.__highlight-selected').forEach((el) => el.classList.remove('__highlight-selected'));
+    cleanupRef.current?.();
+    cleanupRef.current = null;
+  }, []);
 
   const handleSelectElement = useCallback(() => {
     if (!iframeRef.current?.contentDocument) return;
@@ -114,9 +124,7 @@ export function WebPreviewPanel({ isOpen, onToggle, url, onUrlChange, onSelectEl
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        doc.querySelectorAll('.__highlight-hover').forEach((el) => el.classList.remove('__highlight-hover'));
-        doc.querySelectorAll('.__highlight-selected').forEach((el) => el.classList.remove('__highlight-selected'));
-        cleanup();
+        cancelSelectMode();
       }
     };
 
@@ -127,13 +135,16 @@ export function WebPreviewPanel({ isOpen, onToggle, url, onUrlChange, onSelectEl
       doc.removeEventListener('click', handleClick, true);
       doc.removeEventListener('keydown', handleKeyDown, true);
       setIsSelectMode(false);
+      cleanupRef.current = null;
     };
+
+    cleanupRef.current = cleanup;
 
     doc.addEventListener('mouseover', handleMouseOver, true);
     doc.addEventListener('mouseout', handleMouseOut, true);
     doc.addEventListener('click', handleClick, true);
     doc.addEventListener('keydown', handleKeyDown, true);
-  }, [onSelectElement]);
+  }, [onSelectElement, cancelSelectMode]);
 
   return (
     <>
@@ -153,7 +164,7 @@ export function WebPreviewPanel({ isOpen, onToggle, url, onUrlChange, onSelectEl
                   <RefreshCw className="w-4 h-4" />
                 </WebPreviewNavigationButton>
                 <WebPreviewUrl />
-                <WebPreviewNavigationButton tooltip="选择元素" onClick={handleSelectElement} disabled={isSelectMode}>
+                <WebPreviewNavigationButton tooltip={isSelectMode ? '取消选择' : '选择元素'} onClick={isSelectMode ? cancelSelectMode : handleSelectElement} className={isSelectMode ? 'bg-primary/15 text-primary' : ''}>
                   <MousePointerClick className="w-4 h-4" />
                 </WebPreviewNavigationButton>
                 <WebPreviewNavigationButton tooltip="在新标签页打开" onClick={handleOpenInNewTab}>

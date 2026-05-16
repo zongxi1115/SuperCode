@@ -43,6 +43,7 @@ class OpenAICompatibleBrain(AgentBrain):
                 )
             else:
                 streamed_text = ""
+                streamed_reasoning = ""
 
                 def handle_text_delta(delta: str) -> None:
                     nonlocal streamed_text
@@ -52,6 +53,16 @@ class OpenAICompatibleBrain(AgentBrain):
                             raw_output=streamed_text,
                             action="final",
                             final_answer=streamed_text,
+                        )
+                    )
+
+                def handle_reasoning_delta(delta: str) -> None:
+                    nonlocal streamed_reasoning
+                    streamed_reasoning += delta
+                    on_stream(
+                        BrainStreamingUpdate(
+                            raw_output=streamed_reasoning,
+                            thought=streamed_reasoning,
                         )
                     )
 
@@ -77,6 +88,7 @@ class OpenAICompatibleBrain(AgentBrain):
                     native_messages,
                     tools=native_tools,
                     on_text_delta=handle_text_delta,
+                    on_reasoning_delta=handle_reasoning_delta,
                     on_tool_call_delta=handle_tool_delta,
                 )
 
@@ -460,11 +472,11 @@ class OpenAICompatibleBrain(AgentBrain):
                         ),
                     }
                 )
-            return BrainDecision.call_tools(thought="", tool_calls=normalized_calls)
+            return BrainDecision.call_tools(thought=completion.reasoning_text, tool_calls=normalized_calls)
 
         final_text = completion.text.strip()
         if final_text:
-            return BrainDecision.finish(thought="", final_answer=final_text)
+            return BrainDecision.finish(thought=completion.reasoning_text, final_answer=final_text)
 
         raise ValueError("模型接口既没有返回 tool_calls，也没有返回可用文本内容。")
 

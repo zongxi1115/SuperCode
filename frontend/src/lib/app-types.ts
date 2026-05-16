@@ -90,6 +90,7 @@ export type SessionPayload = {
   sessionId: string;
   model?: string;
   mode: 'agent' | 'demo';
+  isGenerating?: boolean;
   startupError?: string | null;
   envFile?: string | null;
   previewUrl?: string;
@@ -106,6 +107,11 @@ export type SessionPayload = {
 };
 
 export interface LastSession {
+  workspace: string;
+  timestamp: number;
+}
+
+export interface RecentProject {
   workspace: string;
   timestamp: number;
 }

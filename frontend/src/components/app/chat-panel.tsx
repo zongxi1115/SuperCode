@@ -61,7 +61,6 @@ import {
   ChevronDown,
   ChevronRight,
   BarChart3Icon,
-  Code2Icon,
   DatabaseIcon,
   FileCodeIcon,
   FileSearchIcon,
@@ -83,6 +82,7 @@ type ElementAttachment = {
   id: string;
   selector: string;
   html: string;
+  sourceUrl?: string;
 };
 
 type ChatPanelProps = {
@@ -928,16 +928,27 @@ export function ChatPanel({
                 {elementAttachments.map((el) => (
                   <div
                     key={el.id}
-                    className="group flex h-8 items-center gap-1.5 rounded-md border border-border px-1.5 font-medium text-sm transition-all hover:bg-accent hover:text-accent-foreground dark:hover:bg-accent/50"
+                    className="group relative flex h-16 items-center gap-1.5 rounded-md border border-border px-1.5 py-1 transition-all hover:bg-accent/50"
                   >
-                    <div className="flex size-5 shrink-0 items-center justify-center rounded bg-primary/10">
-                      <Code2Icon className="size-3 text-primary" />
+                    <div className="size-12 shrink-0 overflow-hidden rounded bg-white">
+                      <iframe
+                        srcDoc={el.html}
+                        title={el.selector}
+                        sandbox="allow-scripts"
+                        className="pointer-events-none size-full origin-top-left scale-[0.25]"
+                        style={{ width: '400%', height: '400%' }}
+                      />
                     </div>
-                    <span className="max-w-[200px] truncate text-xs font-mono text-muted-foreground">{el.selector}</span>
+                    <div className="flex flex-col gap-0.5 min-w-0 max-w-[140px]">
+                      <span className="truncate text-[10px] font-mono text-muted-foreground leading-tight">{el.selector}</span>
+                      {el.sourceUrl && (
+                        <span className="truncate text-[9px] text-muted-foreground/60 leading-tight">{el.sourceUrl.replace(/^https?:\/\//, '')}</span>
+                      )}
+                    </div>
                     <button
                       type="button"
                       onClick={() => onRemoveElementAttachment?.(el.id)}
-                      className="ml-0.5 flex size-5 shrink-0 items-center justify-center rounded p-0 opacity-0 transition-opacity group-hover:opacity-100 hover:bg-destructive/10"
+                      className="absolute -top-1.5 -right-1.5 flex size-4 shrink-0 items-center justify-center rounded-full bg-background border shadow-sm opacity-0 transition-opacity group-hover:opacity-100 hover:bg-destructive/10"
                     >
                       <XIcon className="size-2.5 text-muted-foreground hover:text-destructive" />
                     </button>
@@ -1023,7 +1034,7 @@ export function ChatPanel({
                 <Button
                   size="icon"
                   onClick={onSendMessage}
-                  disabled={!input.trim()}
+                  disabled={!input.trim() && elementAttachments.length === 0}
                   aria-label="发送消息"
                   title="发送消息"
                 >

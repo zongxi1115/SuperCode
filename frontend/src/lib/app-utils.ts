@@ -1,6 +1,8 @@
-import type { ChatMessage, ContentBlock, DirectoryNode, FileTreeNode, ToolCallRecord, WorkspaceOption } from '@/lib/app-types';
+import type { ChatMessage, ContentBlock, DirectoryNode, FileTreeNode, RecentProject, ToolCallRecord, WorkspaceOption } from '@/lib/app-types';
 
 export const LAST_SESSION_KEY = 'supercode_last_session';
+export const RECENT_PROJECTS_KEY = 'supercode_recent_projects';
+export const MAX_RECENT_PROJECTS = 10;
 export const FILE_TREE_POLL_INTERVAL = 5000;
 
 export function getLastSession() {
@@ -24,6 +26,36 @@ export function saveLastSession(workspace: string) {
 export function clearLastSession() {
   try {
     localStorage.removeItem(LAST_SESSION_KEY);
+  } catch {
+    // silent fail
+  }
+}
+
+export function getRecentProjects(): RecentProject[] {
+  try {
+    const raw = localStorage.getItem(RECENT_PROJECTS_KEY);
+    if (!raw) return [];
+    return JSON.parse(raw);
+  } catch {
+    return [];
+  }
+}
+
+export function addRecentProject(workspace: string) {
+  try {
+    const projects = getRecentProjects().filter((p) => p.workspace !== workspace);
+    projects.unshift({ workspace, timestamp: Date.now() });
+    const trimmed = projects.slice(0, MAX_RECENT_PROJECTS);
+    localStorage.setItem(RECENT_PROJECTS_KEY, JSON.stringify(trimmed));
+  } catch {
+    // silent fail
+  }
+}
+
+export function removeRecentProject(workspace: string) {
+  try {
+    const projects = getRecentProjects().filter((p) => p.workspace !== workspace);
+    localStorage.setItem(RECENT_PROJECTS_KEY, JSON.stringify(projects));
   } catch {
     // silent fail
   }

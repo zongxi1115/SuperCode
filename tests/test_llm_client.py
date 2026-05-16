@@ -22,6 +22,7 @@ class ClientParsingTests(unittest.TestCase):
                 "choices": [
                     {
                         "message": {
+                            "reasoning_content": "Need to read the file first.",
                             "tool_calls": [
                                 {
                                     "id": "call_1",
@@ -40,6 +41,7 @@ class ClientParsingTests(unittest.TestCase):
         )
 
         self.assertEqual(response.finish_reason, "tool_calls")
+        self.assertEqual(response.reasoning_text, "Need to read the file first.")
         self.assertEqual(len(response.tool_calls), 1)
         self.assertEqual(response.tool_calls[0].name, "read_file")
         self.assertEqual(response.tool_calls[0].arguments, '{"filename":"README.md"}')
@@ -83,6 +85,17 @@ class ClientParsingTests(unittest.TestCase):
         self.assertEqual(deltas_first[0].name, "apply_patch")
         self.assertIn("*** Begin Patch", deltas_first[0].arguments)
         self.assertIn("*** End Patch", deltas_second[0].arguments)
+
+    def test_extract_stream_reasoning_text_reads_reasoning_content(self) -> None:
+        reasoning = self.client._extract_stream_reasoning_text(
+            {
+                "delta": {
+                    "reasoning_content": "Need to inspect the file first.",
+                }
+            }
+        )
+
+        self.assertEqual(reasoning, "Need to inspect the file first.")
 
     def test_retries_empty_non_stream_completion(self) -> None:
         class RetryClient(OpenAICompatibleClient):

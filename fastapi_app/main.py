@@ -69,6 +69,7 @@ class CreateSessionResponse(BaseModel):
     sessionId: str
     model: str
     mode: str
+    isGenerating: bool
     startupError: str | None
     envFile: str | None
     workspace: str
@@ -417,6 +418,7 @@ class UISession:
     terminal_runtime: TerminalRuntime | None = field(default=None, repr=False)
     interactive_command_session: InteractiveCommandSession | None = field(default=None, repr=False)
     chat_session: ChatSession | None = None
+    is_generating: bool = False
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
     cached_file_tree: list[dict[str, Any]] = field(default_factory=list, repr=False)
     file_tree_loaded: bool = field(default=False, repr=False)
@@ -470,6 +472,7 @@ class UISession:
             sessionId=self.session_id,
             model=self.model,
             mode=self.mode,
+            isGenerating=self.is_generating,
             startupError=self.startup_error,
             envFile=self.env_file,
             workspace=self.workspace,
@@ -622,12 +625,35 @@ app.add_middleware(
 _sessions: dict[str, UISession] = {}
 
 
+def session_has_persistable_history(session: UISession) -> bool:
+    if session.history_messages:
+        return True
+    if session.history_tools:
+        return True
+    if session.thoughts:
+        return True
+    return False
+
+
 def persist_session_state(session: UISession) -> None:
+    if not session_has_persistable_history(session):
+        try:
+            _session_store.delete(session.session_id)
+        except Exception:
+            pass
+        return
     try:
         _session_store.save(session_to_persisted_state(session))
     except Exception:
         # Persistence must not interrupt the streaming path.
         pass
+
+
+def set_session_generating(session: UISession, is_generating: bool) -> None:
+    if session.is_generating == is_generating:
+        return
+    session.is_generating = is_generating
+    session.touch()
 
 
 def session_to_persisted_state(session: UISession) -> PersistedSessionState:
@@ -642,6 +668,7 @@ def session_to_persisted_state(session: UISession) -> PersistedSessionState:
         tool_call_count=len(session.history_tools),
         created_at=session.created_at,
         updated_at=session.updated_at,
+        is_generating=session.is_generating,
         startup_error=session.startup_error,
         env_file=session.env_file,
         selected_file_path=session.selected_file_path,
@@ -684,6 +711,7 @@ def hydrate_session_from_state(state: PersistedSessionState) -> UISession:
         model=model_name if chat_session is not None else state.model,
         workspace=state.workspace,
         mode="agent" if chat_session is not None else state.mode,
+        is_generating=state.is_generating,
         startup_error=startup_error if chat_session is None else state.startup_error,
         env_file=env_file_used or state.env_file,
         selected_file_path=state.selected_file_path,
@@ -936,9 +964,10 @@ def stop_session_execution(session: UISession) -> list[dict[str, Any]]:
     session.cancel_event.set()
     interactive_session = session.interactive_command_session
     if interactive_session is None:
+        set_session_generating(session, False)
         return []
     terminated = interactive_session.terminate_all()
-    session.touch()
+    set_session_generating(session, False)
     return terminated
 
 
@@ -1056,6 +1085,7 @@ async def create_session(request: CreateSessionRequest) -> JSONResponse:
             sessionId=session.session_id,
             model=session.model,
             mode=session.mode,
+            isGenerating=session.is_generating,
             startupError=session.startup_error,
             envFile=session.env_file,
             workspace=session.workspace,
@@ -1090,6 +1120,7 @@ async def get_session_snapshot(session_id: str) -> JSONResponse:
             sessionId=session.session_id,
             model=session.model,
             mode=session.mode,
+            isGenerating=session.is_generating,
             startupError=session.startup_error,
             envFile=session.env_file,
             workspace=session.workspace,
@@ -1549,6 +1580,7 @@ async def run_agent_stream(
     streamed_assistant_text = ""
     assistant_stream_started = False
     ensure_user_message_recorded(session, user_message)
+    set_session_generating(session, True)
 
     await queue.put(
         {
@@ -1821,11 +1853,13 @@ async def run_agent_stream(
             else failure_message.strip()
         )
         replace_assistant_text_part(session, assistant_id, persisted_failure_content.strip())
+        set_session_generating(session, False)
         await queue.put({"type": "assistant_done", "payload": {"id": assistant_id}})
         await queue.put(None)
         return
 
     if session.cancel_event.is_set():
+        set_session_generating(session, False)
         await queue.put(None)
         return
 
@@ -1859,6 +1893,7 @@ async def run_agent_stream(
 
     await queue.put({"type": "assistant_done", "payload": {"id": assistant_id}})
     await queue.put(None)
+    set_session_generating(session, False)
 
 
 async def run_demo_stream(
@@ -1867,6 +1902,7 @@ async def run_demo_stream(
     queue: asyncio.Queue[dict[str, Any] | None],
 ) -> None:
     assistant_id = uuid.uuid4().hex
+    set_session_generating(session, True)
     await queue.put(
         {
             "type": "assistant_started",
@@ -2003,6 +2039,7 @@ async def run_demo_stream(
     await queue.put({"type": "plan_steps", "payload": {"steps": session.plan_steps}})
     await queue.put({"type": "assistant_done", "payload": {"id": assistant_id}})
     await queue.put(None)
+    set_session_generating(session, False)
 
 
 def upsert_tool(current: list[dict[str, Any]], next_tool: dict[str, Any]) -> list[dict[str, Any]]:

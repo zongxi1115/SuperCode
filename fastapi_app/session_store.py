@@ -21,6 +21,7 @@ class PersistedSessionState:
     tool_call_count: int
     created_at: int
     updated_at: int
+    is_generating: bool = False
     startup_error: str | None = None
     env_file: str | None = None
     selected_file_path: str | None = None
@@ -75,6 +76,7 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                 INSERT INTO sessions (
                     session_id, workspace, mode, model, title, preview,
                     message_count, tool_call_count, created_at, updated_at,
+                    is_generating,
                     startup_error, env_file, selected_file_path, open_files,
                     terminal_output, preview_url, history_messages,
                     history_tools, thoughts, plan_steps, pending_delete_confirmations
@@ -82,6 +84,7 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                 VALUES (
                     :session_id, :workspace, :mode, :model, :title, :preview,
                     :message_count, :tool_call_count, :created_at, :updated_at,
+                    :is_generating,
                     :startup_error, :env_file, :selected_file_path, :open_files,
                     :terminal_output, :preview_url, :history_messages,
                     :history_tools, :thoughts, :plan_steps, :pending_delete_confirmations
@@ -96,6 +99,7 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                     tool_call_count = excluded.tool_call_count,
                     created_at = excluded.created_at,
                     updated_at = excluded.updated_at,
+                    is_generating = excluded.is_generating,
                     startup_error = excluded.startup_error,
                     env_file = excluded.env_file,
                     selected_file_path = excluded.selected_file_path,
@@ -150,6 +154,7 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                     tool_call_count INTEGER NOT NULL,
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL,
+                    is_generating INTEGER NOT NULL DEFAULT 0,
                     startup_error TEXT,
                     env_file TEXT,
                     selected_file_path TEXT,
@@ -164,6 +169,14 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                 )
                 """
             )
+            existing_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(sessions)").fetchall()
+            }
+            if "is_generating" not in existing_columns:
+                connection.execute(
+                    "ALTER TABLE sessions ADD COLUMN is_generating INTEGER NOT NULL DEFAULT 0"
+                )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_sessions_updated_at ON sessions(updated_at DESC)"
             )
@@ -180,6 +193,7 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
             "tool_call_count": state.tool_call_count,
             "created_at": state.created_at,
             "updated_at": state.updated_at,
+            "is_generating": 1 if state.is_generating else 0,
             "startup_error": state.startup_error,
             "env_file": state.env_file,
             "selected_file_path": state.selected_file_path,
@@ -205,6 +219,7 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
             tool_call_count=int(row["tool_call_count"]),
             created_at=int(row["created_at"]),
             updated_at=int(row["updated_at"]),
+            is_generating=bool(row["is_generating"]),
             startup_error=row["startup_error"],
             env_file=row["env_file"],
             selected_file_path=row["selected_file_path"],

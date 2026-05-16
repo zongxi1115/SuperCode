@@ -13,6 +13,7 @@ import type {
   FileTreeNode,
   ManagedProcessPayload,
   ModelOption,
+  RecentProject,
   SessionContextPayload,
   SessionHistoryItem,
   SessionPayload,
@@ -20,10 +21,13 @@ import type {
   WorkspaceOption,
 } from '@/lib/app-types';
 import {
+  addRecentProject,
   clearLastSession,
   findDirectoryNode,
   getLastSession,
+  getRecentProjects,
   hydrateMessages,
+  removeRecentProject,
   saveLastSession,
   updateDirectoryNodeTree,
   workspaceOptionsToDirectoryNodes,
@@ -79,13 +83,20 @@ export default function App() {
   const [hasTerminalBeenOpened, setHasTerminalBeenOpened] = useState(false);
   const [isWebPreviewOpen, setIsWebPreviewOpen] = useState(false);
   const [webPreviewUrl, setWebPreviewUrl] = useState(DEFAULT_WEB_PREVIEW_URL);
-  const [elementAttachments, setElementAttachments] = useState<{ id: string; selector: string; html: string }[]>([]);
+  const [elementAttachments, setElementAttachments] = useState<{ id: string; selector: string; html: string; sourceUrl?: string }[]>([]);
   const [chatPanelWidth, setChatPanelWidth] = useState(820);
   const [sessionHistory, setSessionHistory] = useState<SessionHistoryItem[]>([]);
   const [isHistoryLoading, setIsHistoryLoading] = useState(false);
+  const [recentProjects, setRecentProjects] = useState<RecentProject[]>(() => getRecentProjects());
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
   const activeRequestRef = useRef<AbortController | null>(null);
+  const activeStreamSessionIdRef = useRef<string | null>(null);
+  const currentSessionIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    currentSessionIdRef.current = sessionId;
+  }, [sessionId]);
 
   const applyTerminalSnapshot = useCallback((data: Partial<TerminalSnapshotPayload>) => {
     setTerminalOutput((prev) => data.output ?? prev);
@@ -225,29 +236,36 @@ export default function App() {
       .catch(console.error);
   }, [initialWorkspace]);
 
-  const applySessionPayload = useCallback((data: SessionPayload) => {
-    setSessionId(data.sessionId);
+  const syncVisibleSessionSnapshot = useCallback((data: SessionPayload) => {
     setBackendMode(data.mode);
     setStartupError(data.startupError ?? null);
-    setSelectedWorkspace(data.workspace);
     setSelectedModelId(data.model ?? null);
     setMessages(hydrateMessages(data.messages ?? [], data.thoughts, data.toolCalls));
     setFileTree(data.fileTree ?? []);
     setTerminalOutput(data.terminalOutput ?? '');
+    setWebPreviewUrl(data.previewUrl ?? DEFAULT_WEB_PREVIEW_URL);
+    setSelectedFilePath(data.selectedFilePath ?? '');
+    setSelectedFileContent(data.selectedFileContent ?? '');
+    setIsLoading(Boolean(data.isGenerating));
+  }, []);
+
+  const applySessionPayload = useCallback((data: SessionPayload) => {
+    setSessionId(data.sessionId);
+    setSelectedWorkspace(data.workspace);
+    syncVisibleSessionSnapshot(data);
     setTerminalCwd(data.workspace ?? '');
     setTerminalBackend('subprocess');
     setTerminalSupportsInterrupt(false);
     setManagedProcesses([]);
-    setWebPreviewUrl(data.previewUrl ?? DEFAULT_WEB_PREVIEW_URL);
-    setSelectedFilePath(data.selectedFilePath ?? '');
-    setSelectedFileContent(data.selectedFileContent ?? '');
     setSessionContext(null);
     setIsContextOpen(false);
     setIsTerminalOpen(false);
     setHasTerminalBeenOpened(false);
     saveLastSession(data.workspace);
+    addRecentProject(data.workspace);
+    setRecentProjects(getRecentProjects());
     setShowWorkspacePicker(false);
-  }, []);
+  }, [syncVisibleSessionSnapshot]);
 
   const loadSessionHistory = useCallback(async () => {
     setIsHistoryLoading(true);
@@ -347,6 +365,17 @@ export default function App() {
     await createSessionWithWorkspace(workspace);
   };
 
+  const handleOpenRecentProject = async (workspace: string) => {
+    setSelectedWorkspace(workspace);
+    setCustomWorkspace('');
+    await createSessionWithWorkspace(workspace);
+  };
+
+  const handleRemoveRecentProject = (workspace: string) => {
+    removeRecentProject(workspace);
+    setRecentProjects(getRecentProjects());
+  };
+
   const loadDirectoryChildren = async (path: string) => {
     const existing = findDirectoryNode(directoryTree, path);
     if (existing?.loaded) {
@@ -399,6 +428,43 @@ export default function App() {
     if (!sessionId) return;
     void loadSessionContext({ silent: true });
   }, [loadSessionContext, sessionId]);
+
+  useEffect(() => {
+    if (!sessionId || !isLoading || activeStreamSessionIdRef.current === sessionId) {
+      return;
+    }
+
+    let disposed = false;
+
+    const syncSnapshot = async () => {
+      try {
+        const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}`);
+        if (!res.ok) {
+          throw new Error('同步会话状态失败');
+        }
+        const data: SessionPayload = await res.json();
+        if (disposed || currentSessionIdRef.current !== sessionId) {
+          return;
+        }
+        syncVisibleSessionSnapshot(data);
+        await loadSessionContext({ silent: true, targetSessionId: sessionId });
+      } catch (error) {
+        if (!disposed) {
+          console.error(error);
+        }
+      }
+    };
+
+    void syncSnapshot();
+    const intervalId = setInterval(() => {
+      void syncSnapshot();
+    }, 1000);
+
+    return () => {
+      disposed = true;
+      clearInterval(intervalId);
+    };
+  }, [isLoading, loadSessionContext, sessionId, syncVisibleSessionSnapshot]);
 
   const sendTerminalCommand = useCallback(async () => {
     if (!sessionId || isTerminalSubmitting) {
@@ -658,20 +724,33 @@ export default function App() {
     [loadSessionHistory, restoreSession, sessionHistory, sessionId]
   );
 
-  const sendMessage = async (msg: string) => {
-    if (!msg.trim() || !sessionId || isLoading) return;
+  const sendMessage = async (msg: string, elements?: { selector: string; html: string; sourceUrl?: string }[]) => {
+    if ((!msg.trim() && (!elements || elements.length === 0)) || !sessionId || isLoading) return;
 
+    const streamSessionId = sessionId;
     setInput('');
+    setElementAttachments([]);
     setIsLoading(true);
     const abortController = new AbortController();
     activeRequestRef.current = abortController;
-    setMessages((prev) => [...prev, { id: Math.random().toString(), role: 'user', content: msg }]);
+    activeStreamSessionIdRef.current = streamSessionId;
+
+    let finalMsg = msg.trim() || '请修改这个元素';
+    if (elements && elements.length > 0) {
+      const elementContext = elements.map((el, i) => {
+        const urlPart = el.sourceUrl ? `\n来源页面: ${el.sourceUrl}` : '';
+        return `[元素${i + 1} 选择器: ${el.selector}]${urlPart}\n${el.html}`;
+      }).join('\n\n');
+      finalMsg = `${elementContext}\n\n${finalMsg}`;
+    }
+
+    setMessages((prev) => [...prev, { id: Math.random().toString(), role: 'user', content: finalMsg }]);
 
     try {
       const res = await fetch('http://localhost:8000/api/chat/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: sessionId, message: msg }),
+        body: JSON.stringify({ session_id: streamSessionId, message: finalMsg }),
         signal: abortController.signal,
       });
 
@@ -682,11 +761,15 @@ export default function App() {
       let buffer = '';
       let currentAssistantId = '';
       const toolNamesById = new Map<string, string>();
+      const isVisibleStreamSession = () => currentSessionIdRef.current === streamSessionId;
 
       const updateAssistantMessage = (
         assistantId: string,
         updater: (message: ChatMessage) => ChatMessage
       ) => {
+        if (!isVisibleStreamSession()) {
+          return;
+        }
         setMessages((prev) => {
           let found = false;
           const next = prev.map((message) => {
@@ -783,6 +866,9 @@ export default function App() {
           };
 
           const handleToolResultSideEffects = (payload: Record<string, unknown>) => {
+            if (!isVisibleStreamSession()) {
+              return;
+            }
             const toolName = String(payload.name ?? '');
             const outputPayload = (
               payload.output &&
@@ -800,7 +886,7 @@ export default function App() {
               } else if (typeof payload.output === 'string') {
                 applyTerminalSnapshot({ output: payload.output });
               }
-              refreshFileTreeAfterTerminalActivity(sessionId ?? undefined);
+              refreshFileTreeAfterTerminalActivity(streamSessionId);
             }
             if (
               ['write_file', 'replace_file', 'apply_patch'].includes(toolName) ||
@@ -861,7 +947,11 @@ export default function App() {
                 state: 'running'
               })
             );
-            if (toolCallRecord.name === 'read_file' && typeof toolCallRecord.arguments?.filename === 'string') {
+            if (
+              isVisibleStreamSession() &&
+              toolCallRecord.name === 'read_file' &&
+              typeof toolCallRecord.arguments?.filename === 'string'
+            ) {
               void loadFile(toolCallRecord.arguments.filename);
             }
           } else if (data.type === 'tool-input-start') {
@@ -935,15 +1025,15 @@ export default function App() {
             }));
           } else if (data.type === 'data-plan-steps') {
             const steps = data.data?.steps;
-            if (Array.isArray(steps)) {
+            if (Array.isArray(steps) && isVisibleStreamSession()) {
               setPlanSteps(steps);
             }
           } else if (data.type === 'data-terminal-output') {
-            if (typeof data.data?.output === 'string') {
+            if (typeof data.data?.output === 'string' && isVisibleStreamSession()) {
               applyTerminalSnapshot({ output: data.data.output });
             }
           } else if (data.type === 'data-preview-url') {
-            if (typeof data.data?.url === 'string') {
+            if (typeof data.data?.url === 'string' && isVisibleStreamSession()) {
               setWebPreviewUrl(data.data.url);
               setIsWebPreviewOpen(true);
             }
@@ -1022,7 +1112,11 @@ export default function App() {
               toolCalls: [...(message.toolCalls ?? []), toolCallRecord],
               parts: [...(message.parts ?? []), { type: 'tool_call' as const, toolCall: toolCallRecord }]
             }));
-            if (data.payload.name === 'read_file' && typeof data.payload.arguments?.filename === 'string') {
+            if (
+              isVisibleStreamSession() &&
+              data.payload.name === 'read_file' &&
+              typeof data.payload.arguments?.filename === 'string'
+            ) {
               void loadFile(data.payload.arguments.filename);
             }
           } else if (data.type === 'tool_result') {
@@ -1081,12 +1175,17 @@ export default function App() {
       if (activeRequestRef.current === abortController) {
         activeRequestRef.current = null;
       }
-      setIsLoading(false);
-      void refreshTerminalState({
-        includeProcesses: isTerminalOpen,
-        silent: true,
-      });
-      void loadSessionContext({ silent: !isContextOpen });
+      if (activeStreamSessionIdRef.current === streamSessionId) {
+        activeStreamSessionIdRef.current = null;
+      }
+      if (currentSessionIdRef.current === streamSessionId) {
+        setIsLoading(false);
+        void refreshTerminalState({
+          includeProcesses: isTerminalOpen,
+          silent: true,
+        });
+        void loadSessionContext({ silent: !isContextOpen });
+      }
       void loadSessionHistory();
     }
   };
@@ -1094,7 +1193,7 @@ export default function App() {
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      sendMessage(input);
+      sendMessage(input, elementAttachments.length > 0 ? elementAttachments : undefined);
     }
   };
 
@@ -1216,6 +1315,7 @@ export default function App() {
         selectedWorkspace={selectedWorkspace}
         directoryTree={directoryTree}
         directoryExpanded={directoryExpanded}
+        recentProjects={recentProjects}
         onDirectoryExpandedChange={handleDirectoryExpandedChange}
         onCustomWorkspaceChange={setCustomWorkspace}
         onSelectWorkspace={(path) => {
@@ -1223,6 +1323,8 @@ export default function App() {
           setCustomWorkspace('');
         }}
         onCreateSession={createSession}
+        onOpenRecentProject={handleOpenRecentProject}
+        onRemoveRecentProject={handleRemoveRecentProject}
       />
     );
   }
@@ -1264,7 +1366,7 @@ export default function App() {
         onContextOpenChange={handleContextOpenChange}
         onInputChange={setInput}
         onKeyDown={handleKeyDown}
-        onSendMessage={() => void sendMessage(input)}
+        onSendMessage={() => void sendMessage(input, elementAttachments.length > 0 ? elementAttachments : undefined)}
         onStopMessage={stopMessage}
         onResolveDeleteConfirmation={resolveDeleteConfirmation}
         elementAttachments={elementAttachments}
@@ -1321,7 +1423,7 @@ export default function App() {
         onSelectElement={(html, selector) => {
           setElementAttachments((prev) => [
             ...prev,
-            { id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, selector, html },
+            { id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, selector, html, sourceUrl: webPreviewUrl },
           ]);
         }}
       />

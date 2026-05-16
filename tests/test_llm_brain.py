@@ -124,6 +124,7 @@ class ParseJsonOutputTests(unittest.TestCase):
     def test_completion_to_decision_uses_native_tool_calls(self) -> None:
         decision = self.brain._completion_to_decision(
             CompletionResponse(
+                reasoning_text="Need to inspect the file first.",
                 tool_calls=[
                     CompletionToolCall(
                         id="call_1",
@@ -135,6 +136,7 @@ class ParseJsonOutputTests(unittest.TestCase):
         )
 
         self.assertEqual(decision.action, "tool")
+        self.assertEqual(decision.thought, "Need to inspect the file first.")
         self.assertEqual(
             decision.normalized_tool_calls(),
             [{"tool_name": "read_file", "tool_arguments": {"filename": "README.md"}}],
@@ -171,7 +173,9 @@ class _EmptyNativeThenLegacyClient:
 
 
 class _NativeStreamingClient:
-    def chat_stream_completion_messages(self, messages, tools=None, on_text_delta=None, on_tool_call_delta=None):  # noqa: ANN001
+    def chat_stream_completion_messages(self, messages, tools=None, on_text_delta=None, on_reasoning_delta=None, on_tool_call_delta=None):  # noqa: ANN001
+        if on_reasoning_delta is not None:
+            on_reasoning_delta("Need to inspect")
         if on_text_delta is not None:
             on_text_delta("first")
             on_text_delta(" second")
@@ -187,7 +191,7 @@ class _NativeStreamingClient:
                     arguments='{"patch":"*** Begin Patch',
                 )
             )
-        return CompletionResponse(text="first second")
+        return CompletionResponse(text="first second", reasoning_text="Need to inspect")
 
 
 class DecideModeTests(unittest.TestCase):
@@ -245,7 +249,9 @@ class DecideModeTests(unittest.TestCase):
 
         self.assertEqual(decision.action, "final")
         self.assertEqual(decision.final_answer, "first second")
+        self.assertEqual(decision.thought, "Need to inspect")
         self.assertTrue(any(update.final_answer for update in updates))
+        self.assertTrue(any(update.thought for update in updates))
 
 
 if __name__ == "__main__":

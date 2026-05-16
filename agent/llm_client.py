@@ -35,6 +35,7 @@ class CompletionToolCallDelta:
 @dataclass(slots=True)
 class CompletionResponse:
     text: str = ""
+    reasoning_text: str = ""
     tool_calls: list[CompletionToolCall] = field(default_factory=list)
     finish_reason: str | None = None
 
@@ -143,6 +144,7 @@ class OpenAICompatibleClient:
         tools: list[dict[str, object]] | None = None,
         tool_choice: str | dict[str, object] | None = None,
         on_text_delta: Callable[[str], None] | None = None,
+        on_reasoning_delta: Callable[[str], None] | None = None,
         on_tool_call_delta: Callable[[CompletionToolCallDelta], None] | None = None,
     ) -> CompletionResponse:
         """以 SSE 方式流式获取文本和 tool_calls。"""
@@ -171,6 +173,7 @@ class OpenAICompatibleClient:
                     tools=tools,
                     tool_choice=tool_choice,
                     on_text_delta=handle_text_delta,
+                    on_reasoning_delta=on_reasoning_delta,
                     on_tool_call_delta=handle_tool_call_delta,
                 )
                 if self._completion_has_content(completion) or attempt == attempts - 1:
@@ -204,6 +207,7 @@ class OpenAICompatibleClient:
         tools: list[dict[str, object]] | None = None,
         tool_choice: str | dict[str, object] | None = None,
         on_text_delta: Callable[[str], None] | None = None,
+        on_reasoning_delta: Callable[[str], None] | None = None,
         on_tool_call_delta: Callable[[CompletionToolCallDelta], None] | None = None,
     ) -> CompletionResponse:
         """执行一次 SSE 请求；重试策略由调用方控制。"""
@@ -223,6 +227,8 @@ class OpenAICompatibleClient:
                 data = json.loads(response_body)
                 self._log_usage(data.get("usage"))
                 completion = self._extract_chat_completion_response(data)
+                if completion.reasoning_text and on_reasoning_delta is not None:
+                    on_reasoning_delta(completion.reasoning_text)
                 if completion.text and on_text_delta is not None:
                     on_text_delta(completion.text)
                 for index, tool_call in enumerate(completion.tool_calls):
@@ -239,6 +245,7 @@ class OpenAICompatibleClient:
                 return completion
 
             text_parts: list[str] = []
+            reasoning_parts: list[str] = []
             last_usage: object | None = None
             finish_reason: str | None = None
             tool_call_buffers: dict[int, dict[str, Any]] = {}
@@ -270,6 +277,12 @@ class OpenAICompatibleClient:
                     if on_text_delta is not None:
                         on_text_delta(delta_text)
 
+                reasoning_delta = self._extract_stream_reasoning_text(first_choice)
+                if reasoning_delta:
+                    reasoning_parts.append(reasoning_delta)
+                    if on_reasoning_delta is not None:
+                        on_reasoning_delta(reasoning_delta)
+
                 for tool_delta in self._extract_stream_tool_call_deltas(first_choice, tool_call_buffers):
                     if on_tool_call_delta is not None:
                         on_tool_call_delta(tool_delta)
@@ -277,6 +290,7 @@ class OpenAICompatibleClient:
             self._log_usage(last_usage)
             return CompletionResponse(
                 text="".join(text_parts).strip(),
+                reasoning_text="".join(reasoning_parts).strip(),
                 tool_calls=self._finalize_stream_tool_calls(tool_call_buffers),
                 finish_reason=finish_reason,
             )
@@ -341,6 +355,7 @@ class OpenAICompatibleClient:
         text = self._flatten_content(message.get("content")).strip()
         if not text:
             text = self._flatten_content(first_choice.get("text")).strip()
+        reasoning_text = self._flatten_reasoning_content(message.get("reasoning_content")).strip()
 
         tool_calls = self._extract_message_tool_calls(message)
         finish_reason = first_choice.get("finish_reason")
@@ -348,6 +363,7 @@ class OpenAICompatibleClient:
 
         return CompletionResponse(
             text=text,
+            reasoning_text=reasoning_text,
             tool_calls=tool_calls,
             finish_reason=normalized_finish_reason,
         )
@@ -539,6 +555,12 @@ class OpenAICompatibleClient:
 
         return self._flatten_content(first_choice.get("text"))
 
+    def _extract_stream_reasoning_text(self, first_choice: dict[str, object]) -> str:
+        delta = first_choice.get("delta")
+        if not isinstance(delta, dict):
+            return ""
+        return self._flatten_reasoning_content(delta.get("reasoning_content"))
+
     def _flatten_content(self, value: object) -> str:
         if isinstance(value, str):
             return value
@@ -561,6 +583,24 @@ class OpenAICompatibleClient:
             nested_text = item.get("content")
             if isinstance(nested_text, str):
                 parts.append(nested_text)
+        return "".join(parts)
+
+    def _flatten_reasoning_content(self, value: object) -> str:
+        if isinstance(value, str):
+            return value
+        if not isinstance(value, list):
+            return ""
+
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, str):
+                parts.append(item)
+                continue
+            if not isinstance(item, dict):
+                continue
+            text = item.get("text")
+            if isinstance(text, str):
+                parts.append(text)
         return "".join(parts)
 
     def _should_fallback_to_non_stream(self, status_code: int, error_body: str) -> bool:
