@@ -1,6 +1,8 @@
 import unittest
+import ssl
 
 from agent.config import AgentLLMConfig
+from agent.llm_client import CompletionResponse
 from agent.llm_client import OpenAICompatibleClient
 
 
@@ -81,6 +83,72 @@ class ClientParsingTests(unittest.TestCase):
         self.assertEqual(deltas_first[0].name, "apply_patch")
         self.assertIn("*** Begin Patch", deltas_first[0].arguments)
         self.assertIn("*** End Patch", deltas_second[0].arguments)
+
+    def test_retries_empty_non_stream_completion(self) -> None:
+        class RetryClient(OpenAICompatibleClient):
+            def __init__(self, config):  # noqa: ANN001
+                super().__init__(config)
+                self.calls = 0
+
+            def _sleep_before_retry(self, attempt: int) -> None:
+                return None
+
+            def _send_chat_request(self, messages, stream, tools=None, tool_choice=None):  # noqa: ANN001
+                self.calls += 1
+                if self.calls == 1:
+                    return '{"choices":[{"message":{"content":""},"finish_reason":"stop"}]}'
+                return '{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}'
+
+        client = RetryClient(
+            AgentLLMConfig(
+                api_key="key",
+                base_url="https://example.com/v1",
+                model="demo-model",
+                max_retries=1,
+            )
+        )
+
+        response = client.chat_completion_messages([{"role": "user", "content": "hi"}])
+
+        self.assertEqual(response.text, "ok")
+        self.assertEqual(client.calls, 2)
+
+    def test_retries_stream_ssl_eof_before_any_delta(self) -> None:
+        class RetryClient(OpenAICompatibleClient):
+            def __init__(self, config):  # noqa: ANN001
+                super().__init__(config)
+                self.calls = 0
+
+            def _sleep_before_retry(self, attempt: int) -> None:
+                return None
+
+            def _chat_stream_completion_messages_once(self, **kwargs):  # noqa: ANN003
+                self.calls += 1
+                if self.calls == 1:
+                    raise ssl.SSLError("[SSL: UNEXPECTED_EOF_WHILE_READING]")
+                on_text_delta = kwargs.get("on_text_delta")
+                if on_text_delta is not None:
+                    on_text_delta("ok")
+                return CompletionResponse(text="ok")
+
+        client = RetryClient(
+            AgentLLMConfig(
+                api_key="key",
+                base_url="https://example.com/v1",
+                model="demo-model",
+                max_retries=1,
+            )
+        )
+        deltas: list[str] = []
+
+        response = client.chat_stream_completion_messages(
+            [{"role": "user", "content": "hi"}],
+            on_text_delta=deltas.append,
+        )
+
+        self.assertEqual(response.text, "ok")
+        self.assertEqual(deltas, ["ok"])
+        self.assertEqual(client.calls, 2)
 
 
 if __name__ == "__main__":

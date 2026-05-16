@@ -162,6 +162,14 @@ class _LegacyFallbackClient:
         return '{"action":"tool","tool_name":"read_file","tool_arguments":{"filename":"README.md"}}'
 
 
+class _EmptyNativeThenLegacyClient:
+    def chat_completion_messages(self, messages, tools=None, tool_choice=None):  # noqa: ANN001
+        return CompletionResponse()
+
+    def chat_messages(self, messages):  # noqa: ANN001
+        return '{"action":"final","thought":"结束","final_answer":"fallback ok"}'
+
+
 class _NativeStreamingClient:
     def chat_stream_completion_messages(self, messages, tools=None, on_text_delta=None, on_tool_call_delta=None):  # noqa: ANN001
         if on_text_delta is not None:
@@ -213,6 +221,17 @@ class DecideModeTests(unittest.TestCase):
 
         self.assertEqual(decision.action, "tool")
         self.assertEqual(decision.tool_name, "read_file")
+
+    def test_decide_falls_back_to_legacy_json_when_native_response_is_empty(self) -> None:
+        brain = OpenAICompatibleBrain(client=_EmptyNativeThenLegacyClient())
+
+        decision = brain.decide(
+            state=AgentState(task="task", current_input="hello"),
+            tool_definitions={"read_file": {"description": "读取文件", "parameters_schema": None}},
+        )
+
+        self.assertEqual(decision.action, "final")
+        self.assertEqual(decision.final_answer, "fallback ok")
 
     def test_native_streaming_callback_does_not_crash(self) -> None:
         brain = OpenAICompatibleBrain(client=_NativeStreamingClient())

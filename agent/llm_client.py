@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import json
 import logging
+import socket
+import ssl
+import time
 from dataclasses import dataclass, field
+from http.client import RemoteDisconnected
 from typing import Any
 from collections.abc import Callable
 from urllib import error, request
@@ -102,24 +106,36 @@ class OpenAICompatibleClient:
     ) -> CompletionResponse:
         """发送非流式 chat/completions，并解析文本或 tool_calls。"""
 
-        try:
-            response_body = self._send_chat_request(
-                messages=messages,
-                stream=False,
-                tools=tools,
-                tool_choice=tool_choice,
-            )
-        except error.HTTPError as exc:
-            error_body = exc.read().decode("utf-8", errors="replace")
-            if tools and self._should_fallback_to_non_tool_calling(exc.code, error_body):
-                raise UnsupportedToolCallingError(error_body) from exc
-            raise RuntimeError(f"模型接口请求失败: HTTP {exc.code} - {error_body}") from exc
-        except error.URLError as exc:
-            raise RuntimeError(f"模型接口连接失败: {exc.reason}") from exc
+        attempts = self._max_attempts()
+        for attempt in range(attempts):
+            try:
+                response_body = self._send_chat_request(
+                    messages=messages,
+                    stream=False,
+                    tools=tools,
+                    tool_choice=tool_choice,
+                )
+                data = json.loads(response_body)
+                self._log_usage(data.get("usage"))
+                completion = self._extract_chat_completion_response(data)
+                if self._completion_has_content(completion) or attempt == attempts - 1:
+                    return completion
+                self._sleep_before_retry(attempt)
+            except error.HTTPError as exc:
+                error_body = exc.read().decode("utf-8", errors="replace")
+                if tools and self._should_fallback_to_non_tool_calling(exc.code, error_body):
+                    raise UnsupportedToolCallingError(error_body) from exc
+                if self._should_retry_http(exc.code) and attempt < attempts - 1:
+                    self._sleep_before_retry(attempt)
+                    continue
+                raise RuntimeError(f"模型接口请求失败: HTTP {exc.code} - {error_body}") from exc
+            except self._transient_error_types() as exc:
+                if attempt < attempts - 1:
+                    self._sleep_before_retry(attempt)
+                    continue
+                raise RuntimeError(f"模型接口连接失败: {self._format_connection_error(exc)}") from exc
 
-        data = json.loads(response_body)
-        self._log_usage(data.get("usage"))
-        return self._extract_chat_completion_response(data)
+        raise RuntimeError("模型接口没有返回可用文本内容。")
 
     def chat_stream_completion_messages(
         self,
@@ -131,92 +147,139 @@ class OpenAICompatibleClient:
     ) -> CompletionResponse:
         """以 SSE 方式流式获取文本和 tool_calls。"""
 
-        try:
-            api_url = f"{self.config.base_url}/chat/completions"
-            http_request = self._build_request(
-                messages=messages,
-                stream=True,
-                api_url=api_url,
-                tools=tools,
-                tool_choice=tool_choice,
-            )
-            with request.urlopen(http_request, timeout=self.config.timeout) as response:
-                content_type = response.headers.get("Content-Type", "")
-                if "text/event-stream" not in content_type.lower():
-                    response_body = response.read().decode("utf-8")
-                    data = json.loads(response_body)
-                    self._log_usage(data.get("usage"))
-                    completion = self._extract_chat_completion_response(data)
-                    if completion.text and on_text_delta is not None:
-                        on_text_delta(completion.text)
-                    for index, tool_call in enumerate(completion.tool_calls):
-                        if on_tool_call_delta is not None:
-                            on_tool_call_delta(
-                                CompletionToolCallDelta(
-                                    index=index,
-                                    id=tool_call.id,
-                                    name=tool_call.name,
-                                    arguments_delta=tool_call.arguments,
-                                    arguments=tool_call.arguments,
-                                )
-                            )
-                    return completion
+        attempts = self._max_attempts()
+        emitted_any_delta = False
 
-                text_parts: list[str] = []
-                last_usage: object | None = None
-                finish_reason: str | None = None
-                tool_call_buffers: dict[int, dict[str, Any]] = {}
+        def handle_text_delta(delta: str) -> None:
+            nonlocal emitted_any_delta
+            if delta:
+                emitted_any_delta = True
+            if on_text_delta is not None:
+                on_text_delta(delta)
 
-                for event_text in self._iter_sse_events(response):
-                    if event_text == "[DONE]":
-                        break
+        def handle_tool_call_delta(delta: CompletionToolCallDelta) -> None:
+            nonlocal emitted_any_delta
+            if delta.name or delta.arguments_delta or delta.arguments:
+                emitted_any_delta = True
+            if on_tool_call_delta is not None:
+                on_tool_call_delta(delta)
 
-                    payload = json.loads(event_text)
-                    usage = payload.get("usage")
-                    if usage is not None:
-                        last_usage = usage
-
-                    choices = payload.get("choices")
-                    if not isinstance(choices, list) or not choices:
-                        continue
-
-                    first_choice = choices[0]
-                    if not isinstance(first_choice, dict):
-                        continue
-
-                    raw_finish_reason = first_choice.get("finish_reason")
-                    if isinstance(raw_finish_reason, str) and raw_finish_reason:
-                        finish_reason = raw_finish_reason
-
-                    delta_text = self._extract_stream_text(payload)
-                    if delta_text:
-                        text_parts.append(delta_text)
-                        if on_text_delta is not None:
-                            on_text_delta(delta_text)
-
-                    for tool_delta in self._extract_stream_tool_call_deltas(first_choice, tool_call_buffers):
-                        if on_tool_call_delta is not None:
-                            on_tool_call_delta(tool_delta)
-
-                self._log_usage(last_usage)
-                return CompletionResponse(
-                    text="".join(text_parts).strip(),
-                    tool_calls=self._finalize_stream_tool_calls(tool_call_buffers),
-                    finish_reason=finish_reason,
-                )
-        except error.HTTPError as exc:
-            error_body = exc.read().decode("utf-8", errors="replace")
-            if tools and self._should_fallback_to_non_tool_calling(exc.code, error_body):
-                raise UnsupportedToolCallingError(error_body) from exc
-            if self._should_fallback_to_non_stream(exc.code, error_body):
-                return self.chat_completion_messages(
-                    messages,
+        for attempt in range(attempts):
+            try:
+                completion = self._chat_stream_completion_messages_once(
+                    messages=messages,
                     tools=tools,
                     tool_choice=tool_choice,
+                    on_text_delta=handle_text_delta,
+                    on_tool_call_delta=handle_tool_call_delta,
                 )
-            raise RuntimeError(f"模型接口请求失败: HTTP {exc.code} - {error_body}") from exc
-        except error.URLError as exc:
-            raise RuntimeError(f"模型接口连接失败: {exc.reason}") from exc
+                if self._completion_has_content(completion) or attempt == attempts - 1:
+                    return completion
+                self._sleep_before_retry(attempt)
+            except error.HTTPError as exc:
+                error_body = exc.read().decode("utf-8", errors="replace")
+                if tools and self._should_fallback_to_non_tool_calling(exc.code, error_body):
+                    raise UnsupportedToolCallingError(error_body) from exc
+                if self._should_fallback_to_non_stream(exc.code, error_body):
+                    return self.chat_completion_messages(
+                        messages,
+                        tools=tools,
+                        tool_choice=tool_choice,
+                    )
+                if not emitted_any_delta and self._should_retry_http(exc.code) and attempt < attempts - 1:
+                    self._sleep_before_retry(attempt)
+                    continue
+                raise RuntimeError(f"模型接口请求失败: HTTP {exc.code} - {error_body}") from exc
+            except self._transient_error_types() as exc:
+                if not emitted_any_delta and attempt < attempts - 1:
+                    self._sleep_before_retry(attempt)
+                    continue
+                raise RuntimeError(f"模型接口连接失败: {self._format_connection_error(exc)}") from exc
+
+        raise RuntimeError("模型流式接口没有返回可用文本内容。")
+
+    def _chat_stream_completion_messages_once(
+        self,
+        messages: list[dict[str, str]],
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: str | dict[str, object] | None = None,
+        on_text_delta: Callable[[str], None] | None = None,
+        on_tool_call_delta: Callable[[CompletionToolCallDelta], None] | None = None,
+    ) -> CompletionResponse:
+        """执行一次 SSE 请求；重试策略由调用方控制。"""
+
+        api_url = f"{self.config.base_url}/chat/completions"
+        http_request = self._build_request(
+            messages=messages,
+            stream=True,
+            api_url=api_url,
+            tools=tools,
+            tool_choice=tool_choice,
+        )
+        with request.urlopen(http_request, timeout=self.config.timeout) as response:
+            content_type = response.headers.get("Content-Type", "")
+            if "text/event-stream" not in content_type.lower():
+                response_body = response.read().decode("utf-8")
+                data = json.loads(response_body)
+                self._log_usage(data.get("usage"))
+                completion = self._extract_chat_completion_response(data)
+                if completion.text and on_text_delta is not None:
+                    on_text_delta(completion.text)
+                for index, tool_call in enumerate(completion.tool_calls):
+                    if on_tool_call_delta is not None:
+                        on_tool_call_delta(
+                            CompletionToolCallDelta(
+                                index=index,
+                                id=tool_call.id,
+                                name=tool_call.name,
+                                arguments_delta=tool_call.arguments,
+                                arguments=tool_call.arguments,
+                            )
+                        )
+                return completion
+
+            text_parts: list[str] = []
+            last_usage: object | None = None
+            finish_reason: str | None = None
+            tool_call_buffers: dict[int, dict[str, Any]] = {}
+
+            for event_text in self._iter_sse_events(response):
+                if event_text == "[DONE]":
+                    break
+
+                payload = json.loads(event_text)
+                usage = payload.get("usage")
+                if usage is not None:
+                    last_usage = usage
+
+                choices = payload.get("choices")
+                if not isinstance(choices, list) or not choices:
+                    continue
+
+                first_choice = choices[0]
+                if not isinstance(first_choice, dict):
+                    continue
+
+                raw_finish_reason = first_choice.get("finish_reason")
+                if isinstance(raw_finish_reason, str) and raw_finish_reason:
+                    finish_reason = raw_finish_reason
+
+                delta_text = self._extract_stream_text(payload)
+                if delta_text:
+                    text_parts.append(delta_text)
+                    if on_text_delta is not None:
+                        on_text_delta(delta_text)
+
+                for tool_delta in self._extract_stream_tool_call_deltas(first_choice, tool_call_buffers):
+                    if on_tool_call_delta is not None:
+                        on_tool_call_delta(tool_delta)
+
+            self._log_usage(last_usage)
+            return CompletionResponse(
+                text="".join(text_parts).strip(),
+                tool_calls=self._finalize_stream_tool_calls(tool_call_buffers),
+                finish_reason=finish_reason,
+            )
 
     def _build_request(
         self,
@@ -514,6 +577,35 @@ class OpenAICompatibleClient:
             "invalid parameter",
         ]
         return any(hint in normalized for hint in hints)
+
+    def _max_attempts(self) -> int:
+        return max(1, int(getattr(self.config, "max_retries", 2)) + 1)
+
+    def _sleep_before_retry(self, attempt: int) -> None:
+        time.sleep(min(2.0, 0.25 * (2 ** attempt)))
+
+    def _completion_has_content(self, completion: CompletionResponse) -> bool:
+        return bool(completion.text.strip() or completion.tool_calls)
+
+    def _should_retry_http(self, status_code: int) -> bool:
+        return status_code in {408, 409, 425, 429, 500, 502, 503, 504}
+
+    def _transient_error_types(self) -> tuple[type[BaseException], ...]:
+        return (
+            error.URLError,
+            TimeoutError,
+            socket.timeout,
+            ssl.SSLError,
+            RemoteDisconnected,
+            ConnectionResetError,
+            ConnectionAbortedError,
+            BrokenPipeError,
+        )
+
+    def _format_connection_error(self, exc: BaseException) -> object:
+        if isinstance(exc, error.URLError):
+            return exc.reason
+        return exc
 
     def _should_fallback_to_non_tool_calling(self, status_code: int, error_body: str) -> bool:
         if status_code not in {400, 404, 405, 415, 422, 501}:

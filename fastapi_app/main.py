@@ -12,7 +12,7 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,9 +21,15 @@ from pydantic import BaseModel, Field
 
 import re
 
-from agent import AgentEvent, AgentLLMConfig, ChatSession, CodingAgent, OpenAICompatibleClient
+try:
+    from winpty import PtyProcess
+except ImportError:  # pragma: no cover - optional dependency
+    PtyProcess = None
+
+from agent import AgentEvent, AgentLLMConfig, ChatSession, CodingAgent, ConversationMessage, OpenAICompatibleClient
 from coding_agent import CodingPromptBrain, InteractiveCommandSession, build_coding_tools
 from coding_agent.tools import delete_file_in_workspace
+from fastapi_app.session_store import PersistedSessionState, SQLiteSessionStateAdapter
 from fastapi_app.ui_message_stream import UIMessageStreamAdapter, sse_data
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,6 +44,8 @@ DEFAULT_OPEN_FILES = [
     "ToolPanel.tsx",
     "FilePreview.tsx",
 ]
+STATE_DB_PATH = ROOT / ".supercode" / "state.sqlite3"
+_session_store = SQLiteSessionStateAdapter(STATE_DB_PATH)
 
 FILE_TREE_IGNORED_DIR_NAMES = {
     ".git",
@@ -132,7 +140,12 @@ class ChatStreamRequest(BaseModel):
 
 
 class TerminalInputRequest(BaseModel):
-    command: str
+    command: str = ""
+    submit: bool = True
+
+
+class TerminalControlRequest(BaseModel):
+    action: Literal["interrupt"]
 
 
 class ToolConfirmationRequest(BaseModel):
@@ -145,6 +158,10 @@ class TerminalSnapshotResponse(BaseModel):
     revision: int
     isAlive: bool
     shell: str
+    backend: str = "subprocess"
+    cwd: str | None = None
+    supportsInterrupt: bool = False
+    supportsRawInput: bool = True
     fileTree: list[dict[str, Any]] | None = None
     processes: list[dict[str, Any]] | None = None
 
@@ -175,12 +192,29 @@ class TerminalRuntime:
     shell: str = "powershell"
     output: str = ""
     revision: int = 0
+    backend: str = field(default="subprocess", init=False)
+    current_directory: str = field(default="", init=False)
+    supports_interrupt: bool = field(default=False, init=False)
+    supports_raw_input: bool = field(default=True, init=False)
+    pty_process: Any | None = field(default=None, init=False, repr=False)
     process: subprocess.Popen[str] | None = field(default=None, init=False, repr=False)
     lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     stdout_thread: threading.Thread | None = field(default=None, init=False, repr=False)
     stderr_thread: threading.Thread | None = field(default=None, init=False, repr=False)
+    prompt_pattern: re.Pattern[str] = field(
+        default=re.compile(r"(?m)^PS (?P<path>[^\r\n>]+)>"),
+        init=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
+        self.current_directory = self.workspace
+        if PtyProcess is not None:
+            try:
+                self._start_winpty()
+                return
+            except Exception:
+                self.pty_process = None
         self.process = subprocess.Popen(
             [
                 "powershell",
@@ -206,21 +240,68 @@ class TerminalRuntime:
             errors="replace",
             bufsize=1,
         )
+        self.backend = "subprocess"
         self.append_output(f"PowerShell started in {self.workspace}\n")
         self.stdout_thread = threading.Thread(
-            target=self._pump_stream,
+            target=self._pump_pipe_stream,
             args=(self.process.stdout,),
             daemon=True,
         )
         self.stderr_thread = threading.Thread(
-            target=self._pump_stream,
+            target=self._pump_pipe_stream,
             args=(self.process.stderr,),
             daemon=True,
         )
         self.stdout_thread.start()
         self.stderr_thread.start()
 
-    def _pump_stream(self, stream: Any) -> None:
+    def _start_winpty(self) -> None:
+        if PtyProcess is None:
+            raise RuntimeError("winpty 不可用")
+        command = self._build_powershell_command()
+        self.pty_process = PtyProcess.spawn(command)
+        self.backend = "winpty"
+        self.supports_interrupt = True
+        self.append_output(f"PowerShell started in {self.workspace}\n")
+        self.stdout_thread = threading.Thread(
+            target=self._pump_pty_stream,
+            daemon=True,
+        )
+        self.stdout_thread.start()
+
+    def _build_powershell_command(self) -> str:
+        escaped_workspace = self.workspace.replace("'", "''")
+        bootstrap = (
+            "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false); "
+            "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+            "$OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+            "chcp 65001 > $null; "
+            f"Set-Location -LiteralPath '{escaped_workspace}'"
+        )
+        return (
+            "powershell "
+            "-NoLogo "
+            "-NoProfile "
+            "-NoExit "
+            "-ExecutionPolicy Bypass "
+            f'-Command "{bootstrap}"'
+        )
+
+    def _pump_pty_stream(self) -> None:
+        if self.pty_process is None:
+            return
+        try:
+            while self.pty_process.isalive():
+                chunk = self.pty_process.read(1024)
+                if chunk == "":
+                    break
+                self.append_output(chunk)
+        except EOFError:
+            return
+        except Exception:
+            self.append_output("\n[terminal reader stopped unexpectedly]\n")
+
+    def _pump_pipe_stream(self, stream: Any) -> None:
         try:
             while True:
                 chunk = stream.readline()
@@ -233,18 +314,39 @@ class TerminalRuntime:
     def append_output(self, text: str) -> None:
         with self.lock:
             self.output += text
+            inferred_cwd = self._infer_current_directory(self.output[-4096:])
+            if inferred_cwd:
+                self.current_directory = inferred_cwd
             self.revision += 1
 
-    def write(self, command: str) -> None:
-        clean = command.rstrip("\r\n")
-        if not clean:
+    def _infer_current_directory(self, text: str) -> str | None:
+        matches = list(self.prompt_pattern.finditer(text))
+        if not matches:
+            return None
+        return matches[-1].group("path").strip()
+
+    def send_input(self, content: str, submit: bool = True) -> None:
+        payload = content
+        if submit:
+            payload += "\n"
+        if payload == "":
             return
-        prompt = f"PS {self.workspace}> {clean}\n"
-        self.append_output(prompt)
+        if self.pty_process is not None:
+            self.pty_process.write(payload)
+            return
         if self.process is None or self.process.stdin is None:
             raise RuntimeError("terminal process is not available")
-        self.process.stdin.write(clean + "\n")
+        self.process.stdin.write(payload)
         self.process.stdin.flush()
+
+    def write(self, command: str) -> None:
+        self.send_input(command, submit=True)
+
+    def interrupt(self) -> bool:
+        if self.pty_process is None or not hasattr(self.pty_process, "sendcontrol"):
+            return False
+        self.pty_process.sendcontrol("c")
+        return True
 
     def snapshot(self, session_id: str) -> TerminalSnapshotResponse:
         with self.lock:
@@ -254,9 +356,15 @@ class TerminalRuntime:
                 revision=self.revision,
                 isAlive=self.is_alive(),
                 shell=self.shell,
+                backend=self.backend,
+                cwd=self.current_directory or self.workspace,
+                supportsInterrupt=self.supports_interrupt,
+                supportsRawInput=self.supports_raw_input,
             )
 
     def is_alive(self) -> bool:
+        if self.pty_process is not None:
+            return bool(self.pty_process.isalive())
         return self.process is not None and self.process.poll() is None
 
     def clear(self) -> None:
@@ -265,6 +373,17 @@ class TerminalRuntime:
             self.revision += 1
 
     def close(self) -> None:
+        if self.pty_process is not None:
+            try:
+                self.pty_process.write("exit\n")
+            except Exception:
+                pass
+            try:
+                self.pty_process.terminate(force=True)
+            except Exception:
+                pass
+            self.pty_process = None
+            return
         if self.process is None:
             return
         try:
@@ -399,6 +518,10 @@ class UISession:
             revision=snapshot.revision,
             isAlive=snapshot.isAlive,
             shell=snapshot.shell,
+            backend=snapshot.backend,
+            cwd=snapshot.cwd,
+            supportsInterrupt=snapshot.supportsInterrupt,
+            supportsRawInput=snapshot.supportsRawInput,
             fileTree=self.get_file_tree() if include_file_tree else None,
             processes=self.get_managed_processes(active_only=True) if include_processes else None,
         )
@@ -454,6 +577,7 @@ class UISession:
 
     def touch(self) -> None:
         self.updated_at = int(time.time() * 1000)
+        persist_session_state(self)
 
     def summary_title(self) -> str:
         for message in self.history_messages:
@@ -496,6 +620,314 @@ app.add_middleware(
 )
 
 _sessions: dict[str, UISession] = {}
+
+
+def persist_session_state(session: UISession) -> None:
+    try:
+        _session_store.save(session_to_persisted_state(session))
+    except Exception:
+        # Persistence must not interrupt the streaming path.
+        pass
+
+
+def session_to_persisted_state(session: UISession) -> PersistedSessionState:
+    return PersistedSessionState(
+        session_id=session.session_id,
+        workspace=session.workspace,
+        mode=session.mode,
+        model=session.model,
+        title=session.summary_title(),
+        preview=session.summary_preview(),
+        message_count=len(session.history_messages),
+        tool_call_count=len(session.history_tools),
+        created_at=session.created_at,
+        updated_at=session.updated_at,
+        startup_error=session.startup_error,
+        env_file=session.env_file,
+        selected_file_path=session.selected_file_path,
+        open_files=session.open_files,
+        terminal_output=session.terminal_output,
+        preview_url=session.preview_url,
+        history_messages=session.history_messages,
+        history_tools=session.history_tools,
+        thoughts=session.thoughts,
+        plan_steps=session.plan_steps,
+        pending_delete_confirmations=session.pending_delete_confirmations,
+    )
+
+
+def persisted_state_to_history_item(state: PersistedSessionState) -> SessionHistoryItem:
+    return SessionHistoryItem(
+        sessionId=state.session_id,
+        workspace=state.workspace,
+        mode=state.mode,
+        model=state.model,
+        title=state.title,
+        preview=state.preview,
+        messageCount=state.message_count,
+        toolCallCount=state.tool_call_count,
+        createdAt=state.created_at,
+        updatedAt=state.updated_at,
+    )
+
+
+def hydrate_session_from_state(state: PersistedSessionState) -> UISession:
+    chat_session, model_name, startup_error, env_file_used = build_chat_session(
+        state.workspace,
+        state.env_file,
+    )
+    interactive_command_session = InteractiveCommandSession(
+        workspace=resolve_workspace_path(state.workspace)
+    )
+    session = UISession(
+        session_id=state.session_id,
+        model=model_name if chat_session is not None else state.model,
+        workspace=state.workspace,
+        mode="agent" if chat_session is not None else state.mode,
+        startup_error=startup_error if chat_session is None else state.startup_error,
+        env_file=env_file_used or state.env_file,
+        selected_file_path=state.selected_file_path,
+        open_files=state.open_files,
+        terminal_output=state.terminal_output,
+        preview_url=state.preview_url or DEFAULT_BROWSER_PREVIEW_URL,
+        terminal_runtime=TerminalRuntime(workspace=state.workspace),
+        interactive_command_session=interactive_command_session,
+        chat_session=chat_session,
+        history_messages=state.history_messages,
+        history_tools=state.history_tools,
+        thoughts=state.thoughts,
+        created_at=state.created_at,
+        updated_at=state.updated_at,
+        plan_steps=state.plan_steps,
+        pending_delete_confirmations=state.pending_delete_confirmations,
+    )
+    if session.chat_session is not None:
+        seed_chat_session_history(session.chat_session, state.history_messages)
+    if session.chat_session is not None and isinstance(session.chat_session.agent, CodingAgent):
+        attach_agent_runtime_metadata(
+            session.chat_session.agent,
+            session_id=session.session_id,
+            interactive_command_session=interactive_command_session,
+            cancel_event=session.cancel_event,
+        )
+    return session
+
+
+def ensure_user_message_recorded(session: UISession, user_message: str) -> None:
+    cleaned_message = user_message.strip()
+    if not cleaned_message:
+        return
+    last_message = session.history_messages[-1] if session.history_messages else None
+    if (
+        isinstance(last_message, dict)
+        and last_message.get("role") == "user"
+        and str(last_message.get("content", "")).strip() == cleaned_message
+    ):
+        return
+    session.history_messages.append(
+        {"id": uuid.uuid4().hex, "role": "user", "content": cleaned_message}
+    )
+    session.touch()
+
+
+def update_assistant_history_message(
+    session: UISession,
+    assistant_id: str,
+    updater: Any,
+) -> None:
+    current_message = next(
+        (
+            message
+            for message in session.history_messages
+            if message.get("id") == assistant_id and message.get("role") == "assistant"
+        ),
+        None,
+    )
+    base_message = (
+        {**current_message}
+        if isinstance(current_message, dict)
+        else {
+            "id": assistant_id,
+            "role": "assistant",
+            "content": "",
+            "thoughts": "",
+            "toolCalls": [],
+            "parts": [],
+        }
+    )
+    next_message = updater(base_message)
+    session.history_messages = upsert_message(session.history_messages, next_message)
+    session.touch()
+
+
+def sync_assistant_message_fields(message: dict[str, Any]) -> dict[str, Any]:
+    parts = message.get("parts")
+    if not isinstance(parts, list):
+        return message
+
+    text_parts = [
+        str(part.get("text") or "")
+        for part in parts
+        if isinstance(part, dict) and part.get("type") == "text"
+    ]
+    thinking_parts = [
+        str(part.get("text") or "")
+        for part in parts
+        if isinstance(part, dict) and part.get("type") == "thinking" and str(part.get("text") or "").strip()
+    ]
+    tool_calls = [
+        part.get("toolCall")
+        for part in parts
+        if isinstance(part, dict) and part.get("type") == "tool_call" and isinstance(part.get("toolCall"), dict)
+    ]
+    return {
+        **message,
+        "content": "".join(text_parts),
+        "thoughts": "\n\n".join(thinking_parts),
+        "toolCalls": tool_calls,
+    }
+
+
+def append_assistant_part_delta(
+    session: UISession,
+    assistant_id: str,
+    part_type: str,
+    delta: str,
+) -> None:
+    if not delta:
+        return
+
+    def _updater(message: dict[str, Any]) -> dict[str, Any]:
+        parts = list(message.get("parts") or [])
+        last_part = parts[-1] if parts else None
+        if isinstance(last_part, dict) and last_part.get("type") == part_type:
+            parts[-1] = {**last_part, "text": f"{str(last_part.get('text') or '')}{delta}"}
+        else:
+            parts.append({"type": part_type, "text": delta})
+        return sync_assistant_message_fields({**message, "parts": parts})
+
+    update_assistant_history_message(session, assistant_id, _updater)
+
+
+def upsert_assistant_thinking_part(
+    session: UISession,
+    assistant_id: str,
+    thought_text: str,
+) -> None:
+    if not thought_text.strip():
+        return
+
+    def _updater(message: dict[str, Any]) -> dict[str, Any]:
+        parts = list(message.get("parts") or [])
+        for index in range(len(parts) - 1, -1, -1):
+            part = parts[index]
+            if not isinstance(part, dict) or part.get("type") != "thinking":
+                continue
+            existing_text = str(part.get("text") or "")
+            if thought_text.startswith(existing_text) or existing_text.startswith(thought_text):
+                parts[index] = {**part, "text": thought_text}
+                return sync_assistant_message_fields({**message, "parts": parts})
+            break
+        parts.append({"type": "thinking", "text": thought_text})
+        return sync_assistant_message_fields({**message, "parts": parts})
+
+    update_assistant_history_message(session, assistant_id, _updater)
+
+
+def replace_assistant_text_part(
+    session: UISession,
+    assistant_id: str,
+    text: str,
+) -> None:
+    def _updater(message: dict[str, Any]) -> dict[str, Any]:
+        parts = [
+            part
+            for part in list(message.get("parts") or [])
+            if not (isinstance(part, dict) and part.get("type") == "text")
+        ]
+        if text:
+            parts.append({"type": "text", "text": text})
+        return sync_assistant_message_fields({**message, "parts": parts})
+
+    update_assistant_history_message(session, assistant_id, _updater)
+
+
+def clear_assistant_text_part(session: UISession, assistant_id: str) -> None:
+    replace_assistant_text_part(session, assistant_id, "")
+
+
+def append_assistant_tool_call(
+    session: UISession,
+    assistant_id: str,
+    tool_call: dict[str, Any],
+) -> None:
+    tool_id = str(tool_call.get("id") or "").strip()
+    if not tool_id:
+        return
+
+    def _updater(message: dict[str, Any]) -> dict[str, Any]:
+        parts = list(message.get("parts") or [])
+        replaced = False
+        next_parts: list[dict[str, Any]] = []
+        for part in parts:
+            if (
+                isinstance(part, dict)
+                and part.get("type") == "tool_call"
+                and isinstance(part.get("toolCall"), dict)
+                and str(part["toolCall"].get("id") or "") == tool_id
+            ):
+                next_parts.append({"type": "tool_call", "toolCall": {**part["toolCall"], **tool_call}})
+                replaced = True
+            else:
+                next_parts.append(part)
+        if not replaced:
+            next_parts.append({"type": "tool_call", "toolCall": tool_call})
+        return sync_assistant_message_fields({**message, "parts": next_parts})
+
+    update_assistant_history_message(session, assistant_id, _updater)
+
+
+def update_assistant_tool_call(
+    session: UISession,
+    assistant_id: str,
+    tool_id: str,
+    updater: Any,
+) -> None:
+    def _message_updater(message: dict[str, Any]) -> dict[str, Any]:
+        parts = list(message.get("parts") or [])
+        next_parts: list[dict[str, Any]] = []
+        found = False
+        for part in parts:
+            if (
+                isinstance(part, dict)
+                and part.get("type") == "tool_call"
+                and isinstance(part.get("toolCall"), dict)
+                and str(part["toolCall"].get("id") or "") == tool_id
+            ):
+                next_parts.append({"type": "tool_call", "toolCall": updater({**part["toolCall"]})})
+                found = True
+            else:
+                next_parts.append(part)
+        if not found:
+            next_parts.append({"type": "tool_call", "toolCall": updater({"id": tool_id})})
+        return sync_assistant_message_fields({**message, "parts": next_parts})
+
+    update_assistant_history_message(session, assistant_id, _message_updater)
+
+
+def seed_chat_session_history(
+    chat_session: ChatSession,
+    history_messages: list[dict[str, Any]],
+) -> None:
+    chat_session.state.conversation_messages = [
+        ConversationMessage(
+            role=str(message.get("role", "")),
+            content=str(message.get("content", "")),
+        )
+        for message in history_messages
+        if str(message.get("role", "")) in {"user", "assistant", "system"}
+        and str(message.get("content", "")).strip()
+    ]
 
 
 def stop_session_execution(session: UISession) -> list[dict[str, Any]]:
@@ -546,6 +978,7 @@ async def switch_session_model(session_id: str, request: SwitchModelRequest) -> 
     interactive_command_session = session.interactive_command_session
 
     session.chat_session = ChatSession(agent=agent)
+    seed_chat_session_history(session.chat_session, session.history_messages)
     if isinstance(session.chat_session.agent, CodingAgent):
         attach_agent_runtime_metadata(
             session.chat_session.agent,
@@ -611,6 +1044,7 @@ async def create_session(request: CreateSessionRequest) -> JSONResponse:
             cancel_event=session.cancel_event,
         )
     _sessions[session_id] = session
+    persist_session_state(session)
 
     try:
         snapshot = await asyncio.wait_for(
@@ -642,11 +1076,7 @@ async def create_session(request: CreateSessionRequest) -> JSONResponse:
 
 @app.get("/api/sessions/history")
 async def get_session_history() -> JSONResponse:
-    history = sorted(
-        (session.history_snapshot().model_dump() for session in _sessions.values()),
-        key=lambda item: item["updatedAt"],
-        reverse=True,
-    )
+    history = [persisted_state_to_history_item(state).model_dump() for state in _session_store.list()]
     return JSONResponse({"sessions": history})
 
 
@@ -682,12 +1112,15 @@ async def get_session_snapshot(session_id: str) -> JSONResponse:
 async def delete_session(session_id: str) -> JSONResponse:
     session = _sessions.pop(session_id, None)
     if session is None:
-        raise HTTPException(status_code=404, detail="session 不存在")
-    stop_session_execution(session)
-    if session.terminal_runtime is not None:
-        session.terminal_runtime.close()
-    if session.interactive_command_session is not None:
-        session.interactive_command_session.close()
+        if _session_store.load(session_id) is None:
+            raise HTTPException(status_code=404, detail="session 不存在")
+    else:
+        stop_session_execution(session)
+        if session.terminal_runtime is not None:
+            session.terminal_runtime.close()
+        if session.interactive_command_session is not None:
+            session.interactive_command_session.close()
+    _session_store.delete(session_id)
     return JSONResponse({"deleted": True, "sessionId": session_id})
 
 
@@ -925,10 +1358,25 @@ async def post_session_terminal_input(
     session = require_session(session_id)
     if session.terminal_runtime is None:
         raise HTTPException(status_code=404, detail="terminal 不存在")
-    command = request.command.strip()
-    if not command:
-        raise HTTPException(status_code=400, detail="command 不能为空")
-    session.terminal_runtime.write(command)
+    if request.command == "" and not request.submit:
+        raise HTTPException(status_code=400, detail="command 和 submit 不能同时为空")
+    session.terminal_runtime.send_input(request.command, submit=request.submit)
+    session.touch()
+    snapshot = session.terminal_runtime.snapshot(session_id)
+    session.terminal_output = snapshot.output
+    return JSONResponse(snapshot.model_dump())
+
+
+@app.post("/api/sessions/{session_id}/terminal/control")
+async def post_session_terminal_control(
+    session_id: str,
+    request: TerminalControlRequest,
+) -> JSONResponse:
+    session = require_session(session_id)
+    if session.terminal_runtime is None:
+        raise HTTPException(status_code=404, detail="terminal 不存在")
+    if request.action == "interrupt" and not session.terminal_runtime.interrupt():
+        raise HTTPException(status_code=409, detail="当前终端后端不支持 Ctrl+C 中断")
     session.touch()
     snapshot = session.terminal_runtime.snapshot(session_id)
     session.terminal_output = snapshot.output
@@ -1030,7 +1478,11 @@ async def chat_stream(
 def require_session(session_id: str) -> UISession:
     session = _sessions.get(session_id)
     if session is None:
-        raise HTTPException(status_code=404, detail="session 不存在")
+        persisted_state = _session_store.load(session_id)
+        if persisted_state is None:
+            raise HTTPException(status_code=404, detail="session 不存在")
+        session = hydrate_session_from_state(persisted_state)
+        _sessions[session_id] = session
     return session
 
 
@@ -1096,6 +1548,7 @@ async def run_agent_stream(
     assistant_id = uuid.uuid4().hex
     streamed_assistant_text = ""
     assistant_stream_started = False
+    ensure_user_message_recorded(session, user_message)
 
     await queue.put(
         {
@@ -1105,6 +1558,7 @@ async def run_agent_stream(
             },
         }
     )
+    update_assistant_history_message(session, assistant_id, lambda message: sync_assistant_message_fields(message))
 
     def on_event(event: AgentEvent) -> None:
         nonlocal streamed_assistant_text, assistant_stream_started
@@ -1113,6 +1567,7 @@ async def run_agent_stream(
             return
 
         if event.type == "thought_delta" and event.delta:
+            append_assistant_part_delta(session, assistant_id, "thinking", event.delta)
             loop.call_soon_threadsafe(
                 queue.put_nowait,
                 {
@@ -1130,7 +1585,7 @@ async def run_agent_stream(
             thought_text = event.thought or ""
             if thought_text:
                 session.thoughts.append(thought_text)
-                session.touch()
+                upsert_assistant_thinking_part(session, assistant_id, thought_text)
             loop.call_soon_threadsafe(
                 queue.put_nowait,
                 {
@@ -1152,15 +1607,7 @@ async def run_agent_stream(
                 )
 
             streamed_assistant_text += event.delta
-            session.history_messages = upsert_message(
-                session.history_messages,
-                {
-                    "id": assistant_id,
-                    "role": "assistant",
-                    "content": streamed_assistant_text,
-                },
-            )
-            session.touch()
+            append_assistant_part_delta(session, assistant_id, "text", event.delta)
             loop.call_soon_threadsafe(
                 queue.put_nowait,
                 {
@@ -1180,6 +1627,17 @@ async def run_agent_stream(
                 maybe_filename = event.tool_call.arguments.get("filename")
                 if isinstance(maybe_filename, str):
                     session.selected_file_path = normalize_relative_path(maybe_filename, session.workspace)
+            append_assistant_tool_call(
+                session,
+                assistant_id,
+                {
+                    "id": tool_id,
+                    "stepIndex": event.step_index,
+                    "name": event.tool_call.name,
+                    "arguments": event.tool_call.arguments,
+                    "state": "running",
+                },
+            )
             loop.call_soon_threadsafe(
                 queue.put_nowait,
                 {
@@ -1276,7 +1734,15 @@ async def run_agent_stream(
                 "approval": approval,
             }
             session.history_tools = upsert_tool(session.history_tools, tool_record)
-            session.touch()
+            update_assistant_tool_call(
+                session,
+                assistant_id,
+                tool_id,
+                lambda existing: {
+                    **existing,
+                    **tool_record,
+                },
+            )
             loop.call_soon_threadsafe(
                 queue.put_nowait,
                 {
@@ -1349,15 +1815,12 @@ async def run_agent_stream(
                 }
             )
 
-        session.history_messages = upsert_message(
-            session.history_messages,
-            {
-                "id": assistant_id,
-                "role": "assistant",
-                "content": failure_message.strip(),
-            },
+        persisted_failure_content = (
+            f"{streamed_assistant_text}{failure_message}"
+            if streamed_assistant_text
+            else failure_message.strip()
         )
-        session.touch()
+        replace_assistant_text_part(session, assistant_id, persisted_failure_content.strip())
         await queue.put({"type": "assistant_done", "payload": {"id": assistant_id}})
         await queue.put(None)
         return
@@ -1366,15 +1829,7 @@ async def run_agent_stream(
         await queue.put(None)
         return
 
-    session.history_messages = upsert_message(
-        session.history_messages,
-        {
-            "id": assistant_id,
-            "role": "assistant",
-            "content": response.final_output,
-        },
-    )
-    session.touch()
+    replace_assistant_text_part(session, assistant_id, response.final_output)
     remaining_output = response.final_output
     should_reset_before_replay = not assistant_stream_started
     if assistant_stream_started:
@@ -1385,6 +1840,7 @@ async def run_agent_stream(
             remaining_output = response.final_output
 
     if should_reset_before_replay:
+        clear_assistant_text_part(session, assistant_id)
         await queue.put({"type": "assistant_reset", "payload": {"id": assistant_id}})
 
     for chunk in chunk_text(remaining_output):
@@ -1419,6 +1875,7 @@ async def run_demo_stream(
             },
         }
     )
+    update_assistant_history_message(session, assistant_id, lambda message: sync_assistant_message_fields(message))
     demo_file = pick_demo_file(session.workspace)
     demo_events = [
         ("thought", {"thought": f"先分析当前工作区 {session.workspace}，确认目录结构和可操作文件。"}),
@@ -1471,15 +1928,31 @@ async def run_demo_stream(
 
     for event_type, payload in demo_events:
         if event_type == "thought":
-            session.thoughts.append(str(payload["thought"]))
+            thought_text = str(payload["thought"])
+            session.thoughts.append(thought_text)
+            upsert_assistant_thinking_part(session, assistant_id, thought_text)
             session.touch()
             payload = {**payload, "assistant_id": assistant_id}
-        else:
+        elif event_type == "tool_call":
             update_plan_steps_for_tool(
                 session,
                 payload.get("step_index"),
                 str(payload.get("name", "")),
             )
+            append_assistant_tool_call(
+                session,
+                assistant_id,
+                {
+                    "id": payload["id"],
+                    "stepIndex": payload["step_index"],
+                    "name": payload["name"],
+                    "arguments": payload["arguments"],
+                    "state": "running",
+                },
+            )
+            session.touch()
+            payload = {**payload, "assistant_id": assistant_id}
+        else:
             session.history_tools = upsert_tool(
                 session.history_tools,
                 {
@@ -1494,6 +1967,20 @@ async def run_demo_stream(
                     "thought": payload.get("thought"),
                 },
             )
+            append_assistant_tool_call(
+                session,
+                assistant_id,
+                {
+                    "id": payload["id"],
+                    "stepIndex": payload["step_index"],
+                    "name": payload["name"],
+                    "arguments": payload["arguments"],
+                    "output": payload.get("output"),
+                    "success": payload.get("success"),
+                    "errorMessage": payload.get("error_message"),
+                    "state": "completed" if payload.get("success", True) else "error",
+                },
+            )
             session.touch()
             payload = {**payload, "assistant_id": assistant_id}
         await queue.put({"type": event_type, "payload": payload})
@@ -1506,8 +1993,7 @@ async def run_demo_stream(
         "当前雏形会优先把聊天消息、思考步骤、工具调用链、文件树和终端输出全部打通。"
         "如果检测到真实模型配置，就会切到现有 Agent 执行循环；没有配置时则保持 demo 流，方便你先联调前端。"
     )
-    session.history_messages.append({"id": assistant_id, "role": "assistant", "content": answer})
-    session.touch()
+    replace_assistant_text_part(session, assistant_id, answer)
     await queue.put({"type": "assistant_reset", "payload": {"id": assistant_id}})
     for chunk in chunk_text(answer):
         await queue.put({"type": "assistant_delta", "payload": {"id": assistant_id, "delta": chunk}})

@@ -93,6 +93,41 @@ export function hydrateMessages(
     return baseMessages;
   }
 
+  const assistantMessages = baseMessages.filter((message) => message.role === 'assistant');
+  const hasStructuredParts = assistantMessages.some((message) => Array.isArray(message.parts) && message.parts.length > 0);
+
+  if (hasStructuredParts) {
+    return baseMessages.map((message) => {
+      if (message.role !== 'assistant' || !Array.isArray(message.parts)) {
+        return message;
+      }
+
+      const content = message.parts
+        .filter((part): part is Extract<ContentBlock, { type: 'text' }> => part.type === 'text')
+        .map((part) => part.text)
+        .join('');
+      const mergedThoughts = message.parts
+        .filter((part): part is Extract<ContentBlock, { type: 'thinking' }> => part.type === 'thinking')
+        .map((part) => part.text.trim())
+        .filter(Boolean)
+        .join('\n\n');
+      const mergedToolCalls = message.parts
+        .filter((part): part is Extract<ContentBlock, { type: 'tool_call' }> => part.type === 'tool_call')
+        .map((part) => part.toolCall);
+
+      return {
+        ...message,
+        content,
+        thoughts: mergedThoughts,
+        toolCalls: mergedToolCalls,
+      };
+    });
+  }
+
+  if (assistantMessages.length !== 1) {
+    return baseMessages;
+  }
+
   const lastAssistantIndex = [...baseMessages]
     .map((message, index) => ({ message, index }))
     .reverse()

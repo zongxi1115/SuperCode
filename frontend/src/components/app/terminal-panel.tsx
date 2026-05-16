@@ -12,12 +12,16 @@ import { useEffect, useRef } from "react";
 type TerminalPanelProps = {
   output: string;
   input: string;
+  cwd: string;
+  backend: string;
   isOpen: boolean;
   isSubmitting: boolean;
+  supportsInterrupt: boolean;
   isStoppingProcesses: boolean;
   processes: ManagedProcessPayload[];
   onInputChange: (value: string) => void;
   onSubmit: () => void;
+  onInterrupt: () => void;
   onToggle: () => void;
   onClear: () => void;
   onRefreshProcesses: () => void;
@@ -28,12 +32,16 @@ type TerminalPanelProps = {
 export function TerminalPanel({
   output,
   input,
+  cwd,
+  backend,
   isOpen,
   isSubmitting,
+  supportsInterrupt,
   isStoppingProcesses,
   processes,
   onInputChange,
   onSubmit,
+  onInterrupt,
   onToggle,
   onClear,
   onRefreshProcesses,
@@ -56,6 +64,11 @@ export function TerminalPanel({
   }, [isOpen]);
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c" && input.length === 0 && supportsInterrupt) {
+      event.preventDefault();
+      onInterrupt();
+      return;
+    }
     if (event.key === "Enter") {
       event.preventDefault();
       onSubmit();
@@ -77,8 +90,24 @@ export function TerminalPanel({
               <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
                 <TerminalIcon className="w-3.5 h-3.5" />
                 PowerShell
+                <Badge variant="secondary" className="font-mono text-[10px] uppercase">
+                  {backend === "winpty" ? "PTY" : "PIPE"}
+                </Badge>
+                <span className="max-w-[340px] truncate font-mono text-[11px]" title={cwd || "当前目录"}>
+                  {cwd || "等待终端就绪"}
+                </span>
               </div>
               <div className="flex items-center gap-1">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={onInterrupt}
+                  disabled={!supportsInterrupt || isSubmitting}
+                  className="h-7 px-2 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
+                  title={supportsInterrupt ? "发送 Ctrl+C 中断" : "当前终端后端不支持 Ctrl+C"}
+                >
+                  Ctrl+C
+                </Button>
                 <Button
                   variant="ghost"
                   size="icon"
@@ -179,15 +208,15 @@ export function TerminalPanel({
                   value={input}
                   onChange={(event) => onInputChange(event.target.value)}
                   onKeyDown={handleKeyDown}
-                  placeholder="输入命令后回车执行"
+                  placeholder="输入命令或交互输入，回车发送；空输入也可发送回车"
                   className="h-8 border-0 bg-transparent px-0 py-0 font-mono text-xs text-foreground shadow-none focus-visible:ring-0 focus-visible:border-0 placeholder:text-muted-foreground"
                 />
                 <Button
                   size="icon"
                   onClick={onSubmit}
-                  disabled={!input.trim() || isSubmitting}
-                  title="执行命令"
-                  aria-label="执行命令"
+                  disabled={isSubmitting}
+                  title="发送输入"
+                  aria-label="发送输入"
                   className="h-7 w-7 shrink-0 bg-muted text-foreground hover:bg-muted/80"
                 >
                   <CornerDownLeft className="w-4 h-4" />

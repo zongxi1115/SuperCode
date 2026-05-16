@@ -18,6 +18,7 @@ class AgentLLMConfig:
     model: str
     timeout: int = 60
     max_steps: int = 8
+    max_retries: int = 2
 
     @classmethod
     def from_env(cls, env_path: str | Path = ".env") -> "AgentLLMConfig":
@@ -30,6 +31,7 @@ class AgentLLMConfig:
         model = env_values.get("SC_AGENT_MODEL", os.getenv("SC_AGENT_MODEL", "")).strip()
         timeout = int(env_values.get("SC_AGENT_TIMEOUT", os.getenv("SC_AGENT_TIMEOUT", "60")).strip())
         max_steps = int(env_values.get("SC_AGENT_MAX_STEPS", os.getenv("SC_AGENT_MAX_STEPS", "8")).strip())
+        max_retries = int(env_values.get("SC_AGENT_MAX_RETRIES", os.getenv("SC_AGENT_MAX_RETRIES", "2")).strip())
 
         missing_fields: list[str] = []
         if not api_key:
@@ -59,6 +61,7 @@ class AgentLLMConfig:
             model=model,
             timeout=timeout,
             max_steps=max_steps,
+            max_retries=max(0, max_retries),
         )
 
 

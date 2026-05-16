@@ -55,6 +55,9 @@ export default function App() {
   const [terminalOutput, setTerminalOutput] = useState('');
   const [terminalInput, setTerminalInput] = useState('');
   const [isTerminalSubmitting, setIsTerminalSubmitting] = useState(false);
+  const [terminalCwd, setTerminalCwd] = useState('');
+  const [terminalBackend, setTerminalBackend] = useState('subprocess');
+  const [terminalSupportsInterrupt, setTerminalSupportsInterrupt] = useState(false);
   const [managedProcesses, setManagedProcesses] = useState<ManagedProcessPayload[]>([]);
   const [isStoppingProcesses, setIsStoppingProcesses] = useState(false);
   const [selectedFileContent, setSelectedFileContent] = useState('');
@@ -82,6 +85,13 @@ export default function App() {
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
   const activeRequestRef = useRef<AbortController | null>(null);
+
+  const applyTerminalSnapshot = useCallback((data: Partial<TerminalSnapshotPayload>) => {
+    setTerminalOutput((prev) => data.output ?? prev);
+    setTerminalCwd((prev) => data.cwd ?? prev);
+    setTerminalBackend((prev) => data.backend ?? prev);
+    setTerminalSupportsInterrupt((prev) => data.supportsInterrupt ?? prev);
+  }, []);
 
   const refreshTerminalState = useCallback(
     async (options?: {
@@ -113,7 +123,7 @@ export default function App() {
           throw new Error('读取终端状态失败');
         }
         const data: TerminalSnapshotPayload = await res.json();
-        setTerminalOutput(data.output ?? '');
+        applyTerminalSnapshot(data);
         if (Array.isArray(data.fileTree)) {
           setFileTree(data.fileTree);
         }
@@ -126,7 +136,7 @@ export default function App() {
         }
       }
     },
-    [sessionId]
+    [applyTerminalSnapshot, sessionId]
   );
 
   const loadSessionContext = useCallback(
@@ -211,6 +221,9 @@ export default function App() {
     setMessages(hydrateMessages(data.messages ?? [], data.thoughts, data.toolCalls));
     setFileTree(data.fileTree ?? []);
     setTerminalOutput(data.terminalOutput ?? '');
+    setTerminalCwd(data.workspace ?? '');
+    setTerminalBackend('subprocess');
+    setTerminalSupportsInterrupt(false);
     setManagedProcesses([]);
     setWebPreviewUrl(data.previewUrl ?? DEFAULT_WEB_PREVIEW_URL);
     setSelectedFilePath(data.selectedFilePath ?? '');
@@ -375,30 +388,54 @@ export default function App() {
   }, [loadSessionContext, sessionId]);
 
   const sendTerminalCommand = useCallback(async () => {
-    if (!sessionId || !terminalInput.trim() || isTerminalSubmitting) {
+    if (!sessionId || isTerminalSubmitting) {
       return;
     }
 
-    const command = terminalInput.trim();
+    const command = terminalInput;
     setTerminalInput('');
     setIsTerminalSubmitting(true);
     try {
       const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/terminal/input`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command }),
+        body: JSON.stringify({ command, submit: true }),
       });
       if (!res.ok) {
         throw new Error('终端命令发送失败');
       }
       const data: TerminalSnapshotPayload = await res.json();
-      setTerminalOutput(data.output ?? '');
+      applyTerminalSnapshot(data);
     } catch (error) {
       console.error(error);
     } finally {
       setIsTerminalSubmitting(false);
     }
-  }, [isTerminalSubmitting, sessionId, terminalInput]);
+  }, [applyTerminalSnapshot, isTerminalSubmitting, sessionId, terminalInput]);
+
+  const interruptTerminal = useCallback(async () => {
+    if (!sessionId || isTerminalSubmitting || !terminalSupportsInterrupt) {
+      return;
+    }
+
+    setIsTerminalSubmitting(true);
+    try {
+      const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/terminal/control`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'interrupt' }),
+      });
+      if (!res.ok) {
+        throw new Error('终端中断失败');
+      }
+      const data: TerminalSnapshotPayload = await res.json();
+      applyTerminalSnapshot(data);
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setIsTerminalSubmitting(false);
+    }
+  }, [applyTerminalSnapshot, isTerminalSubmitting, sessionId, terminalSupportsInterrupt]);
 
   const clearTerminal = useCallback(async () => {
     if (!sessionId || isTerminalSubmitting) {
@@ -414,13 +451,13 @@ export default function App() {
         throw new Error('终端清空失败');
       }
       const data: TerminalSnapshotPayload = await res.json();
-      setTerminalOutput(data.output ?? '');
+      applyTerminalSnapshot(data);
     } catch (error) {
       console.error(error);
     } finally {
       setIsTerminalSubmitting(false);
     }
-  }, [isTerminalSubmitting, sessionId]);
+  }, [applyTerminalSnapshot, isTerminalSubmitting, sessionId]);
 
   const handleTerminalToggle = useCallback(() => {
     setHasTerminalBeenOpened(true);
@@ -587,6 +624,9 @@ export default function App() {
         setMessages([]);
         setFileTree([]);
         setTerminalOutput('');
+        setTerminalCwd('');
+        setTerminalBackend('subprocess');
+        setTerminalSupportsInterrupt(false);
         setSelectedFileContent('');
         setSelectedFilePath('');
         setSessionContext(null);
@@ -741,9 +781,9 @@ export default function App() {
               toolName === 'terminal_wait'
             ) {
               if (typeof payload.terminal_output === 'string') {
-                setTerminalOutput(payload.terminal_output);
+                applyTerminalSnapshot({ output: payload.terminal_output });
               } else if (typeof payload.output === 'string') {
-                setTerminalOutput(payload.output);
+                applyTerminalSnapshot({ output: payload.output });
               }
             }
             if (
@@ -884,7 +924,7 @@ export default function App() {
             }
           } else if (data.type === 'data-terminal-output') {
             if (typeof data.data?.output === 'string') {
-              setTerminalOutput(data.data.output);
+              applyTerminalSnapshot({ output: data.data.output });
             }
           } else if (data.type === 'data-preview-url') {
             if (typeof data.data?.url === 'string') {
@@ -1131,6 +1171,9 @@ export default function App() {
     setMessages([]);
     setFileTree([]);
     setTerminalOutput('');
+    setTerminalCwd('');
+    setTerminalBackend('subprocess');
+    setTerminalSupportsInterrupt(false);
     setManagedProcesses([]);
     setSelectedFileContent('');
     setSelectedFilePath('');
@@ -1228,12 +1271,16 @@ export default function App() {
         <TerminalPanel
           output={terminalOutput}
           input={terminalInput}
+          cwd={terminalCwd}
+          backend={terminalBackend}
           isOpen={isTerminalOpen}
           isSubmitting={isTerminalSubmitting}
+          supportsInterrupt={terminalSupportsInterrupt}
           isStoppingProcesses={isStoppingProcesses}
           processes={managedProcesses}
           onInputChange={setTerminalInput}
           onSubmit={() => void sendTerminalCommand()}
+          onInterrupt={() => void interruptTerminal()}
           onToggle={handleTerminalToggle}
           onClear={() => void clearTerminal()}
           onRefreshProcesses={() => void refreshTerminalState({ includeProcesses: true })}

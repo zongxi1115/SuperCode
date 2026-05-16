@@ -129,6 +129,10 @@ export type TerminalSnapshotPayload = {
   revision: number;
   isAlive: boolean;
   shell: string;
+  backend?: string;
+  cwd?: string | null;
+  supportsInterrupt?: boolean;
+  supportsRawInput?: boolean;
   fileTree?: FileTreeNode[] | null;
   processes?: ManagedProcessPayload[] | null;
 };

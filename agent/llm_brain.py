@@ -83,6 +83,9 @@ class OpenAICompatibleBrain(AgentBrain):
             return self._completion_to_decision(completion)
         except UnsupportedToolCallingError:
             pass
+        except ValueError as exc:
+            if "既没有返回 tool_calls，也没有返回可用文本内容" not in str(exc):
+                raise
 
         messages = self._build_messages(state, tool_definitions, response_mode="legacy_json")
         if on_stream is None:
