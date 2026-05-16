@@ -7,17 +7,18 @@ import {
 } from '@/components/ai-elements/web-preview';
 import { Button } from '@/components/ui/button';
 import { AnimatePresence, motion } from 'motion/react';
-import { Globe, PanelRightClose, PanelRightOpen, RefreshCw, X } from 'lucide-react';
-import { useCallback, useRef, useState } from 'react';
+import { PanelRightOpen, RefreshCw, X } from 'lucide-react';
+import { useCallback, useRef } from 'react';
 
 type WebPreviewPanelProps = {
   isOpen: boolean;
   onToggle: () => void;
+  url: string;
+  onUrlChange: (url: string) => void;
 };
 
-export function WebPreviewPanel({ isOpen, onToggle }: WebPreviewPanelProps) {
+export function WebPreviewPanel({ isOpen, onToggle, url, onUrlChange }: WebPreviewPanelProps) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
-  const [previewUrl, setPreviewUrl] = useState('http://localhost:5173');
 
   const handleRefresh = useCallback(() => {
     if (iframeRef.current) {
@@ -37,7 +38,7 @@ export function WebPreviewPanel({ isOpen, onToggle }: WebPreviewPanelProps) {
             className="border-l bg-background flex flex-col min-w-0 overflow-hidden"
             style={{ maxWidth: '50%', minWidth: 320 }}
           >
-            <WebPreview defaultUrl={previewUrl} onUrlChange={setPreviewUrl} className="rounded-none border-0">
+            <WebPreview url={url} onUrlChange={onUrlChange} className="rounded-none border-0">
               <WebPreviewNavigation>
                 <WebPreviewNavigationButton tooltip="刷新" onClick={handleRefresh}>
                   <RefreshCw className="w-4 h-4" />

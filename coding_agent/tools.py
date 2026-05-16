@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, urlparse
 
 from agent.tools import BaseTool, ToolContext
 
@@ -693,6 +694,94 @@ class ExcecuteTool(ExecuteTool):
     description = "在工作区内执行命令，参数：content、timeout（必填，单位秒）。与 execute 同义。"
 
 
+class OpenBrowserTool(CodingBaseTool):
+    """为前端内置浏览器生成可访问的预览地址。"""
+
+    name = "open_browser"
+    description = (
+        "打开内置浏览器预览。参数二选一："
+        "1) url：网络地址，例如 http://localhost:3000、https://example.com、localhost:5173；"
+        "2) path：本地文件或目录路径，支持工作区内相对路径和绝对路径。"
+        "如果 path 指向目录，会自动寻找其中的 index.html 或 index.htm。"
+        "不要把本地文件路径塞进 url，也不要把网络地址塞进 path。"
+    )
+
+    def run(self, arguments: dict[str, object], context: ToolContext) -> dict[str, str]:
+        raw_path = str(arguments.get("path") or "").strip()
+        raw_url = str(arguments.get("url") or "").strip()
+        raw_target = str(arguments.get("target") or "").strip()
+
+        if raw_path and raw_url:
+            raise ValueError("path 和 url 只能传一个。path 用于本地文件，url 用于网络地址。")
+        if raw_url:
+            selected_kind = "url"
+            selected_target = raw_url
+        elif raw_path:
+            selected_kind = "path"
+            selected_target = raw_path
+        elif raw_target:
+            selected_kind = "url" if self._looks_like_url(raw_target) else "path"
+            selected_target = raw_target
+        else:
+            raise ValueError("必须提供 url 或 path。url 用于网络地址，path 用于本地文件或目录。")
+
+        session_id = str(context.metadata.get("session_id", "")).strip()
+        backend_base_url = str(context.metadata.get("backend_base_url", "http://localhost:8000")).rstrip("/")
+        if not session_id:
+            raise RuntimeError("当前会话缺少 session_id，无法生成预览地址。")
+
+        if selected_kind == "url":
+            resolved_url = self._normalize_url(selected_target)
+            return {
+                "target": selected_target,
+                "resolved_url": resolved_url,
+                "source_type": "network_url",
+            }
+
+        resolved_path = self._resolve_path(selected_target, context)
+        preview_target = self._resolve_preview_target(resolved_path)
+        workspace = context.workspace.resolve()
+        try:
+            relative_preview_path = preview_target.relative_to(workspace).as_posix()
+        except ValueError as exc:
+            raise ValueError(f"预览路径不在工作区内: {selected_target}") from exc
+
+        encoded_preview_path = quote(relative_preview_path, safe="/")
+        return {
+            "target": selected_target,
+            "absolute_path": str(preview_target),
+            "resolved_url": f"{backend_base_url}/api/sessions/{session_id}/preview/{encoded_preview_path}",
+            "source_type": "local_file",
+        }
+
+    def _looks_like_url(self, value: str) -> bool:
+        parsed = urlparse(value)
+        if parsed.scheme in {"http", "https", "file"}:
+            return True
+        if value.startswith(("localhost:", "127.0.0.1:", "0.0.0.0:", "[::1]:")):
+            return True
+        return bool(re.match(r"^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(:\d+)?([/?#].*)?$", value))
+
+    def _normalize_url(self, value: str) -> str:
+        parsed = urlparse(value)
+        if parsed.scheme:
+            return value
+        return f"http://{value}"
+
+    def _resolve_preview_target(self, target: Path) -> Path:
+        if target.is_dir():
+            for entry_name in ("index.html", "index.htm"):
+                candidate = target / entry_name
+                if candidate.exists() and candidate.is_file():
+                    return candidate
+            raise FileNotFoundError(f"目录下未找到可预览入口文件: {target}")
+        if not target.exists():
+            raise FileNotFoundError(f"预览目标不存在: {target}")
+        if not target.is_file():
+            raise ValueError(f"预览目标不是文件: {target}")
+        return target
+
+
 class GreepToolCompat(GrepFileTool):
     """保留一个兼容类名，避免以后手滑拼错导入。"""
 
@@ -708,6 +797,7 @@ def build_coding_tools() -> list[BaseTool]:
         ReplaceFileTool(),
         TerminalInputTool(),
         TerminalWaitTool(),
+        OpenBrowserTool(),
         ExcecuteTool(),
         ExecuteTool(),
     ]

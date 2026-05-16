@@ -99,6 +99,14 @@ function getToolIcon(name: string) {
   return TOOL_ICONS[name] ?? <FileCodeIcon className="size-4" />;
 }
 
+function normalizeThoughtText(value?: string | null) {
+  const trimmed = value?.trim() ?? '';
+  if (!trimmed || trimmed === '模型未提供思路。') {
+    return '';
+  }
+  return trimmed;
+}
+
 function ToolBody({ toolCall }: { toolCall: ToolCallRecord }) {
   const args = toolCall.arguments || {};
   const output = toolCall.state === 'completed' ? toolCall.output : undefined;
@@ -173,6 +181,37 @@ function ToolBody({ toolCall }: { toolCall: ToolCallRecord }) {
           code={output}
           language={filename ? getFileLanguage(filename) as never : 'text'}
         />
+      </div>
+    );
+  }
+
+  if (
+    toolCall.name === 'open_browser' &&
+    output &&
+    typeof output === 'object' &&
+    !Array.isArray(output)
+  ) {
+    const browserPayload = output as Record<string, unknown>;
+    const targetValue = typeof browserPayload.target === 'string' ? browserPayload.target : undefined;
+    const resolvedUrl = typeof browserPayload.resolved_url === 'string' ? browserPayload.resolved_url : undefined;
+    const sourceType = typeof browserPayload.source_type === 'string' ? browserPayload.source_type : undefined;
+    const absolutePath = typeof browserPayload.absolute_path === 'string' ? browserPayload.absolute_path : undefined;
+
+    return (
+      <div className="space-y-2 rounded-md bg-muted/50 p-3 text-xs">
+        <p className="font-medium text-foreground">已在右侧浏览器预览中打开</p>
+        {targetValue ? <p className="text-muted-foreground">目标：{targetValue}</p> : null}
+        {sourceType ? (
+          <p className="text-muted-foreground">
+            类型：{sourceType === 'network_url' ? '网络地址' : sourceType === 'local_file' ? '本地文件' : sourceType}
+          </p>
+        ) : null}
+        {absolutePath ? <p className="text-muted-foreground">绝对路径：{absolutePath}</p> : null}
+        {resolvedUrl ? (
+          <pre className="overflow-x-auto whitespace-pre-wrap rounded bg-background/80 p-2 font-mono">
+            {resolvedUrl}
+          </pre>
+        ) : null}
       </div>
     );
   }
@@ -379,7 +418,8 @@ const MessageList = memo(function MessageList({
 
   const renderLegacyAssistant = (msg: ChatMessage, isLast: boolean) => {
     if (isLast) {
-      const hasThoughts = Boolean(msg.thoughts?.trim());
+      const thoughtText = normalizeThoughtText(msg.thoughts);
+      const hasThoughts = Boolean(thoughtText);
       const hasToolCalls = (msg.toolCalls?.length ?? 0) > 0;
 
       return (
@@ -389,11 +429,11 @@ const MessageList = memo(function MessageList({
               <ChainOfThoughtHeader>
                 <span>思考过程</span>
               </ChainOfThoughtHeader>
-              <ChainOfThoughtContent>
-                <ChainOfThoughtStep
-                  label={msg.thoughts}
-                  status={isLoading ? 'active' : 'complete'}
-                />
+                <ChainOfThoughtContent>
+                  <ChainOfThoughtStep
+                    label={thoughtText}
+                    status={isLoading ? 'active' : 'complete'}
+                  />
                 {hasToolCalls ? (
                   <div className="space-y-2">
                     {msg.toolCalls?.map((tc, tci) => renderToolCall(tc, tci === (msg.toolCalls?.length ?? 0) - 1))}

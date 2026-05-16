@@ -28,6 +28,24 @@ import {
   workspaceOptionsToDirectoryNodes,
 } from '@/lib/app-utils';
 
+const DEFAULT_WEB_PREVIEW_URL = 'http://localhost:5173';
+
+function getPreviewUrlFromToolPayload(payload: { preview_url?: unknown; output?: unknown }) {
+  if (typeof payload.preview_url === 'string' && payload.preview_url.trim()) {
+    return payload.preview_url;
+  }
+  if (
+    payload.output &&
+    typeof payload.output === 'object' &&
+    'resolved_url' in payload.output &&
+    typeof payload.output.resolved_url === 'string' &&
+    payload.output.resolved_url.trim()
+  ) {
+    return payload.output.resolved_url;
+  }
+  return null;
+}
+
 export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
@@ -46,6 +64,7 @@ export default function App() {
   const [isSessionBooting, setIsSessionBooting] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(280);
   const [isFileTreeCollapsed, setIsFileTreeCollapsed] = useState(false);
   const [isContextOpen, setIsContextOpen] = useState(false);
   const [isContextLoading, setIsContextLoading] = useState(false);
@@ -53,6 +72,7 @@ export default function App() {
   const [isTerminalOpen, setIsTerminalOpen] = useState(false);
   const [hasTerminalBeenOpened, setHasTerminalBeenOpened] = useState(false);
   const [isWebPreviewOpen, setIsWebPreviewOpen] = useState(false);
+  const [webPreviewUrl, setWebPreviewUrl] = useState(DEFAULT_WEB_PREVIEW_URL);
   const [chatPanelWidth, setChatPanelWidth] = useState(820);
   const [sessionHistory, setSessionHistory] = useState<SessionHistoryItem[]>([]);
   const [isHistoryLoading, setIsHistoryLoading] = useState(false);
@@ -163,6 +183,7 @@ export default function App() {
     setMessages(hydrateMessages(data.messages ?? [], data.thoughts, data.toolCalls));
     setFileTree(data.fileTree ?? []);
     setTerminalOutput(data.terminalOutput ?? '');
+    setWebPreviewUrl(data.previewUrl ?? DEFAULT_WEB_PREVIEW_URL);
     setSelectedFilePath(data.selectedFilePath ?? '');
     setSelectedFileContent(data.selectedFileContent ?? '');
     setSessionContext(null);
@@ -222,7 +243,7 @@ export default function App() {
     } finally {
       setIsSessionBooting(false);
     }
-  }, [applySessionPayload, loadSessionHistory]);
+  }, [applySessionPayload, loadSessionHistory, selectedModelEnvFile]);
 
   const hasRestoredRef = useRef(false);
 
@@ -446,6 +467,17 @@ export default function App() {
         setSelectedModelEnvFile(data.envFile ?? envFile);
         setBackendMode(data.mode ?? 'agent');
         setStartupError(null);
+        setSessionError(null);
+        setWebPreviewUrl(data.previewUrl ?? DEFAULT_WEB_PREVIEW_URL);
+        setSessionContext((prev) =>
+          prev
+            ? {
+                ...prev,
+                model: data.model ?? prev.model,
+                mode: data.mode ?? prev.mode,
+              }
+            : prev
+        );
       } catch (error) {
         console.error(error);
         setSessionError(error instanceof Error ? error.message : '切换模型失败');
@@ -635,6 +667,13 @@ export default function App() {
             if (['write_file', 'replace_file', 'delete_file'].includes(String(data.payload.name))) {
               void refreshFileTree();
             }
+            if (data.payload.name === 'open_browser') {
+              const previewUrl = getPreviewUrlFromToolPayload(data.payload);
+              if (previewUrl) {
+                setWebPreviewUrl(previewUrl);
+                setIsWebPreviewOpen(true);
+              }
+            }
             const assistantId = data.payload.assistant_id || currentAssistantId;
             if (!assistantId) return;
             currentAssistantId = assistantId;
@@ -731,6 +770,8 @@ export default function App() {
     setIsContextOpen(false);
     setIsTerminalOpen(false);
     setHasTerminalBeenOpened(false);
+    setIsWebPreviewOpen(false);
+    setWebPreviewUrl(DEFAULT_WEB_PREVIEW_URL);
     setShowWorkspacePicker(true);
   }, []);
 
@@ -765,12 +806,19 @@ export default function App() {
         selectedWorkspace={selectedWorkspace}
         backendMode={backendMode}
         startupError={startupError}
+        width={sidebarWidth}
         onNewSession={handleNewSession}
         onSelectHistory={(targetSessionId) => void restoreSession(targetSessionId)}
         onDeleteHistory={(targetSessionId) => void handleDeleteHistory(targetSessionId)}
         onToggle={toggleSidebar}
         onSelectOtherProject={handleSelectOtherProject}
       />
+      {!isSidebarCollapsed && (
+        <ResizableHandle
+          side="left"
+          onResize={(delta) => setSidebarWidth((prev) => Math.min(Math.max(prev + delta, 220), 480))}
+        />
+      )}
       <div style={{ width: chatPanelWidth }} className="flex-shrink-0">
         <ChatPanel
         contextData={sessionContext}
@@ -816,7 +864,12 @@ export default function App() {
           onClear={() => void clearTerminal()}
         />
       </div>
-      <WebPreviewPanel isOpen={isWebPreviewOpen} onToggle={() => setIsWebPreviewOpen((prev) => !prev)} />
+      <WebPreviewPanel
+        isOpen={isWebPreviewOpen}
+        onToggle={() => setIsWebPreviewOpen((prev) => !prev)}
+        url={webPreviewUrl}
+        onUrlChange={setWebPreviewUrl}
+      />
     </div>
   );
 }

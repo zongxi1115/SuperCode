@@ -311,7 +311,7 @@ class OpenAICompatibleBrain(AgentBrain):
         """把 JSON 结构转换成框架里的决策对象。"""
 
         action = str(payload.get("action", "")).strip().lower()
-        thought = str(payload.get("thought", "")).strip() or "模型未提供思路。"
+        thought = str(payload.get("thought", "")).strip()
 
         if not action:
             if "tool_calls" in payload or "tool_name" in payload:

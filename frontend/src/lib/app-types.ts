@@ -85,6 +85,7 @@ export type SessionPayload = {
   mode: 'agent' | 'demo';
   startupError?: string | null;
   envFile?: string | null;
+  previewUrl?: string;
   workspace: string;
   workspaceOptions: WorkspaceOption[];
   messages?: ChatMessage[];

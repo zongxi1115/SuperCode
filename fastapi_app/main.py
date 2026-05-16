@@ -16,7 +16,7 @@ from typing import Any
 
 from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 import re
@@ -26,6 +26,8 @@ from coding_agent import CodingPromptBrain, InteractiveCommandSession, build_cod
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_WORKSPACE = ROOT
+BACKEND_BASE_URL = "http://localhost:8000"
+DEFAULT_BROWSER_PREVIEW_URL = "http://localhost:5173"
 DEFAULT_SELECTED_FILE = None
 DEFAULT_OPEN_FILES = [
     "ChatLayout.tsx",
@@ -65,6 +67,7 @@ class CreateSessionResponse(BaseModel):
     toolCalls: list[dict[str, Any]]
     thoughts: list[str]
     terminalOutput: str
+    previewUrl: str
     fileTree: list[dict[str, Any]]
     selectedFilePath: str | None
     selectedFileContent: str
@@ -262,6 +265,7 @@ class UISession:
     selected_file_path: str | None = DEFAULT_SELECTED_FILE
     open_files: list[str] = field(default_factory=lambda: list(DEFAULT_OPEN_FILES))
     terminal_output: str = ""
+    preview_url: str = DEFAULT_BROWSER_PREVIEW_URL
     terminal_runtime: TerminalRuntime | None = field(default=None, repr=False)
     interactive_command_session: InteractiveCommandSession | None = field(default=None, repr=False)
     chat_session: ChatSession | None = None
@@ -320,6 +324,7 @@ class UISession:
             toolCalls=self.history_tools,
             thoughts=self.thoughts,
             terminalOutput=self.terminal_output,
+            previewUrl=self.preview_url,
             fileTree=build_file_tree(resolve_workspace_path(self.workspace)),
             selectedFilePath=self.selected_file_path,
             selectedFileContent=read_text_file(self.selected_file_path, self.workspace),
@@ -457,8 +462,11 @@ async def switch_session_model(session_id: str, request: SwitchModelRequest) -> 
         max_steps=config.max_steps,
     )
     interactive_command_session = session.interactive_command_session
-    if interactive_command_session is not None:
-        agent.tool_context_metadata["interactive_command_session"] = interactive_command_session
+    attach_agent_runtime_metadata(
+        agent,
+        session_id=session.session_id,
+        interactive_command_session=interactive_command_session,
+    )
 
     session.chat_session = ChatSession(agent=agent)
     session.model = config.model
@@ -471,6 +479,7 @@ async def switch_session_model(session_id: str, request: SwitchModelRequest) -> 
         "model": session.model,
         "mode": session.mode,
         "envFile": session.env_file,
+        "previewUrl": session.preview_url,
     })
 
 
@@ -510,8 +519,10 @@ async def create_session(request: CreateSessionRequest) -> JSONResponse:
         open_files=build_default_open_files(workspace),
     )
     if session.chat_session is not None and isinstance(session.chat_session.agent, CodingAgent):
-        session.chat_session.agent.tool_context_metadata["interactive_command_session"] = (
-            interactive_command_session
+        attach_agent_runtime_metadata(
+            session.chat_session.agent,
+            session_id=session.session_id,
+            interactive_command_session=interactive_command_session,
         )
     _sessions[session_id] = session
 
@@ -533,6 +544,7 @@ async def create_session(request: CreateSessionRequest) -> JSONResponse:
             toolCalls=session.history_tools,
             thoughts=session.thoughts,
             terminalOutput=session.terminal_output,
+            previewUrl=session.preview_url,
             fileTree=[],
             selectedFilePath=session.selected_file_path,
             selectedFileContent="",
@@ -570,6 +582,7 @@ async def get_session_snapshot(session_id: str) -> JSONResponse:
             toolCalls=session.history_tools,
             thoughts=session.thoughts,
             terminalOutput=session.terminal_output,
+            previewUrl=session.preview_url,
             fileTree=[],
             selectedFilePath=session.selected_file_path,
             selectedFileContent="",
@@ -611,6 +624,14 @@ async def get_file(
             "openFiles": session.open_files[-6:],
         }
     )
+
+
+@app.get("/api/sessions/{session_id}/preview")
+@app.get("/api/sessions/{session_id}/preview/{preview_path:path}")
+async def preview_session_file(session_id: str, preview_path: str = "") -> FileResponse:
+    session = require_session(session_id)
+    target = resolve_preview_path(preview_path, session.workspace)
+    return FileResponse(target)
 
 
 @app.get("/api/sessions/{session_id}/file-tree")
@@ -746,6 +767,17 @@ def require_session(session_id: str) -> UISession:
     return session
 
 
+def attach_agent_runtime_metadata(
+    agent: CodingAgent,
+    session_id: str,
+    interactive_command_session: InteractiveCommandSession | None,
+) -> None:
+    agent.tool_context_metadata["session_id"] = session_id
+    agent.tool_context_metadata["backend_base_url"] = BACKEND_BASE_URL
+    if interactive_command_session is not None:
+        agent.tool_context_metadata["interactive_command_session"] = interactive_command_session
+
+
 def build_chat_session(workspace: str, env_file: str | None = None) -> tuple[ChatSession | None, str, str | None, str | None]:
     try:
         env_path = ROOT / (env_file or ".env")
@@ -872,8 +904,11 @@ async def run_agent_stream(
             tool_id = event.tool_call.id or event.tool_result.tool_call_id or f"step-{event.step_index}-{event.tool_call.name}"
             output = event.tool_result.output
             terminal_output = extract_terminal_output(output)
+            preview_url = extract_preview_url(output)
             if event.tool_result.name in {"execute", "excecute", "terminal_input", "terminal_wait"} and terminal_output is not None:
                 session.terminal_output = terminal_output
+            if event.tool_result.name == "open_browser" and preview_url is not None:
+                session.preview_url = preview_url
             tool_record = {
                 "id": tool_id,
                 "stepIndex": event.step_index,
@@ -900,6 +935,7 @@ async def run_agent_stream(
                         "success": event.tool_result.success,
                         "error_message": event.tool_result.error_message,
                         "terminal_output": terminal_output,
+                        "preview_url": preview_url,
                     },
                 },
             )
@@ -1231,6 +1267,27 @@ def normalize_relative_path(raw_path: str, workspace: str) -> str:
     return str(workspace_candidate)
 
 
+def resolve_preview_path(raw_path: str, workspace: str) -> Path:
+    workspace_root = resolve_workspace_path(workspace)
+    normalized = raw_path.strip().strip("/")
+    candidate = workspace_root if not normalized else (workspace_root / normalized).resolve()
+    if workspace_root != candidate and workspace_root not in candidate.parents:
+        raise HTTPException(status_code=400, detail="预览路径越界")
+
+    if candidate.is_dir():
+        for entry_name in ("index.html", "index.htm"):
+            entry = candidate / entry_name
+            if entry.exists() and entry.is_file():
+                return entry
+        raise HTTPException(status_code=404, detail="目录下未找到 index.html")
+
+    if not candidate.exists():
+        raise HTTPException(status_code=404, detail="预览目标不存在")
+    if not candidate.is_file():
+        raise HTTPException(status_code=400, detail="预览目标不是文件")
+    return candidate
+
+
 def build_file_tree(root: Path, max_depth: int = FILE_TREE_MAX_DEPTH) -> list[dict[str, Any]]:
     if not root.exists():
         return []
@@ -1402,6 +1459,14 @@ def extract_terminal_output(output: object) -> str | None:
         full_output = output.get("full_output")
         if isinstance(full_output, str):
             return full_output
+    return None
+
+
+def extract_preview_url(output: object) -> str | None:
+    if isinstance(output, dict):
+        resolved_url = output.get("resolved_url")
+        if isinstance(resolved_url, str) and resolved_url.strip():
+            return resolved_url
     return None
 
 

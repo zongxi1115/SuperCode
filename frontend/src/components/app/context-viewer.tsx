@@ -43,12 +43,18 @@ function trimText(value: string, maxLength = 180) {
   return `${compact.slice(0, maxLength)}...`;
 }
 
+function isMeaningfulThought(value: string) {
+  const trimmed = value.trim();
+  return Boolean(trimmed && trimmed !== '模型未提供思路。');
+}
+
 export function ContextViewer({
   contextData,
   isLoading,
   open,
   onOpenChange,
 }: ContextViewerProps) {
+  const recentThoughts = (contextData?.recentThoughts ?? []).filter(isMeaningfulThought);
   const usedTokens = contextData?.estimatedTokens ?? 0;
   const maxTokens = Math.max(contextData?.maxTokens ?? 1, 1);
   const usage = {
@@ -180,8 +186,8 @@ export function ContextViewer({
                   <section className="space-y-2">
                     <h3 className="text-sm font-medium">最近思考</h3>
                     <div className="space-y-2">
-                      {contextData.recentThoughts.length ? (
-                        contextData.recentThoughts.map((thought, index) => (
+                      {recentThoughts.length ? (
+                        recentThoughts.map((thought, index) => (
                           <div key={index} className="rounded-lg border p-3 text-sm leading-6 text-foreground/85">
                             {trimText(thought, 320)}
                           </div>

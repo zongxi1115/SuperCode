@@ -13,6 +13,7 @@ type SidebarProps = {
   selectedWorkspace: string;
   backendMode: 'agent' | 'demo';
   startupError: string | null;
+  width: number;
   onNewSession: () => void;
   onSelectHistory: (sessionId: string) => void;
   onDeleteHistory: (sessionId: string) => void;
@@ -44,14 +45,15 @@ export function Sidebar({
   onDeleteHistory,
   onToggle,
   onSelectOtherProject,
+  width,
 }: SidebarProps) {
   return (
     <motion.div
-      animate={{ width: isCollapsed ? 48 : 'auto' }}
+      animate={{ width: isCollapsed ? 48 : width }}
       transition={{ duration: 0.25, ease: [0.25, 0.1, 0.25, 1] }}
       className={cn(
         'border-r bg-muted/20 flex flex-col flex-shrink-0 overflow-hidden',
-        !isCollapsed && 'w-[20%] min-w-[220px] max-w-[360px]'
+        !isCollapsed && `min-w-[220px] max-w-[480px]`
       )}
     >
       <div className="flex items-center gap-1 p-2 border-b min-h-[44px]">

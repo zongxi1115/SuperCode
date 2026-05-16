@@ -43,6 +43,7 @@ const useWebPreview = () => {
 
 export type WebPreviewProps = ComponentProps<"div"> & {
   defaultUrl?: string;
+  url?: string;
   onUrlChange?: (url: string) => void;
 };
 
@@ -50,18 +51,22 @@ export const WebPreview = ({
   className,
   children,
   defaultUrl = "",
+  url: controlledUrl,
   onUrlChange,
   ...props
 }: WebPreviewProps) => {
-  const [url, setUrl] = useState(defaultUrl);
+  const [internalUrl, setInternalUrl] = useState(defaultUrl);
   const [consoleOpen, setConsoleOpen] = useState(false);
+  const url = controlledUrl ?? internalUrl;
 
   const handleUrlChange = useCallback(
     (newUrl: string) => {
-      setUrl(newUrl);
+      if (controlledUrl === undefined) {
+        setInternalUrl(newUrl);
+      }
       onUrlChange?.(newUrl);
     },
-    [onUrlChange]
+    [controlledUrl, onUrlChange]
   );
 
   const contextValue = useMemo<WebPreviewContextValue>(
