@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 from typing import Callable
 
 from .schema import AgentEvent, AgentResponse, AgentState, ConversationMessage
@@ -54,6 +55,11 @@ class ChatSession:
         self.state.conversation_messages.append(
             ConversationMessage(role="assistant", content=response.final_output)
         )
+        tool_summary = self._build_tool_summary(response)
+        if tool_summary:
+            self.state.conversation_messages.append(
+                ConversationMessage(role="system", content=tool_summary)
+            )
         self.turns.append(
             ConversationTurn(
                 user_message=cleaned_message,
@@ -68,6 +74,46 @@ class ChatSession:
 
         self.state = AgentState(task=self.task)
         self.turns.clear()
+
+    def _build_tool_summary(self, response: AgentResponse) -> str:
+        tool_steps = [
+            step
+            for step in response.steps
+            if step.tool_call is not None or step.tool_calls or step.tool_result is not None or step.tool_results
+        ]
+        if not tool_steps:
+            return ""
+
+        lines = ["[内部工具轨迹摘要] 以下内容供后续轮次复用，不是新的用户消息。"]
+        for step in tool_steps:
+            step_prefix = f"第 {step.turn_index} 轮 步骤 {step.index}"
+            tool_calls = step.tool_calls or ([step.tool_call] if step.tool_call is not None else [])
+            tool_results = step.tool_results or ([step.tool_result] if step.tool_result is not None else [])
+
+            if step.thought:
+                lines.append(f"{step_prefix} 思考：{step.thought}")
+
+            for tool_call in tool_calls:
+                lines.append(
+                    f"{step_prefix} 工具调用：{tool_call.name} "
+                    f"{json.dumps(tool_call.arguments, ensure_ascii=False)}"
+                )
+
+            for tool_result in tool_results:
+                if tool_result is None:
+                    continue
+                lines.append(f"{step_prefix} 工具是否成功：{tool_result.success}")
+                if tool_result.success:
+                    output_text = (
+                        tool_result.output
+                        if isinstance(tool_result.output, str)
+                        else json.dumps(tool_result.output, ensure_ascii=False)
+                    )
+                    lines.append(f"{step_prefix} 工具输出：{output_text.strip()}")
+                else:
+                    lines.append(f"{step_prefix} 工具错误：{tool_result.error_message}")
+
+        return "\n".join(lines)
 
     def history_as_text(self) -> str:
         """把历史消息转成纯文本，便于调试。"""

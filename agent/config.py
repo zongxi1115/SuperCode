@@ -23,13 +23,13 @@ class AgentLLMConfig:
     def from_env(cls, env_path: str | Path = ".env") -> "AgentLLMConfig":
         """从 `.env` 和系统环境变量中读取配置。"""
 
-        load_dotenv(env_path)
+        env_values = read_dotenv_values(env_path)
 
-        api_key = os.getenv("SC_AGENT_API_KEY", "").strip()
-        base_url = os.getenv("SC_AGENT_BASE_URL", "").strip()
-        model = os.getenv("SC_AGENT_MODEL", "").strip()
-        timeout = int(os.getenv("SC_AGENT_TIMEOUT", "60").strip())
-        max_steps = int(os.getenv("SC_AGENT_MAX_STEPS", "8").strip())
+        api_key = env_values.get("SC_AGENT_API_KEY", os.getenv("SC_AGENT_API_KEY", "")).strip()
+        base_url = env_values.get("SC_AGENT_BASE_URL", os.getenv("SC_AGENT_BASE_URL", "")).strip()
+        model = env_values.get("SC_AGENT_MODEL", os.getenv("SC_AGENT_MODEL", "")).strip()
+        timeout = int(env_values.get("SC_AGENT_TIMEOUT", os.getenv("SC_AGENT_TIMEOUT", "60")).strip())
+        max_steps = int(env_values.get("SC_AGENT_MAX_STEPS", os.getenv("SC_AGENT_MAX_STEPS", "8")).strip())
 
         missing_fields: list[str] = []
         if not api_key:
@@ -84,6 +84,27 @@ def load_dotenv(env_path: str | Path = ".env") -> None:
 
         if env_key and env_key not in os.environ:
             os.environ[env_key] = env_value
+
+
+def read_dotenv_values(env_path: str | Path = ".env") -> dict[str, str]:
+    """读取 `.env` 文件并返回键值，但不写入全局环境变量。"""
+
+    path = Path(env_path)
+    if not path.exists():
+        return {}
+
+    values: dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        env_key = key.strip()
+        env_value = _strip_env_value(value.strip())
+        if env_key:
+            values[env_key] = env_value
+    return values
 
 
 def _strip_env_value(value: str) -> str:

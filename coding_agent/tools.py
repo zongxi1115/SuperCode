@@ -55,6 +55,7 @@ def _kill_process_tree(process: subprocess.Popen[str]) -> None:
 class InteractiveCommand:
     """保存一条可继续输入的命令进程。"""
 
+    terminal_id: str
     command: str
     process: subprocess.Popen[str]
     output: str = ""
@@ -156,51 +157,71 @@ class InteractiveCommand:
 
 @dataclass
 class InteractiveCommandSession:
-    """管理当前会话里可继续输入的一条命令。"""
+    """管理当前会话里多个可继续输入的命令。"""
 
     workspace: Path
     idle_timeout: float = INTERACTIVE_IDLE_SECONDS
-    active_command: InteractiveCommand | None = field(default=None, init=False, repr=False)
+    active_commands: dict[str, InteractiveCommand] = field(default_factory=dict, init=False, repr=False)
+    next_terminal_index: int = field(default=1, init=False, repr=False)
     lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
-    def start_command(self, command: str, timeout: int) -> dict[str, object]:
+    def start_command(
+        self,
+        command: str,
+        timeout: int,
+        terminal_id: str | None = None,
+    ) -> dict[str, object]:
         with self.lock:
             self._clear_finished_locked()
-            if self.active_command is not None and self.active_command.is_alive():
-                raise RuntimeError("已有终端命令正在运行，请先使用 terminal_input 继续交互。")
+            resolved_terminal_id = terminal_id or self._allocate_terminal_id_locked()
+            existing_command = self.active_commands.get(resolved_terminal_id)
+            if existing_command is not None and existing_command.is_alive():
+                raise RuntimeError(
+                    f"终端 {resolved_terminal_id} 已在运行，请改用新的 terminal_id，"
+                    "或使用 terminal_input / terminal_wait 继续交互。"
+                )
 
             process = self._spawn_process(command)
-            self.active_command = InteractiveCommand(command=command, process=process)
-            active_command = self.active_command
+            active_command = InteractiveCommand(
+                terminal_id=resolved_terminal_id,
+                command=command,
+                process=process,
+            )
+            self.active_commands[resolved_terminal_id] = active_command
 
         return self._await_progress(active_command, timeout)
 
-    def send_input(self, content: str, timeout: int) -> dict[str, object]:
+    def send_input(
+        self,
+        content: str,
+        timeout: int,
+        terminal_id: str | None = None,
+    ) -> dict[str, object]:
         with self.lock:
-            active_command = self.active_command
-
-        if active_command is None or not active_command.is_alive():
-            raise RuntimeError("当前没有可继续输入的终端命令。")
+            self._clear_finished_locked()
+            active_command = self._resolve_active_command_locked(terminal_id)
 
         active_command.write_input(content)
         return self._await_progress(active_command, timeout)
 
-    def wait_for_command(self, timeout: int) -> dict[str, object]:
+    def wait_for_command(
+        self,
+        timeout: int,
+        terminal_id: str | None = None,
+    ) -> dict[str, object]:
         with self.lock:
-            active_command = self.active_command
-
-        if active_command is None or not active_command.is_alive():
-            raise RuntimeError("当前没有可等待的终端命令。")
+            self._clear_finished_locked()
+            active_command = self._resolve_active_command_locked(terminal_id)
 
         active_command.mark_activity()
         return self._await_progress(active_command, timeout, return_on_idle=False)
 
     def close(self) -> None:
         with self.lock:
-            active_command = self.active_command
-            self.active_command = None
+            active_commands = list(self.active_commands.values())
+            self.active_commands = {}
 
-        if active_command is not None:
+        for active_command in active_commands:
             active_command.close()
 
     def _spawn_process(self, command: str) -> subprocess.Popen[str]:
@@ -235,8 +256,9 @@ class InteractiveCommandSession:
                 result = self._build_result(active_command, status="completed")
                 active_command.close_streams()
                 with self.lock:
-                    if self.active_command is active_command:
-                        self.active_command = None
+                    current = self.active_commands.get(active_command.terminal_id)
+                    if current is active_command:
+                        self.active_commands.pop(active_command.terminal_id, None)
                 return result
 
             if return_on_idle and active_command.idle_for() >= self.idle_timeout:
@@ -255,6 +277,7 @@ class InteractiveCommandSession:
         delta, full_output = active_command.consume_delta()
         awaiting_input = status == "running" and self._looks_like_prompt(full_output)
         return {
+            "terminal_id": active_command.terminal_id,
             "status": status,
             "command": active_command.command,
             "delta": delta,
@@ -264,8 +287,43 @@ class InteractiveCommandSession:
         }
 
     def _clear_finished_locked(self) -> None:
-        if self.active_command is not None and not self.active_command.is_alive():
-            self.active_command = None
+        finished_ids = [
+            terminal_id
+            for terminal_id, active_command in self.active_commands.items()
+            if not active_command.is_alive()
+        ]
+        for terminal_id in finished_ids:
+            self.active_commands.pop(terminal_id, None)
+
+    def _allocate_terminal_id_locked(self) -> str:
+        while True:
+            terminal_id = f"terminal-{self.next_terminal_index}"
+            self.next_terminal_index += 1
+            if terminal_id not in self.active_commands:
+                return terminal_id
+
+    def _resolve_active_command_locked(self, terminal_id: str | None) -> InteractiveCommand:
+        if terminal_id:
+            active_command = self.active_commands.get(terminal_id)
+            if active_command is None or not active_command.is_alive():
+                raise RuntimeError(f"未找到活动终端: {terminal_id}")
+            return active_command
+
+        active_commands = [
+            active_command
+            for active_command in self.active_commands.values()
+            if active_command.is_alive()
+        ]
+        if not active_commands:
+            raise RuntimeError("当前没有可交互的终端命令。")
+        if len(active_commands) == 1:
+            return active_commands[0]
+
+        terminal_ids = ", ".join(sorted(active_command.terminal_id for active_command in active_commands))
+        raise RuntimeError(
+            "当前存在多个活动终端，请显式传入 terminal_id。"
+            f"可用 terminal_id: {terminal_ids}"
+        )
 
     def _looks_like_prompt(self, full_output: str) -> bool:
         lines = [line.strip().lower() for line in full_output.splitlines() if line.strip()]
@@ -402,7 +460,8 @@ class ReadFileTool(CodingBaseTool):
     name = "read_file"
     description = (
         "读取文件内容，可传 filename、start_line、end_line，返回内容带行号。"
-        "如果返回内容超过 1600 个字符会直接报错，此时必须缩小范围，改用 start_line/end_line 分段读取。"
+        f"如果返回内容超过 {READ_FILE_MAX_OUTPUT_CHARS} 个字符会直接报错，"
+        "此时必须缩小范围，改用 start_line/end_line 分段读取。"
     )
     supports_parallel = True
 
@@ -536,18 +595,22 @@ class ExecuteTool(CodingBaseTool):
     """执行命令。"""
 
     name = "execute"
-    description = "在工作区内执行命令，参数：content、timeout（必填，单位秒）。若命令持续运行，会返回当前输出并允许后续用 terminal_input 继续输入。"
+    description = (
+        "在工作区内执行命令，参数：content、timeout（必填，单位秒）、terminal_id（可选）。"
+        "若命令持续运行，会返回 terminal_id 和当前输出，后续可用 terminal_input / terminal_wait 按 terminal_id 继续交互。"
+    )
 
     def run(self, arguments: dict[str, object], context: ToolContext) -> str:
         command = str(arguments["content"]).strip()
         timeout = self._parse_timeout(arguments)
+        terminal_id = self._parse_terminal_id(arguments)
         if not command:
             raise ValueError("命令内容不能为空。")
         self._validate_command(command)
 
         interactive_session = self._get_interactive_command_session(context)
         if interactive_session is not None:
-            return interactive_session.start_command(command, timeout)
+            return interactive_session.start_command(command, timeout, terminal_id=terminal_id)
 
         return self._run_one_shot_command(command, timeout, context.workspace)
 
@@ -566,6 +629,10 @@ class ExecuteTool(CodingBaseTool):
         if timeout <= 0:
             raise ValueError("timeout 必须大于 0。")
         return timeout
+
+    def _parse_terminal_id(self, arguments: dict[str, object]) -> str | None:
+        raw_terminal_id = str(arguments.get("terminal_id", "")).strip()
+        return raw_terminal_id or None
 
     def _validate_command(self, command: str) -> None:
         """阻止明显危险的命令。"""
@@ -639,11 +706,15 @@ class TerminalInputTool(CodingBaseTool):
     """给当前交互式命令继续输入。"""
 
     name = "terminal_input"
-    description = "向当前正在运行的交互式终端命令发送输入，参数：content、timeout（必填，单位秒）。如果 content 不带换行，会自动补一个回车。"
+    description = (
+        "向当前正在运行的交互式终端命令发送输入，参数：content、timeout（必填，单位秒）、terminal_id（可选）。"
+        "如果同时存在多个活动终端，terminal_id 为必填；如果 content 不带换行，会自动补一个回车。"
+    )
 
     def run(self, arguments: dict[str, object], context: ToolContext) -> dict[str, object]:
         content = str(arguments.get("content", ""))
         timeout = self._parse_timeout(arguments)
+        terminal_id = self._parse_terminal_id(arguments)
         if content == "":
             raise ValueError("content 不能为空。")
 
@@ -651,7 +722,7 @@ class TerminalInputTool(CodingBaseTool):
         if not isinstance(interactive_session, InteractiveCommandSession):
             raise RuntimeError("当前会话没有可交互的终端命令。")
 
-        return interactive_session.send_input(content, timeout)
+        return interactive_session.send_input(content, timeout, terminal_id=terminal_id)
 
     def _parse_timeout(self, arguments: dict[str, object]) -> int:
         raw_timeout = arguments.get("timeout")
@@ -666,21 +737,29 @@ class TerminalInputTool(CodingBaseTool):
         if timeout <= 0:
             raise ValueError("timeout 必须大于 0。")
         return timeout
+
+    def _parse_terminal_id(self, arguments: dict[str, object]) -> str | None:
+        raw_terminal_id = str(arguments.get("terminal_id", "")).strip()
+        return raw_terminal_id or None
 
 
 class TerminalWaitTool(CodingBaseTool):
     """继续等待当前交互式命令。"""
 
     name = "terminal_wait"
-    description = "继续等待当前正在运行的终端命令，参数：timeout（必填，单位秒）。用于后台安装、构建或下载仍在继续时收集后续输出。"
+    description = (
+        "继续等待当前正在运行的终端命令，参数：timeout（必填，单位秒）、terminal_id（可选）。"
+        "如果同时存在多个活动终端，terminal_id 为必填。用于后台安装、构建或下载仍在继续时收集后续输出。"
+    )
 
     def run(self, arguments: dict[str, object], context: ToolContext) -> dict[str, object]:
         timeout = self._parse_timeout(arguments)
+        terminal_id = self._parse_terminal_id(arguments)
         interactive_session = context.metadata.get("interactive_command_session")
         if not isinstance(interactive_session, InteractiveCommandSession):
             raise RuntimeError("当前会话没有可等待的终端命令。")
 
-        return interactive_session.wait_for_command(timeout)
+        return interactive_session.wait_for_command(timeout, terminal_id=terminal_id)
 
     def _parse_timeout(self, arguments: dict[str, object]) -> int:
         raw_timeout = arguments.get("timeout")
@@ -695,6 +774,10 @@ class TerminalWaitTool(CodingBaseTool):
         if timeout <= 0:
             raise ValueError("timeout 必须大于 0。")
         return timeout
+
+    def _parse_terminal_id(self, arguments: dict[str, object]) -> str | None:
+        raw_terminal_id = str(arguments.get("terminal_id", "")).strip()
+        return raw_terminal_id or None
 
 
 class ExcecuteTool(ExecuteTool):

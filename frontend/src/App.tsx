@@ -76,7 +76,7 @@ export default function App() {
   const [chatPanelWidth, setChatPanelWidth] = useState(820);
   const [sessionHistory, setSessionHistory] = useState<SessionHistoryItem[]>([]);
   const [isHistoryLoading, setIsHistoryLoading] = useState(false);
-  const [selectedModelEnvFile, setSelectedModelEnvFile] = useState<string | null>(null);
+  const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
   const activeRequestRef = useRef<AbortController | null>(null);
 
@@ -179,7 +179,7 @@ export default function App() {
     setBackendMode(data.mode);
     setStartupError(data.startupError ?? null);
     setSelectedWorkspace(data.workspace);
-    setSelectedModelEnvFile(data.envFile ?? null);
+    setSelectedModelId(data.model ?? null);
     setMessages(hydrateMessages(data.messages ?? [], data.thoughts, data.toolCalls));
     setFileTree(data.fileTree ?? []);
     setTerminalOutput(data.terminalOutput ?? '');
@@ -221,7 +221,7 @@ export default function App() {
       const res = await fetch('http://localhost:8000/api/sessions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workspace, env_file: selectedModelEnvFile }),
+        body: JSON.stringify({ workspace, model: selectedModelId }),
         signal: controller.signal,
       });
       clearTimeout(timeoutId);
@@ -243,7 +243,7 @@ export default function App() {
     } finally {
       setIsSessionBooting(false);
     }
-  }, [applySessionPayload, loadSessionHistory, selectedModelEnvFile]);
+  }, [applySessionPayload, loadSessionHistory, selectedModelId]);
 
   const hasRestoredRef = useRef(false);
 
@@ -451,20 +451,20 @@ export default function App() {
   );
 
   const handleModelChange = useCallback(
-    async (envFile: string) => {
+    async (modelId: string) => {
       if (!sessionId) return;
       try {
         const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/model`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ env_file: envFile }),
+          body: JSON.stringify({ model: modelId }),
         });
         if (!res.ok) {
           const errText = await res.text();
           throw new Error(errText || '切换模型失败');
         }
         const data = await res.json();
-        setSelectedModelEnvFile(data.envFile ?? envFile);
+        setSelectedModelId(data.model ?? modelId);
         setBackendMode(data.mode ?? 'agent');
         setStartupError(null);
         setSessionError(null);
@@ -827,7 +827,7 @@ export default function App() {
         messages={messages}
         input={input}
         isLoading={isLoading}
-        model={selectedModelEnvFile}
+        model={selectedModelId}
         modelOptions={modelOptions}
         onModelChange={handleModelChange}
         onContextOpenChange={handleContextOpenChange}

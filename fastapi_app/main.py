@@ -107,6 +107,7 @@ class SessionContextResponse(BaseModel):
 
 class CreateSessionRequest(BaseModel):
     workspace: str | None = None
+    model: str | None = None
     env_file: str | None = None
 
 
@@ -437,17 +438,15 @@ async def get_models() -> JSONResponse:
 
 
 class SwitchModelRequest(BaseModel):
-    env_file: str
+    model: str | None = None
+    env_file: str | None = None
 
 
 @app.put("/api/sessions/{session_id}/model")
 async def switch_session_model(session_id: str, request: SwitchModelRequest) -> JSONResponse:
     session = require_session(session_id)
-    env_file_name = request.env_file
-    models = scan_env_models()
-    target = next((m for m in models if m["envFile"] == env_file_name), None)
-    if target is None:
-        raise HTTPException(status_code=400, detail="未找到对应的模型配置")
+    model_option = resolve_model_option(request.model, request.env_file)
+    env_file_name = model_option["envFile"]
 
     try:
         config = AgentLLMConfig.from_env(ROOT / env_file_name)
@@ -456,17 +455,12 @@ async def switch_session_model(session_id: str, request: SwitchModelRequest) -> 
 
     client = OpenAICompatibleClient(config)
     agent = CodingAgent(
-        brain=CodingPromptBrain(client),
+        brain=CodingPromptBrain(client, workspace=session.workspace),
         tools=build_coding_tools(),
         workspace=resolve_workspace_path(session.workspace),
         max_steps=config.max_steps,
     )
     interactive_command_session = session.interactive_command_session
-    attach_agent_runtime_metadata(
-        agent,
-        session_id=session.session_id,
-        interactive_command_session=interactive_command_session,
-    )
 
     session.chat_session = ChatSession(agent=agent)
     session.model = config.model
@@ -493,10 +487,11 @@ async def get_directories(path: str = Query(...)) -> JSONResponse:
 async def create_session(request: CreateSessionRequest) -> JSONResponse:
     session_id = uuid.uuid4().hex
     workspace = normalize_workspace(request.workspace)
+    requested_env_file = resolve_requested_env_file(request.model, request.env_file)
 
     try:
         chat_session, model_name, startup_error, env_file_used = await asyncio.wait_for(
-            asyncio.to_thread(build_chat_session, workspace, request.env_file),
+            asyncio.to_thread(build_chat_session, workspace, requested_env_file),
             timeout=30,
         )
     except asyncio.TimeoutError:
@@ -767,6 +762,29 @@ def require_session(session_id: str) -> UISession:
     return session
 
 
+def resolve_model_option(model_name: str | None, env_file: str | None = None) -> dict[str, str]:
+    models = scan_env_models()
+    if model_name:
+        target = next((model for model in models if model["id"] == model_name), None)
+        if target is None:
+            raise HTTPException(status_code=400, detail="未找到对应的模型配置")
+        return target
+
+    if env_file:
+        target = next((model for model in models if model["envFile"] == env_file), None)
+        if target is None:
+            raise HTTPException(status_code=400, detail="未找到对应的模型配置")
+        return target
+
+    raise HTTPException(status_code=400, detail="必须提供 model。")
+
+
+def resolve_requested_env_file(model_name: str | None, env_file: str | None = None) -> str | None:
+    if model_name or env_file:
+        return resolve_model_option(model_name, env_file)["envFile"]
+    return None
+
+
 def attach_agent_runtime_metadata(
     agent: CodingAgent,
     session_id: str,
@@ -784,7 +802,7 @@ def build_chat_session(workspace: str, env_file: str | None = None) -> tuple[Cha
         config = AgentLLMConfig.from_env(env_path)
         client = OpenAICompatibleClient(config)
         agent = CodingAgent(
-            brain=CodingPromptBrain(client),
+            brain=CodingPromptBrain(client, workspace=workspace),
             tools=build_coding_tools(),
             workspace=resolve_workspace_path(workspace),
             max_steps=config.max_steps,

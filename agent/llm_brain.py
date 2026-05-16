@@ -27,10 +27,9 @@ class OpenAICompatibleBrain(AgentBrain):
     ) -> BrainDecision:
         """调用真实模型，决定下一步动作。"""
 
-        system_prompt = self._build_system_prompt(tool_descriptions)
-        user_prompt = self._build_user_prompt(state)
+        messages = self._build_messages(state, tool_descriptions)
         if on_stream is None:
-            raw_output = self.client.chat(system_prompt=system_prompt, user_prompt=user_prompt)
+            raw_output = self.client.chat_messages(messages)
         else:
             raw_chunks: list[str] = []
 
@@ -47,13 +46,21 @@ class OpenAICompatibleBrain(AgentBrain):
                     )
                 )
 
-            raw_output = self.client.chat_stream(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                on_delta=handle_delta,
-            )
+            raw_output = self.client.chat_stream_messages(messages, on_delta=handle_delta)
         payload = self._parse_json_output(raw_output)
         return self._to_decision(payload)
+
+    def _build_messages(
+        self,
+        state: AgentState,
+        tool_descriptions: dict[str, str],
+    ) -> list[dict[str, str]]:
+        system_prompt = self._build_system_prompt(tool_descriptions)
+        user_prompt = self._build_user_prompt(state)
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
 
     def _build_system_prompt(self, tool_descriptions: dict[str, str]) -> str:
         """构造系统提示词。"""
@@ -132,10 +139,11 @@ class OpenAICompatibleBrain(AgentBrain):
 
         lines: list[str] = []
         for step in step_records:
-            lines.append(f"步骤 {step.index} 思考：{step.thought}")
+            step_prefix = f"第 {step.turn_index} 轮 步骤 {step.index}"
+            lines.append(f"{step_prefix} 思考：{step.thought}")
             if step.tool_call:
                 lines.append(
-                    f"步骤 {step.index} 工具调用：{step.tool_call.name} "
+                    f"{step_prefix} 工具调用：{step.tool_call.name} "
                     f"{json.dumps(step.tool_call.arguments, ensure_ascii=False)}"
                 )
             extra_tool_calls = step.tool_calls if step.tool_calls else []
@@ -144,34 +152,34 @@ class OpenAICompatibleBrain(AgentBrain):
             if extra_tool_calls:
                 for tool_call in extra_tool_calls:
                     lines.append(
-                        f"步骤 {step.index} 工具调用：{tool_call.name} "
+                        f"{step_prefix} 工具调用：{tool_call.name} "
                         f"{json.dumps(tool_call.arguments, ensure_ascii=False)}"
                     )
 
             if step.tool_result:
-                lines.extend(self._format_tool_result_lines(step.index, step.tool_result))
+                lines.extend(self._format_tool_result_lines(step_prefix, step.tool_result))
 
             extra_tool_results = step.tool_results if step.tool_results else []
             if step.tool_result and extra_tool_results:
                 extra_tool_results = extra_tool_results[1:]
             if extra_tool_results:
                 for tool_result in extra_tool_results:
-                    lines.extend(self._format_tool_result_lines(step.index, tool_result))
+                    lines.extend(self._format_tool_result_lines(step_prefix, tool_result))
             if step.final_answer:
-                lines.append(f"步骤 {step.index} 最终答复：{step.final_answer}")
+                lines.append(f"{step_prefix} 最终答复：{step.final_answer}")
         return "\n".join(lines)
 
-    def _format_tool_result_lines(self, step_index: int, tool_result: Any) -> list[str]:
+    def _format_tool_result_lines(self, step_prefix: str, tool_result: Any) -> list[str]:
         """格式化单个工具结果。"""
 
-        lines = [f"步骤 {step_index} 工具是否成功：{tool_result.success}"]
+        lines = [f"{step_prefix} 工具是否成功：{tool_result.success}"]
         if tool_result.success:
             lines.append(
-                f"步骤 {step_index} 工具输出："
+                f"{step_prefix} 工具输出："
                 f"{self._stringify_tool_output(tool_result.output)}"
             )
         else:
-            lines.append(f"步骤 {step_index} 工具错误：{tool_result.error_message}")
+            lines.append(f"{step_prefix} 工具错误：{tool_result.error_message}")
         return lines
 
     def _stringify_tool_output(self, value: object) -> str:

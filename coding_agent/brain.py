@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import platform
 from pathlib import Path
 
 from agent.llm_brain import OpenAICompatibleBrain
 from agent.llm_client import OpenAICompatibleClient
+from agent.schema import AgentState, StepRecord
 
 
 class CodingPromptBrain(OpenAICompatibleBrain):
@@ -13,19 +15,21 @@ class CodingPromptBrain(OpenAICompatibleBrain):
         self,
         client: OpenAICompatibleClient,
         prompt_path: str | Path | None = None,
+        workspace: str | Path | None = None,
     ) -> None:
         super().__init__(client)
         self.prompt_path = Path(prompt_path) if prompt_path is not None else self._default_prompt_path()
+        self.workspace = str(workspace) if workspace is not None else None
 
     def _build_system_prompt(self, tool_descriptions: dict[str, str]) -> str:
-        """加载 coding prompt，并补充当前可用工具说明和输出协议。"""
-
         base_prompt = self.prompt_path.read_text(encoding="utf-8").strip()
         tool_lines = [f"- {tool_name}: {description}" for tool_name, description in tool_descriptions.items()]
+        system_info = self._build_system_info()
 
         return "\n\n".join(
             [
                 base_prompt,
+                system_info,
                 "## 当前工具注册表",
                 "\n".join(tool_lines),
                 "\n".join(
@@ -45,15 +49,84 @@ class CodingPromptBrain(OpenAICompatibleBrain):
                         "4. 如果 action 是 final，必须提供 final_answer。",
                         "5. 在真正修改文件前，优先先探索相关目录、文件和引用关系。",
                         "6. 普通答疑可以直接 final；需要查看或修改项目时再调用工具。",
-                        "7. 命令执行工具优先使用 `excecute`；如果输出里提到 `execute`，可视为同义工具。调用时必须提供 `content` 和 `timeout`（秒）。",
-                        "8. 如果 execute/excecute 返回的结果里 `status` 是 `running` 且 `awaiting_input` 为 true，说明命令很可能在等输入，应根据输出调用 `terminal_input`。",
-                        "9. 如果 execute/excecute 返回的结果里 `status` 是 `running` 且 `awaiting_input` 为 false，说明命令大概率仍在后台执行，应调用 `terminal_wait` 继续等待。",
+                        "7. 命令执行工具优先使用 `excecute`；如果输出里提到 `execute`，可视为同义工具。调用时必须提供 `content` 和 `timeout`（秒），并可选传 `terminal_id`。",
+                        "8. 如果 execute/excecute 返回的结果里 `status` 是 `running` 且 `awaiting_input` 为 true，说明命令很可能在等输入，应根据输出调用 `terminal_input`。如果结果里带有 `terminal_id`，后续继续交互时要沿用同一个 `terminal_id`。",
+                        "9. 如果 execute/excecute 返回的结果里 `status` 是 `running` 且 `awaiting_input` 为 false，说明命令大概率仍在后台执行，应调用 `terminal_wait` 继续等待。多个活动终端并存时，必须显式传 `terminal_id`。",
                     ]
                 ),
             ]
         )
 
-    def _default_prompt_path(self) -> Path:
-        """返回默认提示词路径。"""
+    def _build_messages(
+        self,
+        state: AgentState,
+        tool_descriptions: dict[str, str],
+    ) -> list[dict[str, str]]:
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": self._build_system_prompt(tool_descriptions)}
+        ]
 
+        if state.conversation_messages:
+            messages.extend(
+                {
+                    "role": message.role,
+                    "content": message.content,
+                }
+                for message in state.conversation_messages
+            )
+        elif state.current_input.strip():
+            messages.append({"role": "user", "content": state.current_input.strip()})
+
+        current_turn_history = self._build_current_turn_history(state)
+        if current_turn_history:
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": current_turn_history,
+                }
+            )
+            messages.append(
+                {
+                    "role": "user",
+                    "content": "请基于当前轮已完成的工具调用和工具输出，继续输出下一步决策 JSON。不要重复已经完成且结果成功的工具调用。",
+                }
+            )
+
+        return messages
+
+    def _build_current_turn_history(self, state: AgentState) -> str:
+        turn_index = state.data.get("turn_index")
+        if turn_index is None:
+            return ""
+
+        step_records = state.data.get("step_records", [])
+        if not isinstance(step_records, list):
+            return ""
+
+        current_turn_steps = [
+            step
+            for step in step_records
+            if isinstance(step, StepRecord) and step.turn_index == turn_index
+        ]
+        if not current_turn_steps:
+            return ""
+
+        return "\n".join(
+            [
+                "[内部当前轮工具轨迹] 以下是本轮已经完成的步骤，必须作为下一步决策依据。",
+                self._format_history(current_turn_steps),
+            ]
+        )
+
+    def _build_system_info(self) -> str:
+        lines = [
+            "## 系统环境信息",
+            f"- 操作系统：{platform.system()} {platform.release()} ({platform.machine()})",
+            f"- Python 版本：{platform.python_version()}",
+        ]
+        if self.workspace:
+            lines.append(f"- 工作区路径：{self.workspace}")
+        return "\n".join(lines)
+
+    def _default_prompt_path(self) -> Path:
         return Path(__file__).resolve().parent / "prompts" / "coding.md"

@@ -125,6 +125,11 @@ function ToolBody({ toolCall }: { toolCall: ToolCallRecord }) {
   const terminalStatus = typeof terminalPayload?.status === 'string'
     ? terminalPayload.status
     : undefined;
+  const terminalId = typeof terminalPayload?.terminal_id === 'string'
+    ? terminalPayload.terminal_id
+    : typeof args.terminal_id === 'string'
+      ? args.terminal_id
+      : undefined;
   const terminalFullOutput = typeof terminalPayload?.full_output === 'string'
     ? terminalPayload.full_output
     : typeof output === 'string'
@@ -247,6 +252,7 @@ function ToolBody({ toolCall }: { toolCall: ToolCallRecord }) {
         ? `wait ${String(args.timeout ?? '')}s`
         : command ?? content;
     const termOutput = [
+      terminalId && `# ${terminalId}`,
       cmdText && `$ ${cmdText}`,
       terminalFullOutput,
       errorText,
@@ -631,7 +637,7 @@ export function ChatPanel({
     }
   }, [handleAddFiles]);
 
-  const selectedModel = modelOptions.find((m) => m.envFile === model) ?? modelOptions[0];
+  const selectedModel = modelOptions.find((m) => m.id === model) ?? modelOptions[0];
 
   const lastAssistantMessage = useMemo(() => {
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -748,9 +754,9 @@ export function ChatPanel({
                       <ModelSelectorGroup heading="可用模型">
                         {modelOptions.map((m) => (
                           <ModelSelectorItem
-                            key={m.envFile}
+                            key={m.id}
                             onSelect={() => {
-                              onModelChange(m.envFile);
+                              onModelChange(m.id);
                               setIsModelSelectorOpen(false);
                             }}
                             className="gap-2"

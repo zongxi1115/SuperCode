@@ -50,6 +50,7 @@ class ToolResult:
 class StepRecord:
     """记录智能体每一步的思考、动作和观察结果。"""
 
+    turn_index: int
     index: int
     thought: str
     tool_call: ToolCall | None = None

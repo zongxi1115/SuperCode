@@ -66,9 +66,11 @@ class CodingAgent:
         它会保留会话历史，但会清空“本轮工具轨迹”，避免把上一轮工具结果误当成当前轮上下文。
         """
 
+        history_steps = state.data.setdefault("step_records", [])
+        turn_index = int(state.data.get("turn_index", 0)) + 1
+        state.data["turn_index"] = turn_index
         steps: list[StepRecord] = []
         state.tool_results = []
-        state.data["step_records"] = steps
         tool_descriptions = {name: tool.description for name, tool in self.tools.items()}
         context = ToolContext(
             workspace=self.workspace,
@@ -148,13 +150,14 @@ class CodingAgent:
             )
 
             if decision.action == "final":
-                steps.append(
-                    StepRecord(
-                        index=index,
-                        thought=decision.thought,
-                        final_answer=decision.final_answer,
-                    )
+                step_record = StepRecord(
+                    turn_index=turn_index,
+                    index=index,
+                    thought=decision.thought,
+                    final_answer=decision.final_answer,
                 )
+                steps.append(step_record)
+                history_steps.append(step_record)
                 response = AgentResponse(
                     task=state.current_input,
                     final_output=decision.final_answer or "",
@@ -217,25 +220,27 @@ class CodingAgent:
                     ),
                 )
 
-            steps.append(
-                StepRecord(
-                    index=index,
-                    thought=decision.thought,
-                    tool_call=tool_calls[0] if len(tool_calls) == 1 else None,
-                    tool_result=tool_results[0] if len(tool_results) == 1 else None,
-                    tool_calls=tool_calls,
-                    tool_results=tool_results,
-                )
+            step_record = StepRecord(
+                turn_index=turn_index,
+                index=index,
+                thought=decision.thought,
+                tool_call=tool_calls[0] if len(tool_calls) == 1 else None,
+                tool_result=tool_results[0] if len(tool_results) == 1 else None,
+                tool_calls=tool_calls,
+                tool_results=tool_results,
             )
+            steps.append(step_record)
+            history_steps.append(step_record)
 
         final_output = f"任务在 {self.max_steps} 步内未完成，请调整 brain 或增大 max_steps。"
-        steps.append(
-            StepRecord(
-                index=self.max_steps + 1,
-                thought="已达到最大步数限制，停止执行。",
-                final_answer=final_output,
-            )
+        step_record = StepRecord(
+            turn_index=turn_index,
+            index=self.max_steps + 1,
+            thought="已达到最大步数限制，停止执行。",
+            final_answer=final_output,
         )
+        steps.append(step_record)
+        history_steps.append(step_record)
         response = AgentResponse(
             task=state.current_input,
             final_output=final_output,
