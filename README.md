@@ -91,12 +91,17 @@ response = session.ask("先看看项目结构", on_event=on_event)
 
 - `list_file(path, include_ignored?)`
 - `read_file(filename, start_line, end_line)`
-- `grep_file(regex, search_path)`
+- `grep_file(regex, search_path, include_ignored?)`
 - `write_file(filename, content)`
 - `replace_file(filename, old_content, new_content)`
 - `excecute(content, timeout)`
 - `terminal_input(content, timeout)`
 - `terminal_wait(timeout)`
+
+说明：
+
+- `list_file(..., include_ignored?)` 和 `grep_file(..., include_ignored?)` 默认都会跳过 `node_modules`、`.git`、`dist`、`build`、`__pycache__` 等生成目录。
+- 只有在你明确想查看或搜索这些目录时，才需要传 `include_ignored=true`。
 
 ### 配置项说明
 

@@ -19,6 +19,17 @@ class GrepFileToolTests(unittest.TestCase):
             "no match\nneedle in beta\n",
             encoding="utf-8",
         )
+        (self.workspace / "node_modules").mkdir()
+        (self.workspace / "node_modules" / "left-pad").mkdir()
+        (self.workspace / "node_modules" / "left-pad" / "index.js").write_text(
+            "needle from dependency\n",
+            encoding="utf-8",
+        )
+        (self.workspace / "dist").mkdir()
+        (self.workspace / "dist" / "bundle.js").write_text(
+            "needle from bundle\n",
+            encoding="utf-8",
+        )
 
     def test_grep_returns_only_matching_lines(self) -> None:
         tool = GrepFileTool()
@@ -44,6 +55,39 @@ class GrepFileToolTests(unittest.TestCase):
         output = tool.run({"regex": "missing", "search_path": "src"}, self.context)
 
         self.assertEqual(output, "未找到匹配项: missing")
+
+    def test_grep_ignores_generated_directories_by_default(self) -> None:
+        tool = GrepFileTool()
+
+        output = tool.run({"regex": "needle", "search_path": "."}, self.context)
+
+        self.assertIn("# File: src/alpha.py", output)
+        self.assertNotIn("node_modules/left-pad/index.js", output)
+        self.assertNotIn("dist/bundle.js", output)
+
+    def test_grep_can_include_ignored_directories(self) -> None:
+        tool = GrepFileTool()
+
+        output = tool.run({"regex": "needle", "search_path": ".", "include_ignored": True}, self.context)
+
+        self.assertIn("# File: node_modules/left-pad/index.js", output)
+        self.assertIn("1 | needle from dependency", output)
+        self.assertIn("# File: dist/bundle.js", output)
+
+    def test_grep_can_target_ignored_directory_explicitly(self) -> None:
+        tool = GrepFileTool()
+
+        output = tool.run({"regex": "needle", "search_path": "node_modules"}, self.context)
+
+        self.assertEqual(
+            output,
+            "\n".join(
+                [
+                    "# File: node_modules/left-pad/index.js",
+                    "1 | needle from dependency",
+                ]
+            ),
+        )
 
 
 if __name__ == "__main__":

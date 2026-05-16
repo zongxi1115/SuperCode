@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button';
 import { getFileLanguage } from '@/lib/app-utils';
 import type { FileTreeNode } from '@/lib/app-types';
 import { AnimatePresence, motion } from 'motion/react';
-import { FileCode, Globe, PanelLeftClose, PanelLeftOpen, Pencil, Save, X } from 'lucide-react';
+import { FileCode, Globe, PanelLeftClose, PanelLeftOpen, Pencil, Save, Eye, X } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 type EditorPanelProps = {
@@ -20,6 +20,7 @@ type EditorPanelProps = {
   sessionId: string | null;
   isWebPreviewOpen?: boolean;
   onToggleWebPreview?: () => void;
+  onPreviewHtml?: (content: string, fileName: string) => void;
 };
 
 const EDITOR_FONT = 'font-mono text-[13px] leading-[20px]';
@@ -39,6 +40,7 @@ export function EditorPanel({
   sessionId,
   isWebPreviewOpen,
   onToggleWebPreview,
+  onPreviewHtml,
 }: EditorPanelProps) {
   const [isEditing, setIsEditing] = useState(false);
   const [editContent, setEditContent] = useState('');
@@ -194,6 +196,11 @@ export function EditorPanel({
                   <span className="truncate">{selectedFilePath}</span>
                 </div>
                 <div className="flex items-center gap-1 shrink-0">
+                  {getFileLanguage(selectedFilePath) === 'html' && !isEditing && onPreviewHtml && (
+                    <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => onPreviewHtml(selectedFileContent, selectedFilePath.split('/').pop() ?? 'index.html')} title="预览 HTML">
+                      <Eye className="w-3.5 h-3.5" />
+                    </Button>
+                  )}
                   {isEditing ? (
                     <>
                       <Button variant="ghost" size="icon" className="h-6 w-6" onClick={handleCancelEdit} title="取消编辑">

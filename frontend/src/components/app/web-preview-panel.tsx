@@ -8,17 +8,54 @@ import {
 import { Button } from '@/components/ui/button';
 import { AnimatePresence, motion } from 'motion/react';
 import { PanelRightOpen, RefreshCw, ExternalLink, MousePointerClick, X } from 'lucide-react';
-import { useCallback, useRef } from 'react';
+import { useCallback, useRef, useState } from 'react';
 
 type WebPreviewPanelProps = {
   isOpen: boolean;
   onToggle: () => void;
   url: string;
   onUrlChange: (url: string) => void;
+  onSelectElement?: (html: string, selector: string) => void;
 };
 
-export function WebPreviewPanel({ isOpen, onToggle, url, onUrlChange }: WebPreviewPanelProps) {
+function getElementSelector(el: HTMLElement): string {
+  const parts: string[] = [];
+  let current: HTMLElement | null = el;
+  while (current && current.nodeType === 1) {
+    let selector = current.tagName.toLowerCase();
+    if (current.id) {
+      selector += `#${current.id}`;
+      parts.unshift(selector);
+      break;
+    }
+    if (current.className && typeof current.className === 'string') {
+      const classes = current.className
+        .trim()
+        .split(/\s+/)
+        .filter((c) => c && !c.startsWith('__'));
+      if (classes.length) {
+        selector += `.${classes.join('.')}`;
+      }
+    }
+    const parent = current.parentElement;
+    if (parent) {
+      const siblings = Array.from(parent.children).filter(
+        (s) => s.tagName === current!.tagName
+      );
+      if (siblings.length > 1) {
+        const index = siblings.indexOf(current) + 1;
+        selector += `:nth-of-type(${index})`;
+      }
+    }
+    parts.unshift(selector);
+    current = current.parentElement;
+  }
+  return parts.slice(0, 4).join(' > ');
+}
+
+export function WebPreviewPanel({ isOpen, onToggle, url, onUrlChange, onSelectElement }: WebPreviewPanelProps) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const [isSelectMode, setIsSelectMode] = useState(false);
 
   const handleRefresh = useCallback(() => {
     if (iframeRef.current) {
@@ -35,24 +72,68 @@ export function WebPreviewPanel({ isOpen, onToggle, url, onUrlChange }: WebPrevi
   const handleSelectElement = useCallback(() => {
     if (!iframeRef.current?.contentDocument) return;
     const doc = iframeRef.current.contentDocument;
+    setIsSelectMode(true);
+
     const style = doc.createElement('style');
+    style.setAttribute('data-selector-mode', 'true');
     style.textContent = `
       * { cursor: crosshair !important; }
-      .__highlight-selected { outline: 2px solid #3b82f6 !important; outline-offset: 2px !important; }
+      .__highlight-hover { outline: 2px dashed #3b82f6 !important; outline-offset: 2px !important; background-color: rgba(59, 130, 246, 0.1) !important; }
+      .__highlight-selected { outline: 2px solid #3b82f6 !important; outline-offset: 2px !important; background-color: rgba(59, 130, 246, 0.15) !important; }
     `;
     doc.head.appendChild(style);
+
+    const handleMouseOver = (e: MouseEvent) => {
+      e.stopPropagation();
+      const target = e.target as HTMLElement;
+      if (target === doc.body || target === doc.documentElement) return;
+      doc.querySelectorAll('.__highlight-hover').forEach((el) => el.classList.remove('__highlight-hover'));
+      target.classList.add('__highlight-hover');
+    };
+
+    const handleMouseOut = (e: MouseEvent) => {
+      (e.target as HTMLElement).classList.remove('__highlight-hover');
+    };
 
     const handleClick = (e: MouseEvent) => {
       e.preventDefault();
       e.stopPropagation();
+      const target = e.target as HTMLElement;
+      if (target === doc.body || target === doc.documentElement) return;
+
       doc.querySelectorAll('.__highlight-selected').forEach((el) => el.classList.remove('__highlight-selected'));
-      (e.target as HTMLElement).classList.add('__highlight-selected');
-      style.remove();
-      doc.removeEventListener('click', handleClick, true);
+      doc.querySelectorAll('.__highlight-hover').forEach((el) => el.classList.remove('__highlight-hover'));
+      target.classList.add('__highlight-selected');
+
+      const outerHtml = target.outerHTML;
+      const selector = getElementSelector(target);
+
+      cleanup();
+      onSelectElement?.(outerHtml, selector);
     };
 
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        doc.querySelectorAll('.__highlight-hover').forEach((el) => el.classList.remove('__highlight-hover'));
+        doc.querySelectorAll('.__highlight-selected').forEach((el) => el.classList.remove('__highlight-selected'));
+        cleanup();
+      }
+    };
+
+    const cleanup = () => {
+      style.remove();
+      doc.removeEventListener('mouseover', handleMouseOver, true);
+      doc.removeEventListener('mouseout', handleMouseOut, true);
+      doc.removeEventListener('click', handleClick, true);
+      doc.removeEventListener('keydown', handleKeyDown, true);
+      setIsSelectMode(false);
+    };
+
+    doc.addEventListener('mouseover', handleMouseOver, true);
+    doc.addEventListener('mouseout', handleMouseOut, true);
     doc.addEventListener('click', handleClick, true);
-  }, []);
+    doc.addEventListener('keydown', handleKeyDown, true);
+  }, [onSelectElement]);
 
   return (
     <>
@@ -72,7 +153,7 @@ export function WebPreviewPanel({ isOpen, onToggle, url, onUrlChange }: WebPrevi
                   <RefreshCw className="w-4 h-4" />
                 </WebPreviewNavigationButton>
                 <WebPreviewUrl />
-                <WebPreviewNavigationButton tooltip="选择元素" onClick={handleSelectElement}>
+                <WebPreviewNavigationButton tooltip="选择元素" onClick={handleSelectElement} disabled={isSelectMode}>
                   <MousePointerClick className="w-4 h-4" />
                 </WebPreviewNavigationButton>
                 <WebPreviewNavigationButton tooltip="在新标签页打开" onClick={handleOpenInNewTab}>

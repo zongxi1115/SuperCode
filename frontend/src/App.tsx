@@ -139,6 +139,18 @@ export default function App() {
     [applyTerminalSnapshot, sessionId]
   );
 
+  const refreshFileTreeAfterTerminalActivity = useCallback(
+    (targetSessionId?: string) => {
+      void refreshTerminalState({
+        targetSessionId,
+        includeFileTree: true,
+        includeProcesses: isTerminalOpen,
+        silent: true,
+      });
+    },
+    [isTerminalOpen, refreshTerminalState]
+  );
+
   const loadSessionContext = useCallback(
     async (options?: { silent?: boolean; targetSessionId?: string }) => {
       const targetSessionId = options?.targetSessionId ?? sessionId;
@@ -406,12 +418,13 @@ export default function App() {
       }
       const data: TerminalSnapshotPayload = await res.json();
       applyTerminalSnapshot(data);
+      refreshFileTreeAfterTerminalActivity(sessionId);
     } catch (error) {
       console.error(error);
     } finally {
       setIsTerminalSubmitting(false);
     }
-  }, [applyTerminalSnapshot, isTerminalSubmitting, sessionId, terminalInput]);
+  }, [applyTerminalSnapshot, isTerminalSubmitting, refreshFileTreeAfterTerminalActivity, sessionId, terminalInput]);
 
   const interruptTerminal = useCallback(async () => {
     if (!sessionId || isTerminalSubmitting || !terminalSupportsInterrupt) {
@@ -430,12 +443,13 @@ export default function App() {
       }
       const data: TerminalSnapshotPayload = await res.json();
       applyTerminalSnapshot(data);
+      refreshFileTreeAfterTerminalActivity(sessionId);
     } catch (error) {
       console.error(error);
     } finally {
       setIsTerminalSubmitting(false);
     }
-  }, [applyTerminalSnapshot, isTerminalSubmitting, sessionId, terminalSupportsInterrupt]);
+  }, [applyTerminalSnapshot, isTerminalSubmitting, refreshFileTreeAfterTerminalActivity, sessionId, terminalSupportsInterrupt]);
 
   const clearTerminal = useCallback(async () => {
     if (!sessionId || isTerminalSubmitting) {
@@ -785,6 +799,7 @@ export default function App() {
               } else if (typeof payload.output === 'string') {
                 applyTerminalSnapshot({ output: payload.output });
               }
+              refreshFileTreeAfterTerminalActivity(sessionId ?? undefined);
             }
             if (
               ['write_file', 'replace_file', 'apply_patch'].includes(toolName) ||
@@ -1267,6 +1282,12 @@ export default function App() {
           sessionId={sessionId}
           isWebPreviewOpen={isWebPreviewOpen}
           onToggleWebPreview={() => setIsWebPreviewOpen((prev) => !prev)}
+          onPreviewHtml={(content, fileName) => {
+            const blob = new Blob([content], { type: 'text/html' });
+            const blobUrl = URL.createObjectURL(blob);
+            setWebPreviewUrl(blobUrl);
+            setIsWebPreviewOpen(true);
+          }}
         />
         <TerminalPanel
           output={terminalOutput}
@@ -1293,6 +1314,10 @@ export default function App() {
         onToggle={() => setIsWebPreviewOpen((prev) => !prev)}
         url={webPreviewUrl}
         onUrlChange={setWebPreviewUrl}
+        onSelectElement={(html, selector) => {
+          setSelectedFilePath(`预览元素 > ${selector}`);
+          setSelectedFileContent(html);
+        }}
       />
     </div>
   );

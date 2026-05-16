@@ -37,6 +37,22 @@ APPLY_PATCH_UPDATE_PREFIX = "*** Update File: "
 APPLY_PATCH_EOF_MARKER = "*** End of File"
 
 
+def _parse_bool_argument(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off", ""}:
+            return False
+    return bool(value)
+
+
+def _should_respect_ignored_dirs(target: Path, include_ignored: bool) -> bool:
+    return not include_ignored and target.name not in DEFAULT_IGNORED_DIR_NAMES
+
+
 def _kill_process_tree(process: subprocess.Popen[str]) -> None:
     """尽量终止整棵命令进程树。"""
 
@@ -661,7 +677,8 @@ class ListFileTool(CodingBaseTool):
     name = "list_file"
     description = (
         "列举指定目录下的文件和目录路径，参数：path 可选，include_ignored 可选默认 false。"
-        "默认会跳过 node_modules、.git、dist、build、__pycache__ 等生成目录。"
+        "默认会跳过 node_modules、.git、dist、build、__pycache__ 等生成目录；"
+        "只有需要查看这些目录时才传 include_ignored=true。"
     )
     supports_parallel = True
     parameters_schema = {
@@ -675,7 +692,7 @@ class ListFileTool(CodingBaseTool):
 
     def run(self, arguments: dict[str, object], context: ToolContext) -> str:
         relative_path = str(arguments.get("path", "."))
-        include_ignored = self._parse_bool(arguments.get("include_ignored", False))
+        include_ignored = _parse_bool_argument(arguments.get("include_ignored", False))
         target = self._resolve_path(relative_path, context)
         if not target.exists():
             raise FileNotFoundError(f"目录不存在: {relative_path}")
@@ -684,7 +701,7 @@ class ListFileTool(CodingBaseTool):
 
         workspace = context.workspace.resolve()
         rendered: list[str] = [f"# Path: {relative_path}"]
-        respect_ignored = not include_ignored and target.name not in DEFAULT_IGNORED_DIR_NAMES
+        respect_ignored = _should_respect_ignored_dirs(target, include_ignored)
         if respect_ignored:
             rendered.append(
                 "# Ignored: "
@@ -715,18 +732,6 @@ class ListFileTool(CodingBaseTool):
             else:
                 rendered.append(relative)
         return rendered
-
-    def _parse_bool(self, value: object) -> bool:
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, str):
-            normalized = value.strip().lower()
-            if normalized in {"1", "true", "yes", "y", "on"}:
-                return True
-            if normalized in {"0", "false", "no", "n", "off", ""}:
-                return False
-        return bool(value)
-
 
 class ReadFileTool(CodingBaseTool):
     """读取文件并返回带行号的内容。"""
@@ -784,6 +789,8 @@ class GrepFileTool(CodingBaseTool):
     name = "grep_file"
     description = (
         "按正则搜索文件内容，参数：regex 必填，search_path 可选默认当前目录，"
+        "include_ignored 可选默认 false。默认会跳过 node_modules、.git、dist、build、"
+        "__pycache__ 等生成目录；只有需要搜索这些目录时才传 include_ignored=true。"
         "只返回命中的文件、行号和对应行内容。"
     )
     supports_parallel = True
@@ -792,6 +799,7 @@ class GrepFileTool(CodingBaseTool):
         "properties": {
             "regex": {"type": "string"},
             "search_path": {"type": "string"},
+            "include_ignored": {"type": "boolean"},
         },
         "required": ["regex"],
         "additionalProperties": False,
@@ -800,16 +808,23 @@ class GrepFileTool(CodingBaseTool):
     def run(self, arguments: dict[str, object], context: ToolContext) -> str:
         regex = str(arguments["regex"])
         search_path = str(arguments.get("search_path", "."))
+        include_ignored = _parse_bool_argument(arguments.get("include_ignored", False))
 
         target = self._resolve_path(search_path, context)
         if not target.exists():
-            raise FileNotFoundError(f"搜索目录不存在: {search_path}")
+            raise FileNotFoundError(f"搜索路径不存在: {search_path}")
 
         pattern = re.compile(regex, re.MULTILINE)
         workspace = context.workspace.resolve()
         rendered: list[str] = []
+        respect_ignored = _should_respect_ignored_dirs(target, include_ignored)
 
-        for file_path in sorted(path for path in target.rglob("*") if path.is_file()):
+        if target.is_file():
+            candidate_files = [target]
+        else:
+            candidate_files = self._collect_search_files(target, respect_ignored)
+
+        for file_path in candidate_files:
             try:
                 content = self._read_text(file_path)
             except UnicodeDecodeError:
@@ -828,6 +843,25 @@ class GrepFileTool(CodingBaseTool):
             return f"未找到匹配项: {regex}"
 
         return "\n".join(rendered)
+
+    def _collect_search_files(self, target: Path, respect_ignored: bool) -> list[Path]:
+        candidate_files: list[Path] = []
+        self._append_search_files(target, candidate_files, respect_ignored)
+        return candidate_files
+
+    def _append_search_files(
+        self,
+        current: Path,
+        candidate_files: list[Path],
+        respect_ignored: bool,
+    ) -> None:
+        for child in sorted(current.iterdir(), key=lambda item: (item.is_file(), item.name.lower())):
+            if respect_ignored and child.is_dir() and child.name in DEFAULT_IGNORED_DIR_NAMES:
+                continue
+            if child.is_dir():
+                self._append_search_files(child, candidate_files, respect_ignored)
+                continue
+            candidate_files.append(child)
 
     def _find_matching_line_numbers(self, pattern: re.Pattern[str], lines: list[str]) -> list[int]:
         """找出命中的行号。"""
