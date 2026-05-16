@@ -79,6 +79,7 @@ export default function App() {
   const [hasTerminalBeenOpened, setHasTerminalBeenOpened] = useState(false);
   const [isWebPreviewOpen, setIsWebPreviewOpen] = useState(false);
   const [webPreviewUrl, setWebPreviewUrl] = useState(DEFAULT_WEB_PREVIEW_URL);
+  const [elementAttachments, setElementAttachments] = useState<{ id: string; selector: string; html: string }[]>([]);
   const [chatPanelWidth, setChatPanelWidth] = useState(820);
   const [sessionHistory, setSessionHistory] = useState<SessionHistoryItem[]>([]);
   const [isHistoryLoading, setIsHistoryLoading] = useState(false);
@@ -1195,13 +1196,14 @@ export default function App() {
     setBackendMode('demo');
     setStartupError(null);
     setSessionError(null);
-    setSessionContext(null);
-    setIsContextOpen(false);
-    setIsTerminalOpen(false);
-    setHasTerminalBeenOpened(false);
-    setIsWebPreviewOpen(false);
-    setWebPreviewUrl(DEFAULT_WEB_PREVIEW_URL);
-    setShowWorkspacePicker(true);
+      setSessionContext(null);
+      setIsContextOpen(false);
+      setIsTerminalOpen(false);
+      setHasTerminalBeenOpened(false);
+      setIsWebPreviewOpen(false);
+      setWebPreviewUrl(DEFAULT_WEB_PREVIEW_URL);
+      setElementAttachments([]);
+      setShowWorkspacePicker(true);
   }, []);
 
   if (showWorkspacePicker || !sessionId) {
@@ -1265,6 +1267,8 @@ export default function App() {
         onSendMessage={() => void sendMessage(input)}
         onStopMessage={stopMessage}
         onResolveDeleteConfirmation={resolveDeleteConfirmation}
+        elementAttachments={elementAttachments}
+        onRemoveElementAttachment={(id) => setElementAttachments((prev) => prev.filter((e) => e.id !== id))}
         />
       </div>
       <ResizableHandle
@@ -1315,8 +1319,10 @@ export default function App() {
         url={webPreviewUrl}
         onUrlChange={setWebPreviewUrl}
         onSelectElement={(html, selector) => {
-          setSelectedFilePath(`预览元素 > ${selector}`);
-          setSelectedFileContent(html);
+          setElementAttachments((prev) => [
+            ...prev,
+            { id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, selector, html },
+          ]);
         }}
       />
     </div>

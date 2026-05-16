@@ -61,6 +61,7 @@ import {
   ChevronDown,
   ChevronRight,
   BarChart3Icon,
+  Code2Icon,
   DatabaseIcon,
   FileCodeIcon,
   FileSearchIcon,
@@ -72,10 +73,17 @@ import {
   Square,
   TerminalIcon,
   Trash2Icon,
+  XIcon,
 } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
 import type React from 'react';
 import { memo, useMemo, useRef, useState, useCallback } from 'react';
+
+type ElementAttachment = {
+  id: string;
+  selector: string;
+  html: string;
+};
 
 type ChatPanelProps = {
   contextData: SessionContextPayload | null;
@@ -93,6 +101,8 @@ type ChatPanelProps = {
   onStopMessage: () => void;
   onResolveDeleteConfirmation: (toolCallId: string, approved: boolean) => void;
   onModelChange: (envFile: string) => void;
+  elementAttachments?: ElementAttachment[];
+  onRemoveElementAttachment?: (id: string) => void;
 };
 
 const TOOL_ICONS: Record<string, React.ReactNode> = {
@@ -799,6 +809,8 @@ export function ChatPanel({
   onStopMessage,
   onResolveDeleteConfirmation,
   onModelChange,
+  elementAttachments = [],
+  onRemoveElementAttachment,
 }: ChatPanelProps) {
   const planSteps = contextData?.planSteps ?? [];
   const [isFocused, setIsFocused] = useState(false);
@@ -908,6 +920,29 @@ export function ChatPanel({
                     </Attachment>
                   ))}
                 </Attachments>
+              </div>
+            )}
+
+            {elementAttachments.length > 0 && (
+              <div className="pb-2 flex flex-wrap gap-1.5">
+                {elementAttachments.map((el) => (
+                  <div
+                    key={el.id}
+                    className="group flex h-8 items-center gap-1.5 rounded-md border border-border px-1.5 font-medium text-sm transition-all hover:bg-accent hover:text-accent-foreground dark:hover:bg-accent/50"
+                  >
+                    <div className="flex size-5 shrink-0 items-center justify-center rounded bg-primary/10">
+                      <Code2Icon className="size-3 text-primary" />
+                    </div>
+                    <span className="max-w-[200px] truncate text-xs font-mono text-muted-foreground">{el.selector}</span>
+                    <button
+                      type="button"
+                      onClick={() => onRemoveElementAttachment?.(el.id)}
+                      className="ml-0.5 flex size-5 shrink-0 items-center justify-center rounded p-0 opacity-0 transition-opacity group-hover:opacity-100 hover:bg-destructive/10"
+                    >
+                      <XIcon className="size-2.5 text-muted-foreground hover:text-destructive" />
+                    </button>
+                  </div>
+                ))}
               </div>
             )}
 
