@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button';
 import { getFileLanguage } from '@/lib/app-utils';
 import type { FileTreeNode } from '@/lib/app-types';
 import { AnimatePresence, motion } from 'motion/react';
-import { FileCode, Globe, PanelLeftClose, PanelLeftOpen, Pencil, Save, X } from 'lucide-react';
+import { FileCode, Globe, PanelLeftClose, PanelLeftOpen, Pencil, Save, WrapText, X } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 type EditorPanelProps = {
@@ -38,6 +38,7 @@ export function EditorPanel({
   const [isEditing, setIsEditing] = useState(false);
   const [editContent, setEditContent] = useState('');
   const [isSaving, setIsSaving] = useState(false);
+  const [isWordWrap, setIsWordWrap] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -177,6 +178,9 @@ export function EditorPanel({
                   <span className="truncate">{selectedFilePath}</span>
                 </div>
                 <div className="flex items-center gap-1 shrink-0">
+                  <Button variant={isWordWrap ? 'secondary' : 'ghost'} size="icon" className="h-6 w-6" onClick={() => setIsWordWrap(prev => !prev)} title="切换换行">
+                    <WrapText className="w-3.5 h-3.5" />
+                  </Button>
                   {isEditing ? (
                     <>
                       <Button variant="ghost" size="icon" className="h-6 w-6" onClick={handleCancelEdit} title="取消编辑">
@@ -215,8 +219,8 @@ export function EditorPanel({
                     onChange={(e) => setEditContent(e.target.value)}
                     onScroll={syncScroll}
                     onKeyDown={handleKeyDown}
-                    wrap="off"
-                    className={`absolute inset-0 h-full w-full resize-none bg-transparent py-4 pr-4 pl-[68px] ${EDITOR_FONT} text-foreground outline-none whitespace-pre overflow-auto`}
+                    wrap={isWordWrap ? 'soft' : 'off'}
+                    className={`absolute inset-0 h-full w-full resize-none bg-transparent py-4 pr-4 pl-[68px] ${EDITOR_FONT} text-foreground outline-none ${isWordWrap ? 'whitespace-pre-wrap break-all' : 'whitespace-pre overflow-auto'}`}
                     spellCheck={false}
                     autoCapitalize="off"
                     autoCorrect="off"
@@ -228,6 +232,7 @@ export function EditorPanel({
                     code={selectedFileContent}
                     language={getFileLanguage(selectedFilePath) as 'tsx'}
                     showLineNumbers
+                    wordWrap={isWordWrap}
                     className="h-full w-full rounded-none border-0 text-sm"
                     viewportClassName="flex-1 min-h-0 overflow-auto"
                   />

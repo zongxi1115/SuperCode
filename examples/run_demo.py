@@ -124,11 +124,13 @@ def main() -> None:
             print()
             continue
 
+
         if user_input == "/steps":
             if last_response is None:
                 print("还没有可查看的执行轨迹。")
                 print()
                 continue
+
 
             print("=== 上一轮执行轨迹 ===")
             for step in last_response.steps:

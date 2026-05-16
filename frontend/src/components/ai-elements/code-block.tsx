@@ -111,6 +111,7 @@ type CodeBlockProps = HTMLAttributes<HTMLDivElement> & {
   language: BundledLanguage;
   showLineNumbers?: boolean;
   enableHighlighting?: boolean;
+  wordWrap?: boolean;
   viewportClassName?: string;
   children?: ReactNode;
 };
@@ -242,10 +243,12 @@ const CodeBlockBody = memo(
   ({
     tokenized,
     showLineNumbers,
+    wordWrap,
     className,
   }: {
     tokenized: TokenizedCode;
     showLineNumbers: boolean;
+    wordWrap?: boolean;
     className?: string;
   }) => {
     const preStyle = useMemo(
@@ -265,6 +268,7 @@ const CodeBlockBody = memo(
       <pre
         className={cn(
           "dark:!bg-[var(--shiki-dark-bg)] dark:!text-[var(--shiki-dark)] m-0 p-4 text-sm",
+          wordWrap && "whitespace-pre-wrap break-all",
           className
         )}
         style={preStyle}
@@ -289,6 +293,7 @@ const CodeBlockBody = memo(
   (prevProps, nextProps) =>
     prevProps.tokenized === nextProps.tokenized &&
     prevProps.showLineNumbers === nextProps.showLineNumbers &&
+    prevProps.wordWrap === nextProps.wordWrap &&
     prevProps.className === nextProps.className
 );
 
@@ -364,12 +369,14 @@ export const CodeBlockContent = ({
   language,
   showLineNumbers = false,
   enableHighlighting = true,
+  wordWrap = false,
   viewportClassName,
 }: {
   code?: string;
   language: BundledLanguage;
   showLineNumbers?: boolean;
   enableHighlighting?: boolean;
+  wordWrap?: boolean;
   viewportClassName?: string;
 }) => {
   const safeCode = code ?? "";
@@ -414,11 +421,12 @@ export const CodeBlockContent = ({
   return (
     <div
       className={cn(
-        "relative min-w-0 overflow-x-auto",
+        "relative min-w-0",
+        wordWrap ? "overflow-x-hidden" : "overflow-x-auto",
         viewportClassName
       )}
     >
-      <CodeBlockBody showLineNumbers={showLineNumbers} tokenized={tokenized} />
+      <CodeBlockBody showLineNumbers={showLineNumbers} tokenized={tokenized} wordWrap={wordWrap} />
     </div>
   );
 };
@@ -428,6 +436,7 @@ export const CodeBlock = ({
   language,
   showLineNumbers = false,
   enableHighlighting = true,
+  wordWrap = false,
   viewportClassName,
   className,
   children,
@@ -446,6 +455,7 @@ export const CodeBlock = ({
           enableHighlighting={enableHighlighting}
           language={language}
           showLineNumbers={showLineNumbers}
+          wordWrap={wordWrap}
           viewportClassName={viewportClassName}
         />
       </CodeBlockContainer>
