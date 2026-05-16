@@ -54,6 +54,45 @@ class ParseJsonOutputTests(unittest.TestCase):
         self.assertEqual(decision.action, "final")
         self.assertEqual(decision.final_answer, "done")
 
+    def test_extracts_partial_write_file_content_for_realtime_tool_input(self) -> None:
+        raw_output = (
+            '{"action":"tool","tool_name":"write_file",'
+            '"tool_arguments":{"filename":"demo.ts","content":"export const a = 1'
+        )
+
+        argument_name, streamed_input = self.brain._extract_partial_streamable_tool_input(
+            raw_output,
+            "write_file",
+        )
+
+        self.assertEqual(argument_name, "content")
+        self.assertEqual(streamed_input, "export const a = 1")
+
+    def test_extracts_only_new_content_for_replace_file_stream(self) -> None:
+        old_only = (
+            '{"action":"tool","tool_name":"replace_file",'
+            '"tool_arguments":{"filename":"demo.ts","old_content":"before'
+        )
+        argument_name, streamed_input = self.brain._extract_partial_streamable_tool_input(
+            old_only,
+            "replace_file",
+        )
+
+        self.assertIsNone(argument_name)
+        self.assertIsNone(streamed_input)
+
+        with_new_content = (
+            old_only
+            + '","new_content":"after'
+        )
+        argument_name, streamed_input = self.brain._extract_partial_streamable_tool_input(
+            with_new_content,
+            "replace_file",
+        )
+
+        self.assertEqual(argument_name, "new_content")
+        self.assertEqual(streamed_input, "after")
+
 
 if __name__ == "__main__":
     unittest.main()

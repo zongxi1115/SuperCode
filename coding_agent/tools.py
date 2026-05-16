@@ -818,11 +818,7 @@ class OpenBrowserTool(CodingBaseTool):
         else:
             raise ValueError("必须提供 url 或 path。url 用于网络地址，path 用于本地文件或目录。")
 
-        session_id = str(context.metadata.get("session_id", "")).strip()
         backend_base_url = str(context.metadata.get("backend_base_url", "http://localhost:8000")).rstrip("/")
-        if not session_id:
-            raise RuntimeError("当前会话缺少 session_id，无法生成预览地址。")
-
         if selected_kind == "url":
             resolved_url = self._normalize_url(selected_target)
             return {
@@ -830,6 +826,10 @@ class OpenBrowserTool(CodingBaseTool):
                 "resolved_url": resolved_url,
                 "source_type": "network_url",
             }
+
+        session_id = str(context.metadata.get("session_id", "")).strip()
+        if not session_id:
+            raise RuntimeError("当前会话缺少 session_id，无法生成预览地址。")
 
         resolved_path = self._resolve_path(selected_target, context)
         preview_target = self._resolve_preview_target(resolved_path)
@@ -857,7 +857,7 @@ class OpenBrowserTool(CodingBaseTool):
 
     def _normalize_url(self, value: str) -> str:
         parsed = urlparse(value)
-        if parsed.scheme:
+        if parsed.scheme in {"http", "https", "file"}:
             return value
         return f"http://{value}"
 

@@ -87,9 +87,13 @@ class CodingAgent:
         for index in range(1, self.max_steps + 1):
             streamed_final_answer = ""
             streamed_thought = ""
+            streamed_tool_input = ""
+            streamed_tool_input_started = False
+            streamed_tool_input_key: tuple[str, str] | None = None
 
             def on_brain_stream(update: BrainStreamingUpdate) -> None:
                 nonlocal streamed_final_answer, streamed_thought
+                nonlocal streamed_tool_input, streamed_tool_input_started, streamed_tool_input_key
 
                 if update.thought:
                     if update.thought.startswith(streamed_thought):
@@ -107,6 +111,56 @@ class CodingAgent:
                                 message=f"第 {index} 步正在流式输出思考。",
                                 thought=update.thought,
                                 delta=thought_delta,
+                            ),
+                        )
+
+                if (
+                    update.streamed_tool_name
+                    and update.streamed_tool_argument_name
+                    and update.streamed_tool_input is not None
+                ):
+                    tool_name = update.streamed_tool_name
+                    argument_name = update.streamed_tool_argument_name
+                    tool_id = f"step-{index}-tool-1-{tool_name}"
+                    next_key = (tool_name, argument_name)
+
+                    if streamed_tool_input_key != next_key:
+                        streamed_tool_input = ""
+                        streamed_tool_input_started = False
+                        streamed_tool_input_key = next_key
+
+                    if update.streamed_tool_input.startswith(streamed_tool_input):
+                        tool_input_delta = update.streamed_tool_input[len(streamed_tool_input) :]
+                    else:
+                        tool_input_delta = update.streamed_tool_input
+
+                    if tool_input_delta:
+                        tool_call = ToolCall(
+                            id=tool_id,
+                            name=tool_name,
+                            arguments={"streamed_argument": argument_name},
+                        )
+                        if not streamed_tool_input_started:
+                            streamed_tool_input_started = True
+                            self._emit_event(
+                                on_event,
+                                AgentEvent(
+                                    type="tool_input_started",
+                                    step_index=index,
+                                    message=f"第 {index} 步开始流式生成工具 {tool_name} 的输入。",
+                                    tool_call=tool_call,
+                                ),
+                            )
+
+                        streamed_tool_input = update.streamed_tool_input
+                        self._emit_event(
+                            on_event,
+                            AgentEvent(
+                                type="tool_input_delta",
+                                step_index=index,
+                                message=f"第 {index} 步正在流式生成工具 {tool_name} 的输入。",
+                                tool_call=tool_call,
+                                delta=tool_input_delta,
                             ),
                         )
 

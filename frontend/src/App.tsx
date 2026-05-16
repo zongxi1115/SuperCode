@@ -556,6 +556,7 @@ export default function App() {
       const decoder = new TextDecoder();
       let buffer = '';
       let currentAssistantId = '';
+      const toolNamesById = new Map<string, string>();
 
       const updateAssistantMessage = (
         assistantId: string,
@@ -586,7 +587,14 @@ export default function App() {
         if (!eventStr.startsWith('data: ')) return;
 
         try {
-          const data = JSON.parse(eventStr.replace('data: ', ''));
+          const rawData = eventStr
+            .split('\n')
+            .filter((line) => line.startsWith('data:'))
+            .map((line) => line.replace(/^data:\s?/, ''))
+            .join('\n');
+          if (!rawData || rawData === '[DONE]') return;
+
+          const data = JSON.parse(rawData);
           const appendToLastPart = (message: ChatMessage, partType: 'thinking' | 'text', delta: string): ContentBlock[] => {
             const parts = message.parts ?? [];
             const last = parts[parts.length - 1];
@@ -596,7 +604,225 @@ export default function App() {
             return [...parts, { type: partType, text: delta }];
           };
 
-          if (data.type === 'assistant_started') {
+          const updateToolPart = (
+            assistantId: string,
+            toolCallId: string,
+            updater: (toolCall: ToolCallRecord) => ToolCallRecord
+          ) => {
+            updateAssistantMessage(assistantId, (message) => ({
+              ...message,
+              toolCalls: (message.toolCalls ?? []).map((tc) =>
+                tc.id === toolCallId ? updater(tc) : tc
+              ),
+              parts: (message.parts ?? []).map((part) =>
+                part.type === 'tool_call' && part.toolCall.id === toolCallId
+                  ? { ...part, toolCall: updater(part.toolCall) }
+                  : part
+              )
+            }));
+          };
+
+          const upsertToolPart = (
+            assistantId: string,
+            toolCallId: string,
+            createToolCall: () => ToolCallRecord,
+            updater: (toolCall: ToolCallRecord) => ToolCallRecord
+          ) => {
+            updateAssistantMessage(assistantId, (message) => {
+              let found = false;
+              const toolCalls = (message.toolCalls ?? []).map((tc) => {
+                if (tc.id !== toolCallId) return tc;
+                found = true;
+                return updater(tc);
+              });
+              const nextToolCalls = found ? toolCalls : [...toolCalls, updater(createToolCall())];
+
+              let foundPart = false;
+              const parts = (message.parts ?? []).map((part) => {
+                if (part.type !== 'tool_call' || part.toolCall.id !== toolCallId) {
+                  return part;
+                }
+                foundPart = true;
+                return { ...part, toolCall: updater(part.toolCall) };
+              });
+              const nextParts = foundPart
+                ? parts
+                : [...parts, { type: 'tool_call' as const, toolCall: updater(createToolCall()) }];
+
+              return {
+                ...message,
+                toolCalls: nextToolCalls,
+                parts: nextParts
+              };
+            });
+          };
+
+          const handleToolResultSideEffects = (payload: Record<string, unknown>) => {
+            const toolName = String(payload.name ?? '');
+            if (
+              toolName === 'execute' ||
+              toolName === 'excecute' ||
+              toolName === 'terminal_input' ||
+              toolName === 'terminal_wait'
+            ) {
+              if (typeof payload.terminal_output === 'string') {
+                setTerminalOutput(payload.terminal_output);
+              } else if (typeof payload.output === 'string') {
+                setTerminalOutput(payload.output);
+              }
+            }
+            if (['write_file', 'replace_file', 'delete_file'].includes(toolName)) {
+              void refreshFileTree();
+            }
+            if (toolName === 'open_browser') {
+              const previewUrl = getPreviewUrlFromToolPayload(payload);
+              if (previewUrl) {
+                setWebPreviewUrl(previewUrl);
+                setIsWebPreviewOpen(true);
+              }
+            }
+          };
+
+          if (data.type === 'start') {
+            currentAssistantId = data.messageId || currentAssistantId || Math.random().toString();
+            updateAssistantMessage(currentAssistantId, (message) => message);
+          } else if (data.type === 'text-delta') {
+            currentAssistantId = currentAssistantId || Math.random().toString();
+            updateAssistantMessage(currentAssistantId, (message) => ({
+              ...message,
+              content: `${message.content}${data.delta ?? ''}`,
+              parts: appendToLastPart(message, 'text', data.delta ?? '')
+            }));
+          } else if (data.type === 'reasoning-delta') {
+            const assistantId = currentAssistantId;
+            if (!assistantId) return;
+            updateAssistantMessage(assistantId, (message) => ({
+              ...message,
+              thoughts: `${message.thoughts ?? ''}${data.delta ?? ''}`,
+              parts: appendToLastPart(message, 'thinking', data.delta ?? '')
+            }));
+          } else if (data.type === 'tool-input-available') {
+            const assistantId = currentAssistantId;
+            if (!assistantId) return;
+            const toolCallRecord = {
+              id: String(data.toolCallId ?? Math.random()),
+              name: String(data.toolName ?? 'tool'),
+              arguments: data.input ?? {},
+              streamedInput: undefined,
+              state: 'running' as const
+            };
+            toolNamesById.set(toolCallRecord.id, toolCallRecord.name);
+            upsertToolPart(
+              assistantId,
+              toolCallRecord.id,
+              () => toolCallRecord,
+              (toolCall) => ({
+                ...toolCall,
+                name: toolCallRecord.name,
+                arguments: toolCallRecord.arguments,
+                streamedInput: undefined,
+                state: 'running'
+              })
+            );
+            if (toolCallRecord.name === 'read_file' && typeof toolCallRecord.arguments?.filename === 'string') {
+              void loadFile(toolCallRecord.arguments.filename);
+            }
+          } else if (data.type === 'tool-input-start') {
+            const assistantId = currentAssistantId;
+            const toolCallId = String(data.toolCallId ?? '');
+            if (!assistantId || !toolCallId) return;
+            const toolName = String(data.toolName ?? toolNamesById.get(toolCallId) ?? 'tool');
+            toolNamesById.set(toolCallId, toolName);
+            upsertToolPart(
+              assistantId,
+              toolCallId,
+              () => ({ id: toolCallId, name: toolName, arguments: {}, streamedInput: '', state: 'running' }),
+              (toolCall) => ({
+                ...toolCall,
+                name: toolName,
+                streamedInput: toolCall.streamedInput ?? '',
+                state: 'running'
+              })
+            );
+          } else if (data.type === 'tool-input-delta') {
+            const assistantId = currentAssistantId;
+            const toolCallId = String(data.toolCallId ?? '');
+            if (!assistantId || !toolCallId) return;
+            const delta = String(data.inputTextDelta ?? '');
+            const toolName = toolNamesById.get(toolCallId) ?? 'tool';
+            upsertToolPart(
+              assistantId,
+              toolCallId,
+              () => ({ id: toolCallId, name: toolName, arguments: {}, streamedInput: '', state: 'running' }),
+              (toolCall) => ({
+                ...toolCall,
+                streamedInput: `${toolCall.streamedInput ?? ''}${delta}`,
+                state: 'running'
+              })
+            );
+          } else if (data.type === 'tool-output-available') {
+            const assistantId = currentAssistantId;
+            const toolCallId = String(data.toolCallId ?? '');
+            if (!assistantId || !toolCallId) return;
+            updateToolPart(assistantId, toolCallId, (toolCall) => ({
+              ...toolCall,
+              output: data.output,
+              state: 'completed'
+            }));
+          } else if (data.type === 'data-tool-result') {
+            const payload = (data.data ?? {}) as Record<string, unknown>;
+            const assistantId = String(payload.assistant_id ?? currentAssistantId);
+            const toolCallId = String(payload.id ?? '');
+            if (!assistantId || !toolCallId) return;
+            const toolName = String(payload.name ?? toolNamesById.get(toolCallId) ?? 'tool');
+            toolNamesById.set(toolCallId, toolName);
+            handleToolResultSideEffects(payload);
+            updateToolPart(assistantId, toolCallId, (toolCall) => ({
+              ...toolCall,
+              ...payload,
+              id: toolCallId,
+              name: toolName,
+              errorMessage: typeof payload.error_message === 'string' ? payload.error_message : toolCall.errorMessage,
+              state: payload.success === false ? 'error' : 'completed'
+            }));
+          } else if (data.type === 'data-plan-steps') {
+            const steps = data.data?.steps;
+            if (Array.isArray(steps)) {
+              setPlanSteps(steps);
+            }
+          } else if (data.type === 'data-terminal-output') {
+            if (typeof data.data?.output === 'string') {
+              setTerminalOutput(data.data.output);
+            }
+          } else if (data.type === 'data-preview-url') {
+            if (typeof data.data?.url === 'string') {
+              setWebPreviewUrl(data.data.url);
+              setIsWebPreviewOpen(true);
+            }
+          } else if (data.type === 'data-assistant-reset') {
+            currentAssistantId = data.data?.id || currentAssistantId || Math.random().toString();
+            updateAssistantMessage(currentAssistantId, (message) => ({
+              ...message,
+              content: '',
+              parts: (message.parts ?? []).filter((p) => p.type !== 'text')
+            }));
+          } else if (data.type === 'data-tool-call') {
+            return;
+          } else if (typeof data.type === 'string' && data.type.startsWith('data-')) {
+            const assistantId = currentAssistantId;
+            if (!assistantId) return;
+            updateAssistantMessage(assistantId, (message) => ({
+              ...message,
+              parts: [...(message.parts ?? []), { type: 'data' as const, dataType: data.type, data: data.data }]
+            }));
+          } else if (data.type === 'error') {
+            currentAssistantId = currentAssistantId || Math.random().toString();
+            updateAssistantMessage(currentAssistantId, (message) => ({
+              ...message,
+              content: `${message.content}${data.errorText ?? ''}`,
+              parts: appendToLastPart(message, 'text', data.errorText ?? '')
+            }));
+          } else if (data.type === 'assistant_started') {
             currentAssistantId = data.payload.id || currentAssistantId || Math.random().toString();
             updateAssistantMessage(currentAssistantId, (message) => message);
           } else if (data.type === 'assistant_delta') {
@@ -652,28 +878,7 @@ export default function App() {
               void loadFile(data.payload.arguments.filename);
             }
           } else if (data.type === 'tool_result') {
-            if (
-              data.payload.name === 'execute' ||
-              data.payload.name === 'excecute' ||
-              data.payload.name === 'terminal_input' ||
-              data.payload.name === 'terminal_wait'
-            ) {
-              if (typeof data.payload.terminal_output === 'string') {
-                setTerminalOutput(data.payload.terminal_output);
-              } else if (typeof data.payload.output === 'string') {
-                setTerminalOutput(data.payload.output);
-              }
-            }
-            if (['write_file', 'replace_file', 'delete_file'].includes(String(data.payload.name))) {
-              void refreshFileTree();
-            }
-            if (data.payload.name === 'open_browser') {
-              const previewUrl = getPreviewUrlFromToolPayload(data.payload);
-              if (previewUrl) {
-                setWebPreviewUrl(previewUrl);
-                setIsWebPreviewOpen(true);
-              }
-            }
+            handleToolResultSideEffects(data.payload);
             const assistantId = data.payload.assistant_id || currentAssistantId;
             if (!assistantId) return;
             currentAssistantId = assistantId;

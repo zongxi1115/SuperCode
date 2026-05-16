@@ -36,13 +36,20 @@ class OpenAICompatibleBrain(AgentBrain):
             def handle_delta(delta: str) -> None:
                 raw_chunks.append(delta)
                 current_output = "".join(raw_chunks)
+                tool_name = self._extract_partial_string_field(current_output, "tool_name")
+                streamed_tool_argument_name, streamed_tool_input = (
+                    self._extract_partial_streamable_tool_input(current_output, tool_name)
+                )
                 on_stream(
                     BrainStreamingUpdate(
                         raw_output=current_output,
                         action=self._extract_partial_string_field(current_output, "action"),
                         thought=self._extract_partial_string_field(current_output, "thought"),
-                        tool_name=self._extract_partial_string_field(current_output, "tool_name"),
+                        tool_name=tool_name,
                         final_answer=self._extract_partial_string_field(current_output, "final_answer"),
+                        streamed_tool_name=tool_name,
+                        streamed_tool_argument_name=streamed_tool_argument_name,
+                        streamed_tool_input=streamed_tool_input,
                     )
                 )
 
@@ -310,6 +317,21 @@ class OpenAICompatibleBrain(AgentBrain):
             cursor += 1
 
         return "".join(buffer) if buffer else None
+
+    def _extract_partial_streamable_tool_input(
+        self,
+        text: str,
+        tool_name: str | None,
+    ) -> tuple[str | None, str | None]:
+        if tool_name == "write_file":
+            content = self._extract_partial_string_field(text, "content")
+            return ("content", content) if content is not None else (None, None)
+
+        if tool_name == "replace_file":
+            new_content = self._extract_partial_string_field(text, "new_content")
+            return ("new_content", new_content) if new_content is not None else (None, None)
+
+        return None, None
 
     def _to_decision(self, payload: dict[str, object]) -> BrainDecision:
         """把 JSON 结构转换成框架里的决策对象。"""

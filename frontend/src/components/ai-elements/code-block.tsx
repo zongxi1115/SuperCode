@@ -110,6 +110,8 @@ type CodeBlockProps = HTMLAttributes<HTMLDivElement> & {
   code?: string;
   language: BundledLanguage;
   showLineNumbers?: boolean;
+  enableHighlighting?: boolean;
+  viewportClassName?: string;
   children?: ReactNode;
 };
 
@@ -300,15 +302,10 @@ export const CodeBlockContainer = ({
 }: HTMLAttributes<HTMLDivElement> & { language: string }) => (
   <div
     className={cn(
-      "group relative w-full overflow-hidden rounded-md border bg-background text-foreground",
+      "group relative flex w-full flex-col overflow-hidden rounded-md border bg-background text-foreground",
       className
     )}
     data-language={language}
-    style={{
-      containIntrinsicSize: "auto 200px",
-      contentVisibility: "auto",
-      ...style,
-    }}
     {...props}
   />
 );
@@ -366,27 +363,42 @@ export const CodeBlockContent = ({
   code,
   language,
   showLineNumbers = false,
+  enableHighlighting = true,
+  viewportClassName,
 }: {
   code?: string;
   language: BundledLanguage;
   showLineNumbers?: boolean;
+  enableHighlighting?: boolean;
+  viewportClassName?: string;
 }) => {
   const safeCode = code ?? "";
 
   const rawTokens = useMemo(() => createRawTokens(safeCode), [safeCode]);
 
   const syncTokens = useMemo(
-    () => highlightCode(safeCode, language) ?? rawTokens,
-    [safeCode, language, rawTokens]
+    () =>
+      enableHighlighting
+        ? highlightCode(safeCode, language) ?? rawTokens
+        : rawTokens,
+    [enableHighlighting, safeCode, language, rawTokens]
   );
   const [asyncTokens, setAsyncTokens] = useState<TokenizedCode | null>(null);
+  const asyncCodeRef = useRef("");
 
   useEffect(() => {
-    let cancelled = false;
-    setAsyncTokens(null);
+    if (!enableHighlighting) {
+      asyncCodeRef.current = "";
+      setAsyncTokens(null);
+      return;
+    }
 
-    highlightCode(safeCode, language, (result) => {
+    let cancelled = false;
+    const currentCode = safeCode;
+
+    highlightCode(currentCode, language, (result) => {
       if (!cancelled) {
+        asyncCodeRef.current = currentCode;
         setAsyncTokens(result);
       }
     });
@@ -394,12 +406,18 @@ export const CodeBlockContent = ({
     return () => {
       cancelled = true;
     };
-  }, [safeCode, language]);
+  }, [enableHighlighting, safeCode, language]);
 
-  const tokenized = asyncTokens ?? syncTokens;
+  const tokenized =
+    asyncTokens && asyncCodeRef.current === safeCode ? asyncTokens : syncTokens;
 
   return (
-    <div className="relative overflow-auto">
+    <div
+      className={cn(
+        "relative min-w-0 overflow-x-auto",
+        viewportClassName
+      )}
+    >
       <CodeBlockBody showLineNumbers={showLineNumbers} tokenized={tokenized} />
     </div>
   );
@@ -409,6 +427,8 @@ export const CodeBlock = ({
   code,
   language,
   showLineNumbers = false,
+  enableHighlighting = true,
+  viewportClassName,
   className,
   children,
   ...props
@@ -423,8 +443,10 @@ export const CodeBlock = ({
         {renderedChildren}
         <CodeBlockContent
           code={resolvedCode}
+          enableHighlighting={enableHighlighting}
           language={language}
           showLineNumbers={showLineNumbers}
+          viewportClassName={viewportClassName}
         />
       </CodeBlockContainer>
     </CodeBlockContext.Provider>

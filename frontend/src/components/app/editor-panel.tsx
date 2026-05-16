@@ -223,12 +223,13 @@ export function EditorPanel({
                   />
                 </div>
               ) : (
-                <div className="flex-1 overflow-auto">
+                <div className="flex-1 min-h-0 overflow-hidden">
                   <CodeBlock
                     code={selectedFileContent}
                     language={getFileLanguage(selectedFilePath) as 'tsx'}
                     showLineNumbers
-                    className="w-full text-sm border-0 rounded-none"
+                    className="h-full w-full rounded-none border-0 text-sm"
+                    viewportClassName="flex-1 min-h-0 overflow-auto"
                   />
                 </div>
               )}

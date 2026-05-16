@@ -6,13 +6,15 @@ export type ToolCallRecord = {
   errorMessage?: string;
   error_message?: string | null;
   success?: boolean;
+  streamedInput?: string;
   state: 'running' | 'completed' | 'error';
 };
 
 export type ContentBlock =
   | { type: 'thinking'; text: string }
   | { type: 'tool_call'; toolCall: ToolCallRecord }
-  | { type: 'text'; text: string };
+  | { type: 'text'; text: string }
+  | { type: 'data'; dataType: string; data: unknown };
 
 export type ChatMessage = {
   id: string;

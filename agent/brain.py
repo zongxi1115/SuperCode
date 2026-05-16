@@ -89,6 +89,9 @@ class BrainStreamingUpdate:
     thought: str | None = None
     tool_name: str | None = None
     final_answer: str | None = None
+    streamed_tool_name: str | None = None
+    streamed_tool_argument_name: str | None = None
+    streamed_tool_input: str | None = None
 
 
 class AgentBrain(ABC):

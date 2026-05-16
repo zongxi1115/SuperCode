@@ -23,6 +23,7 @@ import re
 
 from agent import AgentEvent, AgentLLMConfig, ChatSession, CodingAgent, OpenAICompatibleClient
 from coding_agent import CodingPromptBrain, InteractiveCommandSession, build_coding_tools
+from fastapi_app.ui_message_stream import UIMessageStreamAdapter, sse_data
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_WORKSPACE = ROOT
@@ -463,6 +464,12 @@ async def switch_session_model(session_id: str, request: SwitchModelRequest) -> 
     interactive_command_session = session.interactive_command_session
 
     session.chat_session = ChatSession(agent=agent)
+    if isinstance(session.chat_session.agent, CodingAgent):
+        attach_agent_runtime_metadata(
+            session.chat_session.agent,
+            session_id=session.session_id,
+            interactive_command_session=interactive_command_session,
+        )
     session.model = config.model
     session.env_file = env_file_name
     session.mode = "agent"
@@ -714,7 +721,10 @@ async def post_session_terminal_clear(session_id: str) -> JSONResponse:
 
 
 @app.post("/api/chat/stream")
-async def chat_stream(request: ChatStreamRequest) -> StreamingResponse:
+async def chat_stream(
+    request: ChatStreamRequest,
+    protocol: str = Query("ui-message"),
+) -> StreamingResponse:
     session = require_session(request.session_id)
     user_message = request.message.strip()
     if not user_message:
@@ -722,6 +732,8 @@ async def chat_stream(request: ChatStreamRequest) -> StreamingResponse:
 
     async def event_generator():
         queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+        ui_adapter = UIMessageStreamAdapter()
+        ui_finished = False
         user_message_id = uuid.uuid4().hex
         await queue.put(
             {
@@ -748,11 +760,36 @@ async def chat_stream(request: ChatStreamRequest) -> StreamingResponse:
                 event = await queue.get()
                 if event is None:
                     break
-                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                if protocol == "legacy":
+                    yield sse_data(event)
+                    continue
+
+                for part in ui_adapter.convert(event):
+                    if part.get("type") == "finish":
+                        ui_finished = True
+                    yield sse_data(part)
+                    if part.get("type") == "tool-input-delta":
+                        await asyncio.sleep(0.01)
+
+            if protocol != "legacy" and not ui_finished:
+                for part in ui_adapter.finish_if_needed():
+                    yield sse_data(part)
+            if protocol != "legacy":
+                yield sse_data("[DONE]")
         finally:
             await producer
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    if protocol == "legacy":
+        return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "x-vercel-ai-ui-message-stream": "v1",
+            "Cache-Control": "no-cache",
+        },
+    )
 
 
 def require_session(session_id: str) -> UISession:
@@ -913,6 +950,40 @@ async def run_agent_stream(
                     "type": "plan_steps",
                     "payload": {
                         "steps": session.plan_steps,
+                    },
+                },
+            )
+            return
+
+        if event.type == "tool_input_started" and event.tool_call is not None:
+            tool_id = event.tool_call.id or f"step-{event.step_index}-{event.tool_call.name}"
+            loop.call_soon_threadsafe(
+                queue.put_nowait,
+                {
+                    "type": "tool_input_started",
+                    "payload": {
+                        "assistant_id": assistant_id,
+                        "id": tool_id,
+                        "step_index": event.step_index,
+                        "name": event.tool_call.name,
+                        "arguments": event.tool_call.arguments,
+                    },
+                },
+            )
+            return
+
+        if event.type == "tool_input_delta" and event.tool_call is not None and event.delta:
+            tool_id = event.tool_call.id or f"step-{event.step_index}-{event.tool_call.name}"
+            loop.call_soon_threadsafe(
+                queue.put_nowait,
+                {
+                    "type": "tool_input_delta",
+                    "payload": {
+                        "assistant_id": assistant_id,
+                        "id": tool_id,
+                        "step_index": event.step_index,
+                        "name": event.tool_call.name,
+                        "delta": event.delta,
                     },
                 },
             )

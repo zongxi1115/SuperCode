@@ -122,8 +122,9 @@ class CodingPromptBrain(OpenAICompatibleBrain):
         lines = [
             "## 系统环境信息",
             f"- 操作系统：{platform.system()} {platform.release()} ({platform.machine()})",
-            f"- Python 版本：{platform.python_version()}",
         ]
+        if platform.system() == "Windows":
+            lines.append(f"- 注意Powershell分隔请使用分号")
         if self.workspace:
             lines.append(f"- 工作区路径：{self.workspace}")
         return "\n".join(lines)

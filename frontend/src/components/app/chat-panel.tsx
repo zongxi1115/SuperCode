@@ -51,6 +51,8 @@ import type { ChatMessage, ContentBlock, ModelOption, PlanStep, SessionContextPa
 import {
   ChevronDown,
   ChevronRight,
+  BarChart3Icon,
+  DatabaseIcon,
   FileCodeIcon,
   FileSearchIcon,
   FolderOpenIcon,
@@ -113,11 +115,18 @@ function ToolBody({ toolCall }: { toolCall: ToolCallRecord }) {
   const errorText = toolCall.state === 'error'
     ? String(toolCall.errorMessage || toolCall.error_message || toolCall.output)
     : undefined;
+  const isStreaming = toolCall.state === 'running';
 
   const filename = (args.filename || args.path || args.file_path) as string | undefined;
-  const content = args.content as string | undefined;
+  const content = (args.content as string | undefined) ?? (
+    toolCall.name === 'write_file' ? toolCall.streamedInput : undefined
+  );
   const oldContent = args.old_content || args.old_code as string | undefined;
-  const newContent = args.new_content || args.new_code as string | undefined;
+  const newContent = (
+    args.new_content ||
+    args.new_code ||
+    (toolCall.name === 'replace_file' ? toolCall.streamedInput : undefined)
+  ) as string | undefined;
   const command = args.command || args.cmd || args.content as string | undefined;
   const terminalPayload = output && typeof output === 'object' && !Array.isArray(output)
     ? output as Record<string, unknown>
@@ -147,7 +156,9 @@ function ToolBody({ toolCall }: { toolCall: ToolCallRecord }) {
         )}
         <CodeBlock
           code={content}
+          enableHighlighting={!isStreaming}
           language={filename ? getFileLanguage(filename) as never : 'text'}
+          viewportClassName="overflow-x-auto"
         />
       </div>
     );
@@ -185,6 +196,26 @@ function ToolBody({ toolCall }: { toolCall: ToolCallRecord }) {
         <CodeBlock
           code={output}
           language={filename ? getFileLanguage(filename) as never : 'text'}
+          viewportClassName="overflow-x-auto"
+        />
+      </div>
+    );
+  }
+
+  if (toolCall.name === 'replace_file' && newContent) {
+    return (
+      <div className="space-y-2">
+        {filename && (
+          <TaskItemFile>
+            <FileCodeIcon className="size-3" />
+            {filename}
+          </TaskItemFile>
+        )}
+        <CodeBlock
+          code={newContent}
+          enableHighlighting={!isStreaming}
+          language={filename ? getFileLanguage(filename) as never : 'text'}
+          viewportClassName="overflow-x-auto"
         />
       </div>
     );
@@ -346,6 +377,55 @@ function PlanToggle({ planSteps, isStreaming }: { planSteps: PlanStep[]; isStrea
   );
 }
 
+function DataPartView({ part }: { part: Extract<ContentBlock, { type: 'data' }> }) {
+  const data = part.data;
+
+  if (
+    part.dataType === 'data-chart' &&
+    data &&
+    typeof data === 'object' &&
+    !Array.isArray(data)
+  ) {
+    const chart = data as { title?: unknown; points?: unknown };
+    const points = Array.isArray(chart.points)
+      ? chart.points
+        .map((point) => point && typeof point === 'object' ? point as { x?: unknown; y?: unknown } : null)
+        .filter((point): point is { x?: unknown; y?: unknown } => Boolean(point) && typeof point?.y === 'number')
+      : [];
+    const maxValue = Math.max(...points.map((point) => Number(point.y)), 1);
+
+    return (
+      <div className="rounded-md border bg-background p-3">
+        <div className="mb-3 flex items-center gap-2 text-sm font-medium">
+          <BarChart3Icon className="size-4 text-primary" />
+          {typeof chart.title === 'string' ? chart.title : '图表'}
+        </div>
+        <div className="flex h-36 items-end gap-2">
+          {points.map((point, index) => (
+            <div key={`${String(point.x)}-${index}`} className="flex min-w-10 flex-1 flex-col items-center gap-1">
+              <div
+                className="w-full rounded-t bg-primary/80"
+                style={{ height: `${Math.max((Number(point.y) / maxValue) * 100, 4)}%` }}
+              />
+              <span className="max-w-full truncate text-xs text-muted-foreground">{String(point.x ?? '')}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-md border bg-muted/30 p-3">
+      <div className="mb-2 flex items-center gap-2 text-xs font-medium text-muted-foreground">
+        <DatabaseIcon className="size-3.5" />
+        {part.dataType}
+      </div>
+      <CodeBlock code={JSON.stringify(data, null, 2)} language="json" />
+    </div>
+  );
+}
+
 const personaLabels: Record<PersonaState, string> = {
   asleep: 'Asleep',
   idle: 'Idle',
@@ -465,7 +545,12 @@ const MessageList = memo(function MessageList({
 
   const renderPartsAssistant = (msg: ChatMessage, isLast: boolean) => {
     const parts = msg.parts ?? [];
-    const groups: ({ type: 'cot'; blocks: ContentBlock[]; hasThinking: boolean } | { type: 'text'; block: ContentBlock } | { type: 'tools'; blocks: ContentBlock[] })[] = [];
+    const groups: (
+      | { type: 'cot'; blocks: ContentBlock[]; hasThinking: boolean }
+      | { type: 'text'; block: Extract<ContentBlock, { type: 'text' }> }
+      | { type: 'tools'; blocks: ContentBlock[] }
+      | { type: 'data'; block: Extract<ContentBlock, { type: 'data' }> }
+    )[] = [];
     let cotBuffer: ContentBlock[] = [];
 
     const flushCot = () => {
@@ -485,6 +570,9 @@ const MessageList = memo(function MessageList({
       } else if (part.type === 'text') {
         flushCot();
         groups.push({ type: 'text', block: part });
+      } else if (part.type === 'data') {
+        flushCot();
+        groups.push({ type: 'data', block: part });
       }
     }
     flushCot();
@@ -494,6 +582,10 @@ const MessageList = memo(function MessageList({
         return group.block.text ? (
           <MessageResponse key={`text-${gi}`}>{group.block.text}</MessageResponse>
         ) : null;
+      }
+
+      if (group.type === 'data') {
+        return <DataPartView key={`data-${gi}`} part={group.block} />;
       }
 
       if (group.type === 'tools') {
