@@ -28,6 +28,7 @@ DEFAULT_IGNORED_DIR_NAMES = {
     "node_modules",
     "venv",
 }
+READ_FILE_MAX_OUTPUT_CHARS = 3500
 
 
 def _kill_process_tree(process: subprocess.Popen[str]) -> None:
@@ -399,7 +400,10 @@ class ReadFileTool(CodingBaseTool):
     """读取文件并返回带行号的内容。"""
 
     name = "read_file"
-    description = "读取文件内容，可传 filename、start_line、end_line，返回内容带行号。"
+    description = (
+        "读取文件内容，可传 filename、start_line、end_line，返回内容带行号。"
+        "如果返回内容超过 1600 个字符会直接报错，此时必须缩小范围，改用 start_line/end_line 分段读取。"
+    )
     supports_parallel = True
 
     def run(self, arguments: dict[str, object], context: ToolContext) -> str:
@@ -422,7 +426,13 @@ class ReadFileTool(CodingBaseTool):
         start_index = start_line - 1
         end_index = end_line if end_line is not None else len(lines)
         sliced = lines[start_index:end_index]
-        return self._format_numbered_text(filename, "\n".join(sliced), start_line=start_line)
+        rendered = self._format_numbered_text(filename, "\n".join(sliced), start_line=start_line)
+        if len(rendered) > READ_FILE_MAX_OUTPUT_CHARS:
+            raise ValueError(
+                f"本次 read_file 返回内容过长，已超过 {READ_FILE_MAX_OUTPUT_CHARS} 字符。"
+                "请缩小读取范围并传入更精确的 start_line/end_line。"
+            )
+        return rendered
 
 
 class GrepFileTool(CodingBaseTool):

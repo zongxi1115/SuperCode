@@ -168,20 +168,16 @@ class OpenAICompatibleBrain(AgentBrain):
         if tool_result.success:
             lines.append(
                 f"步骤 {step_index} 工具输出："
-                f"{self._shrink_text(tool_result.output)}"
+                f"{self._stringify_tool_output(tool_result.output)}"
             )
         else:
             lines.append(f"步骤 {step_index} 工具错误：{tool_result.error_message}")
         return lines
 
-    def _shrink_text(self, value: object, limit: int = 1600) -> str:
-        """压缩工具输出，避免上下文膨胀太快。"""
-
+    def _stringify_tool_output(self, value: object) -> str:
+        """把工具输出稳定转成文本，不做静默截断。"""
         text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-        text = text.strip()
-        if len(text) <= limit:
-            return text
-        return text[: limit - 3] + "..."
+        return text.strip()
 
     def _parse_json_output(self, raw_output: str) -> dict[str, object]:
         """解析模型返回的 JSON 文本。"""

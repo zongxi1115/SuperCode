@@ -13,7 +13,7 @@
 # 可用工具
 
 list_file(path?, include_ignored?)  # 浏览目录结构，默认跳过 node_modules 等生成目录
-read_file(filename, start_line?, end_line?)  # 阅读文件（返回带行号）
+read_file(filename, start_line?, end_line?)  # 阅读文件（返回带行号；若超过 1600 字符会报错，需缩小范围分段读取）
 grep_file(regex, search_path?='.')  # 正则搜索，只返回命中行
 write_file(filename, content)    # 创建/覆写文件
 replace_file(filename, old_content, new_content)  # 局部替换

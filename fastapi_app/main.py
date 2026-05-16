@@ -1144,7 +1144,7 @@ async def run_demo_stream(
                 "step_index": 2,
                 "name": "read_file",
                 "arguments": {"filename": demo_file or "", "start_line": 1, "end_line": 120},
-                "output": read_text_file(demo_file, session.workspace)[:1400] if demo_file else "当前工作区里暂时没有合适的文本文件可预览。",
+                "output": read_text_file(demo_file, session.workspace) if demo_file else "当前工作区里暂时没有合适的文本文件可预览。",
                 "success": bool(demo_file),
                 "error_message": None if demo_file else "未找到可预览文件",
             },
