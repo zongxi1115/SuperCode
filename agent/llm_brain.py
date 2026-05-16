@@ -5,7 +5,13 @@ from typing import Any
 from collections.abc import Callable
 
 from .brain import AgentBrain, BrainDecision, BrainStreamingUpdate
-from .llm_client import OpenAICompatibleClient
+from .llm_client import (
+    CompletionResponse,
+    CompletionToolCall,
+    CompletionToolCallDelta,
+    OpenAICompatibleClient,
+    UnsupportedToolCallingError,
+)
 from .schema import AgentState, ConversationMessage, StepRecord
 
 
@@ -22,12 +28,63 @@ class OpenAICompatibleBrain(AgentBrain):
     def decide(
         self,
         state: AgentState,
-        tool_descriptions: dict[str, str],
+        tool_definitions: dict[str, dict[str, Any]],
         on_stream: Callable[[BrainStreamingUpdate], None] | None = None,
     ) -> BrainDecision:
         """调用真实模型，决定下一步动作。"""
+        native_messages = self._build_messages(state, tool_definitions, response_mode="native_tools")
+        native_tools = self._build_native_tool_specs(tool_definitions)
 
-        messages = self._build_messages(state, tool_descriptions)
+        try:
+            if on_stream is None:
+                completion = self.client.chat_completion_messages(
+                    native_messages,
+                    tools=native_tools,
+                )
+            else:
+                streamed_text = ""
+
+                def handle_text_delta(delta: str) -> None:
+                    nonlocal streamed_text
+                    streamed_text += delta
+                    on_stream(
+                        BrainStreamingUpdate(
+                            raw_output=streamed_text,
+                            action="final",
+                            final_answer=streamed_text,
+                        )
+                    )
+
+                def handle_tool_delta(delta_update: CompletionToolCallDelta) -> None:
+                    tool_name = delta_update.name
+                    streamed_tool_argument_name, streamed_tool_input = (
+                        self._extract_partial_streamable_tool_input(
+                            delta_update.arguments,
+                            tool_name,
+                        )
+                    )
+                    on_stream(
+                        BrainStreamingUpdate(
+                            raw_output=delta_update.arguments,
+                            tool_name=tool_name,
+                            streamed_tool_name=tool_name,
+                            streamed_tool_argument_name=streamed_tool_argument_name,
+                            streamed_tool_input=streamed_tool_input,
+                        )
+                    )
+
+                completion = self.client.chat_stream_completion_messages(
+                    native_messages,
+                    tools=native_tools,
+                    on_text_delta=handle_text_delta,
+                    on_tool_call_delta=handle_tool_delta,
+                )
+
+            return self._completion_to_decision(completion)
+        except UnsupportedToolCallingError:
+            pass
+
+        messages = self._build_messages(state, tool_definitions, response_mode="legacy_json")
         if on_stream is None:
             raw_output = self.client.chat_messages(messages)
         else:
@@ -60,21 +117,45 @@ class OpenAICompatibleBrain(AgentBrain):
     def _build_messages(
         self,
         state: AgentState,
-        tool_descriptions: dict[str, str],
+        tool_definitions: dict[str, dict[str, Any]],
+        response_mode: str = "legacy_json",
     ) -> list[dict[str, str]]:
-        system_prompt = self._build_system_prompt(tool_descriptions)
+        system_prompt = self._build_system_prompt(tool_definitions, response_mode=response_mode)
         user_prompt = self._build_user_prompt(state)
         return [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
 
-    def _build_system_prompt(self, tool_descriptions: dict[str, str]) -> str:
+    def _build_system_prompt(
+        self,
+        tool_definitions: dict[str, dict[str, Any]],
+        response_mode: str = "legacy_json",
+    ) -> str:
         """构造系统提示词。"""
 
         tool_lines = []
-        for tool_name, description in tool_descriptions.items():
+        for tool_name, metadata in tool_definitions.items():
+            description = str(metadata.get("description", "")).strip()
             tool_lines.append(f"- {tool_name}: {description}")
+
+        if response_mode == "native_tools":
+            return "\n".join(
+                [
+                    "你是一个支持多轮对话的编码智能体大脑，负责决定下一步要调用哪个工具，或者直接给出最终答案。",
+                    "当前接口已启用原生 tool calling。",
+                    "如果需要调用工具，必须使用原生 tool calling，不要在文本内容里输出 JSON，不要解释将要调用什么。",
+                    "如果不需要调用工具，直接输出给用户的最终答复文本。",
+                    "可用工具如下：",
+                    *tool_lines,
+                    "规则：",
+                    "1. 多个互不依赖的只读探索动作可以一次返回多个 tool calls 并行执行。",
+                    "2. 涉及写文件、替换内容、删除文件或执行命令时，除非你非常确定互不影响，否则一次只调用一个工具。",
+                    "3. 调用工具时，参数名必须与工具参数定义保持一致。",
+                    "4. 如果还不了解项目结构，先调用目录或文件浏览类工具。",
+                    "5. 这是一个对话式助手，必须结合历史上下文回答用户的追问。",
+                ]
+            )
 
         return "\n".join(
             [
@@ -101,6 +182,32 @@ class OpenAICompatibleBrain(AgentBrain):
                 "9. 如果用户只是普通提问，不一定要调用工具，可以直接 final。",
             ]
         )
+
+    def _build_native_tool_specs(
+        self,
+        tool_definitions: dict[str, dict[str, Any]],
+    ) -> list[dict[str, object]]:
+        tool_specs: list[dict[str, object]] = []
+        for tool_name, metadata in tool_definitions.items():
+            description = str(metadata.get("description", "")).strip()
+            parameters_schema = metadata.get("parameters_schema")
+            if not isinstance(parameters_schema, dict):
+                parameters_schema = {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": True,
+                }
+            tool_specs.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "description": description,
+                        "parameters": parameters_schema,
+                    },
+                }
+            )
+        return tool_specs
 
     def _build_user_prompt(self, state: AgentState) -> str:
         """构造用户提示词。"""
@@ -235,7 +342,7 @@ class OpenAICompatibleBrain(AgentBrain):
         if action in {"tool", "final"}:
             return True
 
-        if "tool_calls" in payload or "tool_name" in payload:
+        if "tool_calls" in payload or "tool_name" in payload or "tool" in payload:
             return True
         if "final_answer" in payload:
             return True
@@ -327,11 +434,52 @@ class OpenAICompatibleBrain(AgentBrain):
             content = self._extract_partial_string_field(text, "content")
             return ("content", content) if content is not None else (None, None)
 
+        if tool_name == "apply_patch":
+            patch_text = self._extract_partial_string_field(text, "patch")
+            return ("patch", patch_text) if patch_text is not None else (None, None)
+
         if tool_name == "replace_file":
             new_content = self._extract_partial_string_field(text, "new_content")
             return ("new_content", new_content) if new_content is not None else (None, None)
 
         return None, None
+
+    def _completion_to_decision(self, completion: CompletionResponse) -> BrainDecision:
+        if completion.tool_calls:
+            normalized_calls: list[dict[str, Any]] = []
+            for tool_call in completion.tool_calls:
+                normalized_calls.append(
+                    {
+                        "tool_name": tool_call.name,
+                        "tool_arguments": self._parse_tool_arguments_text(
+                            tool_call.arguments,
+                            tool_call.name,
+                        ),
+                    }
+                )
+            return BrainDecision.call_tools(thought="", tool_calls=normalized_calls)
+
+        final_text = completion.text.strip()
+        if final_text:
+            return BrainDecision.finish(thought="", final_answer=final_text)
+
+        raise ValueError("模型接口既没有返回 tool_calls，也没有返回可用文本内容。")
+
+    def _parse_tool_arguments_text(
+        self,
+        arguments_text: str,
+        tool_name: str,
+    ) -> dict[str, Any]:
+        cleaned = arguments_text.strip()
+        if not cleaned:
+            return {}
+        try:
+            parsed = json.loads(cleaned)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"工具 {tool_name} 的 arguments 不是合法 JSON：{arguments_text}") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError(f"工具 {tool_name} 的 arguments 必须是对象。")
+        return parsed
 
     def _to_decision(self, payload: dict[str, object]) -> BrainDecision:
         """把 JSON 结构转换成框架里的决策对象。"""
@@ -340,7 +488,7 @@ class OpenAICompatibleBrain(AgentBrain):
         thought = str(payload.get("thought", "")).strip()
 
         if not action:
-            if "tool_calls" in payload or "tool_name" in payload:
+            if "tool_calls" in payload or "tool_name" in payload or "tool" in payload:
                 action = "tool"
             elif "final_answer" in payload:
                 action = "final"
@@ -369,8 +517,8 @@ class OpenAICompatibleBrain(AgentBrain):
                     )
                 return BrainDecision.call_tools(thought=thought, tool_calls=normalized_calls)
 
-            tool_name = str(payload.get("tool_name", "")).strip()
-            tool_arguments = payload.get("tool_arguments", {})
+            tool_name = str(payload.get("tool_name") or payload.get("tool") or "").strip()
+            tool_arguments = payload.get("tool_arguments", payload.get("args", {}))
             if not tool_name:
                 raise ValueError("模型决定调用工具，但没有返回 tool_name。")
             if not isinstance(tool_arguments, dict):

@@ -79,6 +79,7 @@ export function getFileLanguage(path: string): string {
     py: 'python', json: 'json', css: 'css', scss: 'scss',
     html: 'html', md: 'markdown', yaml: 'yaml', yml: 'yaml',
     toml: 'toml', rs: 'rust', go: 'go', sql: 'sql', sh: 'bash',
+    vue: 'vue', svelte: 'svelte', astro: 'astro', xml: 'xml',
   };
   return langMap[ext] ?? 'text';
 }

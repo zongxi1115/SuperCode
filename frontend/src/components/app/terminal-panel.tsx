@@ -1,9 +1,11 @@
 "use client";
 
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import type { ManagedProcessPayload } from "@/lib/app-types";
 import { AnimatePresence, motion } from "motion/react";
-import { ChevronDown, CornerDownLeft, Terminal as TerminalIcon, Trash2 } from "lucide-react";
+import { ChevronDown, CornerDownLeft, RefreshCw, Square, Terminal as TerminalIcon, Trash2 } from "lucide-react";
 import type React from "react";
 import { useEffect, useRef } from "react";
 
@@ -12,10 +14,15 @@ type TerminalPanelProps = {
   input: string;
   isOpen: boolean;
   isSubmitting: boolean;
+  isStoppingProcesses: boolean;
+  processes: ManagedProcessPayload[];
   onInputChange: (value: string) => void;
   onSubmit: () => void;
   onToggle: () => void;
   onClear: () => void;
+  onRefreshProcesses: () => void;
+  onStopAllProcesses: () => void;
+  onTerminateProcess: (terminalId: string) => void;
 };
 
 export function TerminalPanel({
@@ -23,10 +30,15 @@ export function TerminalPanel({
   input,
   isOpen,
   isSubmitting,
+  isStoppingProcesses,
+  processes,
   onInputChange,
   onSubmit,
   onToggle,
   onClear,
+  onRefreshProcesses,
+  onStopAllProcesses,
+  onTerminateProcess,
 }: TerminalPanelProps) {
   const outputRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -70,6 +82,15 @@ export function TerminalPanel({
                 <Button
                   variant="ghost"
                   size="icon"
+                  onClick={onRefreshProcesses}
+                  className="h-7 w-7 text-muted-foreground hover:bg-muted hover:text-foreground"
+                  title="刷新 AI 进程"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
                   onClick={onClear}
                   className="h-7 w-7 text-muted-foreground hover:bg-muted hover:text-foreground"
                   title="清空终端"
@@ -88,11 +109,66 @@ export function TerminalPanel({
               </div>
             </div>
 
-            <div
-              ref={outputRef}
-              className="flex-1 overflow-auto bg-muted/15 px-4 py-3 font-mono text-xs leading-6 text-foreground"
-            >
-              <pre className="whitespace-pre-wrap">{output || "> 等待命令执行..."}</pre>
+            <div className="grid flex-1 overflow-hidden md:grid-cols-[minmax(0,1fr)_320px]">
+              <div
+                ref={outputRef}
+                className="overflow-auto bg-muted/15 px-4 py-3 font-mono text-xs leading-6 text-foreground"
+              >
+                <pre className="whitespace-pre-wrap">{output || "> 等待命令执行..."}</pre>
+              </div>
+
+              <div className="border-t md:border-l md:border-t-0 bg-background/80">
+                <div className="flex items-center justify-between border-b px-3 py-2">
+                  <div className="text-xs font-medium text-foreground">AI 受管进程</div>
+                  <Button
+                    size="xs"
+                    variant="destructive"
+                    onClick={onStopAllProcesses}
+                    disabled={processes.length === 0 || isStoppingProcesses}
+                  >
+                    <Square className="size-3 fill-current" />
+                    全部终止
+                  </Button>
+                </div>
+                <div className="max-h-full overflow-auto p-3">
+                  {processes.length === 0 ? (
+                    <p className="text-xs text-muted-foreground">当前没有仍在运行的 AI 命令进程。</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {processes.map((process) => (
+                        <div
+                          key={process.terminalId}
+                          className="rounded-md border bg-muted/20 p-2 text-xs"
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0 space-y-1">
+                              <div className="flex items-center gap-2">
+                                <span className="font-medium text-foreground">{process.terminalId}</span>
+                                <Badge variant={process.status === "orphaned" ? "destructive" : "secondary"}>
+                                  {process.status === "running" ? "运行中" : process.status === "orphaned" ? "残留" : process.status}
+                                </Badge>
+                              </div>
+                              <p className="truncate font-mono text-[11px] text-muted-foreground">
+                                PID {process.rootPid} · {process.processCount} 个进程
+                              </p>
+                            </div>
+                            <Button
+                              size="xs"
+                              variant="outline"
+                              onClick={() => onTerminateProcess(process.terminalId)}
+                            >
+                              终止
+                            </Button>
+                          </div>
+                          <pre className="mt-2 whitespace-pre-wrap break-all rounded bg-background/70 p-2 font-mono text-[11px] leading-5 text-foreground">
+                            {process.command}
+                          </pre>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
             </div>
 
             <div className="border-t bg-background px-4 py-3">

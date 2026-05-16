@@ -7,7 +7,7 @@ import {
 } from '@/components/ai-elements/web-preview';
 import { Button } from '@/components/ui/button';
 import { AnimatePresence, motion } from 'motion/react';
-import { PanelRightOpen, RefreshCw, X } from 'lucide-react';
+import { PanelRightOpen, RefreshCw, ExternalLink, MousePointerClick, X } from 'lucide-react';
 import { useCallback, useRef } from 'react';
 
 type WebPreviewPanelProps = {
@@ -24,6 +24,34 @@ export function WebPreviewPanel({ isOpen, onToggle, url, onUrlChange }: WebPrevi
     if (iframeRef.current) {
       iframeRef.current.src = iframeRef.current.src;
     }
+  }, []);
+
+  const handleOpenInNewTab = useCallback(() => {
+    if (url) {
+      window.open(url, '_blank');
+    }
+  }, [url]);
+
+  const handleSelectElement = useCallback(() => {
+    if (!iframeRef.current?.contentDocument) return;
+    const doc = iframeRef.current.contentDocument;
+    const style = doc.createElement('style');
+    style.textContent = `
+      * { cursor: crosshair !important; }
+      .__highlight-selected { outline: 2px solid #3b82f6 !important; outline-offset: 2px !important; }
+    `;
+    doc.head.appendChild(style);
+
+    const handleClick = (e: MouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      doc.querySelectorAll('.__highlight-selected').forEach((el) => el.classList.remove('__highlight-selected'));
+      (e.target as HTMLElement).classList.add('__highlight-selected');
+      style.remove();
+      doc.removeEventListener('click', handleClick, true);
+    };
+
+    doc.addEventListener('click', handleClick, true);
   }, []);
 
   return (
@@ -44,6 +72,12 @@ export function WebPreviewPanel({ isOpen, onToggle, url, onUrlChange }: WebPrevi
                   <RefreshCw className="w-4 h-4" />
                 </WebPreviewNavigationButton>
                 <WebPreviewUrl />
+                <WebPreviewNavigationButton tooltip="选择元素" onClick={handleSelectElement}>
+                  <MousePointerClick className="w-4 h-4" />
+                </WebPreviewNavigationButton>
+                <WebPreviewNavigationButton tooltip="在新标签页打开" onClick={handleOpenInNewTab}>
+                  <ExternalLink className="w-4 h-4" />
+                </WebPreviewNavigationButton>
                 <WebPreviewNavigationButton tooltip="关闭预览" onClick={onToggle}>
                   <X className="w-4 h-4" />
                 </WebPreviewNavigationButton>

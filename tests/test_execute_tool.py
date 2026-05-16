@@ -9,6 +9,7 @@ from coding_agent.tools import (
     ExcecuteTool,
     ExecuteTool,
     InteractiveCommandSession,
+    ManagedCommandProcess,
     TerminalInputTool,
     TerminalWaitTool,
 )
@@ -116,7 +117,7 @@ class ExecuteToolTests(unittest.TestCase):
         )
         terminal_input_tool = TerminalInputTool()
 
-        with self.assertRaisesRegex(RuntimeError, "当前没有可继续输入的终端命令"):
+        with self.assertRaisesRegex(RuntimeError, "当前没有可(继续输入|交互)的终端命令"):
             terminal_input_tool.run({"content": "y", "timeout": 1}, interactive_context)
 
     def test_terminal_wait_can_observe_background_progress(self) -> None:
@@ -150,6 +151,56 @@ class ExecuteToolTests(unittest.TestCase):
 
         self.assertTrue(self.interactive_session._looks_like_prompt("Question?\n"))
         self.assertFalse(self.interactive_session._looks_like_prompt("Question?\nInstalling dependencies...\n"))
+
+    def test_list_managed_processes_marks_orphaned_processes(self) -> None:
+        self.interactive_session = InteractiveCommandSession(workspace=self.workspace)
+        self.interactive_session.managed_processes["terminal-1"] = ManagedCommandProcess(
+            terminal_id="terminal-1",
+            command="pnpm dev",
+            root_pid=100,
+        )
+
+        with patch(
+            "coding_agent.tools._query_process_table",
+            return_value=[
+                {"pid": 100, "parent_pid": 10, "name": "powershell.exe", "command_line": "powershell pnpm dev"},
+                {"pid": 101, "parent_pid": 100, "name": "node.exe", "command_line": "node vite"},
+            ],
+        ):
+            rows = self.interactive_session.list_managed_processes(only_active=True)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["terminalId"], "terminal-1")
+        self.assertEqual(rows[0]["status"], "orphaned")
+        self.assertEqual(rows[0]["processCount"], 2)
+
+    def test_terminate_command_kills_root_and_descendants(self) -> None:
+        self.interactive_session = InteractiveCommandSession(workspace=self.workspace)
+        self.interactive_session.managed_processes["terminal-1"] = ManagedCommandProcess(
+            terminal_id="terminal-1",
+            command="pnpm dev",
+            root_pid=200,
+        )
+
+        with (
+            patch(
+                "coding_agent.tools._query_process_table",
+                side_effect=[
+                    [
+                        {"pid": 200, "parent_pid": 10, "name": "powershell.exe", "command_line": "powershell pnpm dev"},
+                        {"pid": 201, "parent_pid": 200, "name": "node.exe", "command_line": "node vite"},
+                    ],
+                    [],
+                ],
+            ),
+            patch("coding_agent.tools._kill_processes_by_pid") as mock_kill,
+        ):
+            result = self.interactive_session.terminate_command("terminal-1")
+
+        self.assertEqual(result["status"], "terminated")
+        self.assertIsNotNone(result["terminatedAt"])
+        killed_pids = set(mock_kill.call_args.args[0])
+        self.assertEqual(killed_pids, {200, 201})
 
 
 if __name__ == "__main__":

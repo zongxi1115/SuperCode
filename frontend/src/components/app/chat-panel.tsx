@@ -7,6 +7,15 @@ import {
   ChainOfThoughtStep,
 } from '@/components/ai-elements/chain-of-thought';
 import { CodeBlock, CodeBlockDiff } from '@/components/ai-elements/code-block';
+import {
+  Confirmation,
+  ConfirmationAccepted,
+  ConfirmationAction,
+  ConfirmationActions,
+  ConfirmationRejected,
+  ConfirmationRequest,
+  ConfirmationTitle,
+} from '@/components/ai-elements/confirmation';
 import { Terminal } from '@/components/ai-elements/terminal';
 import { Message, MessageContent, MessageResponse } from '@/components/ai-elements/message';
 import { Persona, type PersonaState } from '@/components/ai-elements/persona';
@@ -82,6 +91,7 @@ type ChatPanelProps = {
   onKeyDown: (e: React.KeyboardEvent<HTMLTextAreaElement>) => void;
   onSendMessage: () => void;
   onStopMessage: () => void;
+  onResolveDeleteConfirmation: (toolCallId: string, approved: boolean) => void;
   onModelChange: (envFile: string) => void;
 };
 
@@ -89,6 +99,7 @@ const TOOL_ICONS: Record<string, React.ReactNode> = {
   list_file: <FolderOpenIcon className="size-4" />,
   read_file: <FileSearchIcon className="size-4" />,
   write_file: <PlusIcon className="size-4" />,
+  apply_patch: <PencilIcon className="size-4" />,
   replace_file: <PencilIcon className="size-4" />,
   delete_file: <Trash2Icon className="size-4" />,
   execute: <TerminalIcon className="size-4" />,
@@ -109,9 +120,19 @@ function normalizeThoughtText(value?: string | null) {
   return trimmed;
 }
 
-function ToolBody({ toolCall }: { toolCall: ToolCallRecord }) {
+function ToolBody({
+  toolCall,
+  onResolveDeleteConfirmation,
+}: {
+  toolCall: ToolCallRecord;
+  onResolveDeleteConfirmation: (toolCallId: string, approved: boolean) => void;
+}) {
   const args = toolCall.arguments || {};
-  const output = toolCall.state === 'completed' ? toolCall.output : undefined;
+  const output = (
+    toolCall.state === 'completed' ||
+    toolCall.state === 'output-available' ||
+    toolCall.state === 'output-denied'
+  ) ? toolCall.output : undefined;
   const errorText = toolCall.state === 'error'
     ? String(toolCall.errorMessage || toolCall.error_message || toolCall.output)
     : undefined;
@@ -126,6 +147,10 @@ function ToolBody({ toolCall }: { toolCall: ToolCallRecord }) {
     args.new_content ||
     args.new_code ||
     (toolCall.name === 'replace_file' ? toolCall.streamedInput : undefined)
+  ) as string | undefined;
+  const patchText = (
+    args.patch ||
+    (toolCall.name === 'apply_patch' ? toolCall.streamedInput : undefined)
   ) as string | undefined;
   const command = args.command || args.cmd || args.content as string | undefined;
   const terminalPayload = output && typeof output === 'object' && !Array.isArray(output)
@@ -217,6 +242,69 @@ function ToolBody({ toolCall }: { toolCall: ToolCallRecord }) {
           language={filename ? getFileLanguage(filename) as never : 'text'}
           viewportClassName="overflow-x-auto"
         />
+      </div>
+    );
+  }
+
+  if (toolCall.name === 'apply_patch' && patchText) {
+    return (
+      <div className="space-y-2">
+        <CodeBlock
+          code={patchText}
+          enableHighlighting={!isStreaming}
+          language={'diff' as never}
+          viewportClassName="overflow-x-auto"
+        />
+      </div>
+    );
+  }
+
+  if (toolCall.name === 'delete_file') {
+    const deletePayload = (
+      output && typeof output === 'object' && !Array.isArray(output)
+        ? output as Record<string, unknown>
+        : undefined
+    );
+    const deleteFilename = filename ?? (typeof deletePayload?.filename === 'string' ? deletePayload.filename : undefined);
+    const confirmationMessage = typeof deletePayload?.message === 'string' ? deletePayload.message : undefined;
+    const approval = toolCall.approval ?? { id: toolCall.id };
+    const confirmationState = toolCall.state === 'completed' ? 'output-available' : toolCall.state;
+
+    return (
+      <div className="space-y-3">
+        {deleteFilename ? (
+          <TaskItemFile>
+            <FileCodeIcon className="size-3" />
+            {deleteFilename}
+          </TaskItemFile>
+        ) : null}
+        <Confirmation approval={approval} state={confirmationState as never}>
+          <ConfirmationTitle>
+            {confirmationMessage ?? `确认删除文件${deleteFilename ? ` ${deleteFilename}` : ''}？`}
+          </ConfirmationTitle>
+          <ConfirmationRequest>
+            <ConfirmationActions>
+              <ConfirmationAction
+                variant="outline"
+                onClick={() => onResolveDeleteConfirmation(toolCall.id, false)}
+              >
+                取消
+              </ConfirmationAction>
+              <ConfirmationAction
+                variant="destructive"
+                onClick={() => onResolveDeleteConfirmation(toolCall.id, true)}
+              >
+                删除
+              </ConfirmationAction>
+            </ConfirmationActions>
+          </ConfirmationRequest>
+          <ConfirmationAccepted>
+            <p className="text-xs text-muted-foreground">文件已删除。</p>
+          </ConfirmationAccepted>
+          <ConfirmationRejected>
+            <p className="text-xs text-muted-foreground">删除已取消。</p>
+          </ConfirmationRejected>
+        </Confirmation>
       </div>
     );
   }
@@ -478,14 +566,23 @@ const EmptyStateWithPersona = memo(function EmptyStateWithPersona({
 const MessageList = memo(function MessageList({
   isLoading,
   messages,
+  onResolveDeleteConfirmation,
 }: {
   isLoading: boolean;
   messages: ChatMessage[];
+  onResolveDeleteConfirmation: (toolCallId: string, approved: boolean) => void;
 }) {
+  const statusLabelMap: Record<ToolCallRecord['state'], string> = {
+    running: '执行中',
+    completed: '已完成',
+    error: '出错',
+    'approval-requested': '待确认',
+    'output-available': '已完成',
+    'output-denied': '已拒绝',
+  };
+
   const renderToolCall = (tc: ToolCallRecord, isLastTool: boolean) => {
-    const statusLabel =
-      tc.state === 'completed' ? '已完成' :
-      tc.state === 'error' ? '出错' : '执行中';
+    const statusLabel = statusLabelMap[tc.state] ?? '执行中';
 
     return (
       <Task key={tc.id} defaultOpen={isLastTool}>
@@ -495,7 +592,7 @@ const MessageList = memo(function MessageList({
         />
         <TaskContent>
           <TaskItem>
-            <ToolBody toolCall={tc} />
+            <ToolBody toolCall={tc} onResolveDeleteConfirmation={onResolveDeleteConfirmation} />
           </TaskItem>
         </TaskContent>
       </Task>
@@ -662,10 +759,12 @@ const MessageList = memo(function MessageList({
 const ChatStreamBody = memo(function ChatStreamBody({
   isLoading,
   messages,
+  onResolveDeleteConfirmation,
   personaState,
 }: {
   isLoading: boolean;
   messages: ChatMessage[];
+  onResolveDeleteConfirmation: (toolCallId: string, approved: boolean) => void;
   personaState: PersonaState;
 }) {
   if (messages.length === 0) {
@@ -674,7 +773,11 @@ const ChatStreamBody = memo(function ChatStreamBody({
 
   return (
     <>
-      <MessageList isLoading={isLoading} messages={messages} />
+      <MessageList
+        isLoading={isLoading}
+        messages={messages}
+        onResolveDeleteConfirmation={onResolveDeleteConfirmation}
+      />
       <PersonaRail state={personaState} />
     </>
   );
@@ -694,6 +797,7 @@ export function ChatPanel({
   onKeyDown,
   onSendMessage,
   onStopMessage,
+  onResolveDeleteConfirmation,
   onModelChange,
 }: ChatPanelProps) {
   const planSteps = contextData?.planSteps ?? [];
@@ -770,6 +874,7 @@ export function ChatPanel({
           <ChatStreamBody
             isLoading={isLoading}
             messages={messages}
+            onResolveDeleteConfirmation={onResolveDeleteConfirmation}
             personaState={personaState}
           />
         </ConversationContent>

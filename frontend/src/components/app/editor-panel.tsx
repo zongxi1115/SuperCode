@@ -1,6 +1,7 @@
 import { CodeBlock } from '@/components/ai-elements/code-block';
 import { FileTree } from '@/components/ai-elements/file-tree';
 import { renderFileTreeNodes } from '@/components/app/file-tree-renderers';
+import { ResizableHandle } from '@/components/app/resizable-handle';
 import { Button } from '@/components/ui/button';
 import { getFileLanguage } from '@/lib/app-utils';
 import type { FileTreeNode } from '@/lib/app-types';
@@ -22,6 +23,10 @@ type EditorPanelProps = {
 };
 
 const EDITOR_FONT = 'font-mono text-[13px] leading-[20px]';
+const COLLAPSED_FILE_TREE_WIDTH = 40;
+const DEFAULT_FILE_TREE_WIDTH = 280;
+const MIN_FILE_TREE_WIDTH = 220;
+const MAX_FILE_TREE_WIDTH = 520;
 
 export function EditorPanel({
   fileTree,
@@ -38,6 +43,7 @@ export function EditorPanel({
   const [isEditing, setIsEditing] = useState(false);
   const [editContent, setEditContent] = useState('');
   const [isSaving, setIsSaving] = useState(false);
+  const [fileTreeWidth, setFileTreeWidth] = useState(DEFAULT_FILE_TREE_WIDTH);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -122,6 +128,10 @@ export function EditorPanel({
     scrollRef.current.scrollLeft = textareaRef.current.scrollLeft;
   }, []);
 
+  const handleFileTreeResize = useCallback((delta: number) => {
+    setFileTreeWidth((prev) => Math.min(Math.max(prev + delta, MIN_FILE_TREE_WIDTH), MAX_FILE_TREE_WIDTH));
+  }, []);
+
   const lineCount = isEditing
     ? editContent.split('\n').length
     : selectedFileContent.split('\n').length;
@@ -130,7 +140,7 @@ export function EditorPanel({
     <div className="flex-1 flex flex-col min-h-0">
       <div className="flex-1 overflow-hidden flex min-h-0">
         <motion.div
-          animate={{ width: isFileTreeCollapsed ? 40 : 200 }}
+          animate={{ width: isFileTreeCollapsed ? COLLAPSED_FILE_TREE_WIDTH : fileTreeWidth }}
           transition={{ duration: 0.2, ease: [0.25, 0.1, 0.25, 1] }}
           className="border-r bg-muted/10 flex flex-col flex-shrink-0 overflow-hidden"
         >
@@ -167,6 +177,13 @@ export function EditorPanel({
             )}
           </AnimatePresence>
         </motion.div>
+        {!isFileTreeCollapsed && (
+          <ResizableHandle
+            side="left"
+            onResize={handleFileTreeResize}
+            className="border-r border-border/60 bg-background/40 hover:bg-primary/15"
+          />
+        )}
 
         <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
           {selectedFilePath && selectedFileContent ? (

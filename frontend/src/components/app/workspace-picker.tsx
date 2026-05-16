@@ -74,7 +74,7 @@ export function WorkspacePicker({
               </FileTree>
             </div>
           </ScrollArea>
-          <p className="text-xs text-muted-foreground">点击目录名选中工作区，点左侧箭头继续展开下一层。</p>
+          <p className="text-xs text-muted-foreground">点击目录名即可选中并展开/收起，左侧箭头也仍可单独控制展开。</p>
         </div>
 
         <div className="space-y-3">

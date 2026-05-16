@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable
 
@@ -71,7 +71,13 @@ class CodingAgent:
         state.data["turn_index"] = turn_index
         steps: list[StepRecord] = []
         state.tool_results = []
-        tool_descriptions = {name: tool.description for name, tool in self.tools.items()}
+        tool_definitions = {
+            name: {
+                "description": tool.description,
+                "parameters_schema": getattr(tool, "parameters_schema", None),
+            }
+            for name, tool in self.tools.items()
+        }
         context = ToolContext(
             workspace=self.workspace,
             metadata=self.tool_context_metadata,
@@ -85,6 +91,16 @@ class CodingAgent:
         )
 
         for index in range(1, self.max_steps + 1):
+            if self._is_cancelled(context):
+                return self._build_cancelled_response(
+                    state=state,
+                    steps=steps,
+                    history_steps=history_steps,
+                    turn_index=turn_index,
+                    step_index=index,
+                    on_event=on_event,
+                )
+
             streamed_final_answer = ""
             streamed_thought = ""
             streamed_tool_input = ""
@@ -190,7 +206,7 @@ class CodingAgent:
 
             decision = self.brain.decide(
                 state=state,
-                tool_descriptions=tool_descriptions,
+                tool_definitions=tool_definitions,
                 on_stream=on_brain_stream,
             )
             self._emit_event(
@@ -202,6 +218,16 @@ class CodingAgent:
                     thought=decision.thought,
                 ),
             )
+
+            if self._is_cancelled(context):
+                return self._build_cancelled_response(
+                    state=state,
+                    steps=steps,
+                    history_steps=history_steps,
+                    turn_index=turn_index,
+                    step_index=index,
+                    on_event=on_event,
+                )
 
             if decision.action == "final":
                 step_record = StepRecord(
@@ -258,9 +284,9 @@ class CodingAgent:
                     ),
                 )
 
-            results = self._execute_tool_calls(tool_calls, context)
             tool_results: list[ToolResult] = []
-            for tool_call, result in results:
+
+            def handle_tool_result(tool_call: ToolCall, result: ToolResult) -> None:
                 state.add_tool_result(result)
                 tool_results.append(result)
                 self._emit_event(
@@ -274,6 +300,12 @@ class CodingAgent:
                     ),
                 )
 
+            self._execute_tool_calls(
+                tool_calls,
+                context,
+                on_result=handle_tool_result,
+            )
+
             step_record = StepRecord(
                 turn_index=turn_index,
                 index=index,
@@ -285,6 +317,16 @@ class CodingAgent:
             )
             steps.append(step_record)
             history_steps.append(step_record)
+
+            if self._is_cancelled(context):
+                return self._build_cancelled_response(
+                    state=state,
+                    steps=steps,
+                    history_steps=history_steps,
+                    turn_index=turn_index,
+                    step_index=index,
+                    on_event=on_event,
+                )
 
         final_output = f"任务在 {self.max_steps} 步内未完成，请调整 brain 或增大 max_steps。"
         step_record = StepRecord(
@@ -322,6 +364,15 @@ class CodingAgent:
 
     def _execute_tool(self, tool_call: ToolCall, context: ToolContext) -> ToolResult:
         """执行单个工具调用，并把异常包装成统一结果。"""
+
+        if self._is_cancelled(context):
+            return ToolResult(
+                name=tool_call.name,
+                output=None,
+                tool_call_id=tool_call.id,
+                success=False,
+                error_message="当前任务已被用户停止。",
+            )
 
         tool = self.tools.get(tool_call.name)
         if tool is None:
@@ -380,6 +431,7 @@ class CodingAgent:
         self,
         tool_calls: list[ToolCall],
         context: ToolContext,
+        on_result: Callable[[ToolCall, ToolResult], None] | None = None,
     ) -> list[tuple[ToolCall, ToolResult]]:
         """执行工具调用列表，对只读工具自动并行。"""
 
@@ -393,12 +445,16 @@ class CodingAgent:
 
             worker_count = min(len(parallel_buffer), 4)
             with ThreadPoolExecutor(max_workers=worker_count) as executor:
-                future_results = [
-                    executor.submit(self._execute_tool, tool_call, context)
+                future_by_tool_call = {
+                    executor.submit(self._execute_tool, tool_call, context): tool_call
                     for tool_call in parallel_buffer
-                ]
-                for tool_call, future in zip(parallel_buffer, future_results, strict=True):
-                    results.append((tool_call, future.result()))
+                }
+                for future in as_completed(future_by_tool_call):
+                    tool_call = future_by_tool_call[future]
+                    result = future.result()
+                    results.append((tool_call, result))
+                    if on_result is not None:
+                        on_result(tool_call, result)
             parallel_buffer = []
 
         for tool_call in tool_calls:
@@ -407,7 +463,10 @@ class CodingAgent:
                 continue
 
             flush_parallel_buffer()
-            results.append((tool_call, self._execute_tool(tool_call, context)))
+            result = self._execute_tool(tool_call, context)
+            results.append((tool_call, result))
+            if on_result is not None:
+                on_result(tool_call, result)
 
         flush_parallel_buffer()
         return results
@@ -427,3 +486,50 @@ class CodingAgent:
 
         if on_event is not None:
             on_event(event)
+
+    def _is_cancelled(self, context: ToolContext) -> bool:
+        cancel_event = context.metadata.get("cancel_event")
+        return bool(cancel_event is not None and getattr(cancel_event, "is_set", lambda: False)())
+
+    def _build_cancelled_response(
+        self,
+        state: AgentState,
+        steps: list[StepRecord],
+        history_steps: list[StepRecord],
+        turn_index: int,
+        step_index: int,
+        on_event: Callable[[AgentEvent], None] | None,
+    ) -> AgentResponse:
+        final_output = "已停止当前任务。"
+        step_record = StepRecord(
+            turn_index=turn_index,
+            index=step_index,
+            thought="用户主动停止了当前执行。",
+            final_answer=final_output,
+        )
+        steps.append(step_record)
+        history_steps.append(step_record)
+        response = AgentResponse(
+            task=state.current_input,
+            final_output=final_output,
+            steps=steps,
+        )
+        self._emit_event(
+            on_event,
+            AgentEvent(
+                type="final",
+                step_index=step_index,
+                message="当前任务已停止。",
+                final_answer=final_output,
+            ),
+        )
+        self._emit_event(
+            on_event,
+            AgentEvent(
+                type="turn_finished",
+                step_index=step_index,
+                message="本轮处理已停止。",
+                final_answer=final_output,
+            ),
+        )
+        return response

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 import signal
 
@@ -23,6 +23,7 @@ import re
 
 from agent import AgentEvent, AgentLLMConfig, ChatSession, CodingAgent, OpenAICompatibleClient
 from coding_agent import CodingPromptBrain, InteractiveCommandSession, build_coding_tools
+from coding_agent.tools import delete_file_in_workspace
 from fastapi_app.ui_message_stream import UIMessageStreamAdapter, sse_data
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -134,12 +135,38 @@ class TerminalInputRequest(BaseModel):
     command: str
 
 
+class ToolConfirmationRequest(BaseModel):
+    approved: bool
+
+
 class TerminalSnapshotResponse(BaseModel):
     sessionId: str
     output: str
     revision: int
     isAlive: bool
     shell: str
+    fileTree: list[dict[str, Any]] | None = None
+    processes: list[dict[str, Any]] | None = None
+
+
+class ManagedProcessInfo(BaseModel):
+    pid: int
+    parent_pid: int
+    name: str
+    command_line: str
+    is_root: bool
+
+
+class ManagedProcessResponse(BaseModel):
+    terminalId: str
+    command: str
+    rootPid: int
+    status: str
+    returnCode: int | None
+    startedAt: int
+    terminatedAt: int | None
+    processCount: int
+    processes: list[ManagedProcessInfo]
 
 
 @dataclass
@@ -271,6 +298,12 @@ class UISession:
     terminal_runtime: TerminalRuntime | None = field(default=None, repr=False)
     interactive_command_session: InteractiveCommandSession | None = field(default=None, repr=False)
     chat_session: ChatSession | None = None
+    cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
+    cached_file_tree: list[dict[str, Any]] = field(default_factory=list, repr=False)
+    file_tree_loaded: bool = field(default=False, repr=False)
+    file_tree_dirty: bool = field(default=True, repr=False)
+    file_tree_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    pending_delete_confirmations: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
     history_messages: list[dict[str, Any]] = field(default_factory=list)
     history_tools: list[dict[str, Any]] = field(default_factory=list)
     thoughts: list[str] = field(default_factory=list)
@@ -327,11 +360,47 @@ class UISession:
             thoughts=self.thoughts,
             terminalOutput=self.terminal_output,
             previewUrl=self.preview_url,
-            fileTree=build_file_tree(resolve_workspace_path(self.workspace)),
+            fileTree=self.get_file_tree(),
             selectedFilePath=self.selected_file_path,
             selectedFileContent=read_text_file(self.selected_file_path, self.workspace),
             openFiles=self.open_files,
             planSteps=self.plan_steps,
+        )
+
+    def mark_file_tree_dirty(self) -> None:
+        with self.file_tree_lock:
+            self.file_tree_dirty = True
+
+    def get_file_tree(self, force_refresh: bool = False) -> list[dict[str, Any]]:
+        with self.file_tree_lock:
+            if force_refresh or self.file_tree_dirty or not self.file_tree_loaded:
+                self.cached_file_tree = build_file_tree(resolve_workspace_path(self.workspace))
+                self.file_tree_loaded = True
+                self.file_tree_dirty = False
+            return self.cached_file_tree
+
+    def get_managed_processes(self, active_only: bool = True) -> list[dict[str, Any]]:
+        if self.interactive_command_session is None:
+            return []
+        return self.interactive_command_session.list_managed_processes(only_active=active_only)
+
+    def terminal_snapshot(
+        self,
+        include_file_tree: bool = False,
+        include_processes: bool = False,
+    ) -> TerminalSnapshotResponse:
+        if self.terminal_runtime is None:
+            raise RuntimeError("terminal 不存在")
+        snapshot = self.terminal_runtime.snapshot(self.session_id)
+        self.terminal_output = snapshot.output
+        return TerminalSnapshotResponse(
+            sessionId=snapshot.sessionId,
+            output=snapshot.output,
+            revision=snapshot.revision,
+            isAlive=snapshot.isAlive,
+            shell=snapshot.shell,
+            fileTree=self.get_file_tree() if include_file_tree else None,
+            processes=self.get_managed_processes(active_only=True) if include_processes else None,
         )
 
     def history_snapshot(self) -> SessionHistoryItem:
@@ -407,6 +476,7 @@ class UISession:
 async def lifespan(app: FastAPI):
     def _cleanup_sessions() -> None:
         for session in _sessions.values():
+            stop_session_execution(session)
             if session.terminal_runtime is not None:
                 session.terminal_runtime.close()
             if session.interactive_command_session is not None:
@@ -426,6 +496,18 @@ app.add_middleware(
 )
 
 _sessions: dict[str, UISession] = {}
+
+
+def stop_session_execution(session: UISession) -> list[dict[str, Any]]:
+    """停止当前会话里由 AI 工具托管的命令进程。"""
+
+    session.cancel_event.set()
+    interactive_session = session.interactive_command_session
+    if interactive_session is None:
+        return []
+    terminated = interactive_session.terminate_all()
+    session.touch()
+    return terminated
 
 
 @app.get("/api/workspaces")
@@ -469,6 +551,7 @@ async def switch_session_model(session_id: str, request: SwitchModelRequest) -> 
             session.chat_session.agent,
             session_id=session.session_id,
             interactive_command_session=interactive_command_session,
+            cancel_event=session.cancel_event,
         )
     session.model = config.model
     session.env_file = env_file_name
@@ -525,6 +608,7 @@ async def create_session(request: CreateSessionRequest) -> JSONResponse:
             session.chat_session.agent,
             session_id=session.session_id,
             interactive_command_session=interactive_command_session,
+            cancel_event=session.cancel_event,
         )
     _sessions[session_id] = session
 
@@ -599,11 +683,58 @@ async def delete_session(session_id: str) -> JSONResponse:
     session = _sessions.pop(session_id, None)
     if session is None:
         raise HTTPException(status_code=404, detail="session 不存在")
+    stop_session_execution(session)
     if session.terminal_runtime is not None:
         session.terminal_runtime.close()
     if session.interactive_command_session is not None:
         session.interactive_command_session.close()
     return JSONResponse({"deleted": True, "sessionId": session_id})
+
+
+@app.post("/api/sessions/{session_id}/stop")
+async def stop_session(session_id: str) -> JSONResponse:
+    session = require_session(session_id)
+    terminated = stop_session_execution(session)
+    remaining = (
+        session.interactive_command_session.list_managed_processes(only_active=True)
+        if session.interactive_command_session is not None
+        else []
+    )
+    return JSONResponse(
+        {
+            "stopped": True,
+            "terminatedCount": len(terminated),
+            "terminated": terminated,
+            "remaining": remaining,
+        }
+    )
+
+
+@app.get("/api/sessions/{session_id}/processes")
+async def get_session_processes(
+    session_id: str,
+    active_only: bool = Query(True),
+) -> JSONResponse:
+    session = require_session(session_id)
+    interactive_session = session.interactive_command_session
+    if interactive_session is None:
+        return JSONResponse({"processes": []})
+    processes = interactive_session.list_managed_processes(only_active=active_only)
+    return JSONResponse({"processes": processes})
+
+
+@app.post("/api/sessions/{session_id}/processes/{terminal_id}/terminate")
+async def terminate_session_process(session_id: str, terminal_id: str) -> JSONResponse:
+    session = require_session(session_id)
+    interactive_session = session.interactive_command_session
+    if interactive_session is None:
+        raise HTTPException(status_code=404, detail="当前会话没有受管进程")
+    try:
+        result = interactive_session.terminate_command(terminal_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    session.touch()
+    return JSONResponse({"terminated": True, "process": result})
 
 
 @app.get("/api/files")
@@ -640,10 +771,7 @@ async def preview_session_file(session_id: str, preview_path: str = "") -> FileR
 async def get_file_tree(session_id: str) -> JSONResponse:
     session = require_session(session_id)
     try:
-        tree = await asyncio.wait_for(
-            asyncio.to_thread(build_file_tree, resolve_workspace_path(session.workspace)),
-            timeout=15,
-        )
+        tree = await asyncio.wait_for(asyncio.to_thread(session.get_file_tree), timeout=15)
     except asyncio.TimeoutError:
         tree = []
     return JSONResponse(
@@ -669,10 +797,102 @@ async def save_file(
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
+        session.mark_file_tree_dirty()
         session.touch()
         return JSONResponse({"saved": True, "path": resolved_path})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/sessions/{session_id}/tools/{tool_id}/confirm-delete")
+async def confirm_delete_tool(
+    session_id: str,
+    tool_id: str,
+    request: ToolConfirmationRequest,
+) -> JSONResponse:
+    session = require_session(session_id)
+    pending = session.pending_delete_confirmations.pop(tool_id, None)
+    if pending is None:
+        raise HTTPException(status_code=404, detail="未找到待确认的删除动作")
+
+    filename = str(pending.get("filename") or "").strip()
+    if not filename:
+        raise HTTPException(status_code=400, detail="待确认删除动作缺少 filename")
+
+    approval = {"id": tool_id, "approved": request.approved}
+    if not request.approved:
+        tool_record = {
+            "id": tool_id,
+            "output": "已取消删除。",
+            "success": False,
+            "state": "output-denied",
+            "approval": approval,
+        }
+        session.history_tools = upsert_tool(session.history_tools, tool_record)
+        session.touch()
+        return JSONResponse(
+            {
+                "id": tool_id,
+                "name": "delete_file",
+                "output": "已取消删除。",
+                "success": False,
+                "state": "output-denied",
+                "approval": approval,
+                "selectedFileCleared": False,
+            }
+        )
+
+    selected_file_cleared = False
+    try:
+        output = delete_file_in_workspace(filename, resolve_workspace_path(session.workspace))
+        session.mark_file_tree_dirty()
+        if session.selected_file_path == normalize_relative_path(filename, session.workspace):
+            session.selected_file_path = None
+            selected_file_cleared = True
+        tool_record = {
+            "id": tool_id,
+            "output": output,
+            "success": True,
+            "state": "output-available",
+            "approval": approval,
+        }
+        session.history_tools = upsert_tool(session.history_tools, tool_record)
+        session.touch()
+        return JSONResponse(
+            {
+                "id": tool_id,
+                "name": "delete_file",
+                "output": output,
+                "success": True,
+                "state": "output-available",
+                "approval": approval,
+                "selectedFileCleared": selected_file_cleared,
+            }
+        )
+    except Exception as exc:
+        tool_record = {
+            "id": tool_id,
+            "output": None,
+            "success": False,
+            "state": "error",
+            "errorMessage": str(exc),
+            "approval": approval,
+        }
+        session.history_tools = upsert_tool(session.history_tools, tool_record)
+        session.touch()
+        return JSONResponse(
+            {
+                "id": tool_id,
+                "name": "delete_file",
+                "output": None,
+                "success": False,
+                "state": "error",
+                "error_message": str(exc),
+                "approval": approval,
+                "selectedFileCleared": False,
+            },
+            status_code=500,
+        )
 
 
 @app.get("/api/sessions/{session_id}/context")
@@ -682,12 +902,18 @@ async def get_session_context(session_id: str) -> JSONResponse:
 
 
 @app.get("/api/sessions/{session_id}/terminal")
-async def get_session_terminal(session_id: str) -> JSONResponse:
+async def get_session_terminal(
+    session_id: str,
+    include_file_tree: bool = Query(False),
+    include_processes: bool = Query(False),
+) -> JSONResponse:
     session = require_session(session_id)
     if session.terminal_runtime is None:
         raise HTTPException(status_code=404, detail="terminal 不存在")
-    snapshot = session.terminal_runtime.snapshot(session_id)
-    session.terminal_output = snapshot.output
+    snapshot = session.terminal_snapshot(
+        include_file_tree=include_file_tree,
+        include_processes=include_processes,
+    )
     return JSONResponse(snapshot.model_dump())
 
 
@@ -726,6 +952,7 @@ async def chat_stream(
     protocol: str = Query("ui-message"),
 ) -> StreamingResponse:
     session = require_session(request.session_id)
+    session.cancel_event.clear()
     user_message = request.message.strip()
     if not user_message:
         raise HTTPException(status_code=400, detail="message 不能为空")
@@ -776,8 +1003,16 @@ async def chat_stream(
                     yield sse_data(part)
             if protocol != "legacy":
                 yield sse_data("[DONE]")
+        except asyncio.CancelledError:
+            stop_session_execution(session)
+            raise
         finally:
-            await producer
+            if producer.done():
+                await producer
+            else:
+                producer.cancel()
+                with suppress(asyncio.CancelledError):
+                    await producer
 
     if protocol == "legacy":
         return StreamingResponse(event_generator(), media_type="text/event-stream")
@@ -826,11 +1061,14 @@ def attach_agent_runtime_metadata(
     agent: CodingAgent,
     session_id: str,
     interactive_command_session: InteractiveCommandSession | None,
+    cancel_event: threading.Event | None = None,
 ) -> None:
     agent.tool_context_metadata["session_id"] = session_id
     agent.tool_context_metadata["backend_base_url"] = BACKEND_BASE_URL
     if interactive_command_session is not None:
         agent.tool_context_metadata["interactive_command_session"] = interactive_command_session
+    if cancel_event is not None:
+        agent.tool_context_metadata["cancel_event"] = cancel_event
 
 
 def build_chat_session(workspace: str, env_file: str | None = None) -> tuple[ChatSession | None, str, str | None, str | None]:
@@ -870,6 +1108,9 @@ async def run_agent_stream(
 
     def on_event(event: AgentEvent) -> None:
         nonlocal streamed_assistant_text, assistant_stream_started
+
+        if session.cancel_event.is_set():
+            return
 
         if event.type == "thought_delta" and event.delta:
             loop.call_soon_threadsafe(
@@ -911,6 +1152,15 @@ async def run_agent_stream(
                 )
 
             streamed_assistant_text += event.delta
+            session.history_messages = upsert_message(
+                session.history_messages,
+                {
+                    "id": assistant_id,
+                    "role": "assistant",
+                    "content": streamed_assistant_text,
+                },
+            )
+            session.touch()
             loop.call_soon_threadsafe(
                 queue.put_nowait,
                 {
@@ -994,19 +1244,36 @@ async def run_agent_stream(
             output = event.tool_result.output
             terminal_output = extract_terminal_output(output)
             preview_url = extract_preview_url(output)
+            requires_confirmation = bool(
+                event.tool_result.name == "delete_file"
+                and isinstance(output, dict)
+                and output.get("requires_confirmation") is True
+            )
             if event.tool_result.name in {"execute", "excecute", "terminal_input", "terminal_wait"} and terminal_output is not None:
                 session.terminal_output = terminal_output
+            if event.tool_result.name in {"write_file", "replace_file", "apply_patch"} or (
+                event.tool_result.name == "delete_file" and not requires_confirmation
+            ):
+                session.mark_file_tree_dirty()
             if event.tool_result.name == "open_browser" and preview_url is not None:
                 session.preview_url = preview_url
+            tool_state = "approval-requested" if requires_confirmation else ("completed" if event.tool_result.success else "error")
+            tool_success: bool | None = None if requires_confirmation else event.tool_result.success
+            approval = {"id": tool_id} if requires_confirmation else None
+            if requires_confirmation and isinstance(output, dict):
+                session.pending_delete_confirmations[tool_id] = {
+                    "filename": str(output.get("filename") or ""),
+                }
             tool_record = {
                 "id": tool_id,
                 "stepIndex": event.step_index,
                 "name": event.tool_call.name,
                 "arguments": event.tool_call.arguments,
                 "output": output,
-                "success": event.tool_result.success,
+                "success": tool_success,
                 "errorMessage": event.tool_result.error_message,
-                "state": "completed" if event.tool_result.success else "error",
+                "state": tool_state,
+                "approval": approval,
             }
             session.history_tools = upsert_tool(session.history_tools, tool_record)
             session.touch()
@@ -1021,10 +1288,12 @@ async def run_agent_stream(
                         "name": event.tool_call.name,
                         "arguments": event.tool_call.arguments,
                         "output": output,
-                        "success": event.tool_result.success,
+                        "success": tool_success,
                         "error_message": event.tool_result.error_message,
                         "terminal_output": terminal_output,
                         "preview_url": preview_url,
+                        "state": tool_state,
+                        "approval": approval,
                     },
                 },
             )
@@ -1043,57 +1312,11 @@ async def run_agent_stream(
             )
 
     try:
-        response = await asyncio.wait_for(
-            asyncio.to_thread(
-                session.chat_session.ask,
-                user_message,
-                on_event,
-            ),
-            timeout=300,
+        response = await asyncio.to_thread(
+            session.chat_session.ask,
+            user_message,
+            on_event,
         )
-    except asyncio.TimeoutError:
-        finalize_plan_steps(session)
-        await queue.put(
-            {
-                "type": "plan_steps",
-                "payload": {
-                    "steps": session.plan_steps,
-                },
-            }
-        )
-
-        failure_message = (
-            "\n\n后端处理超时（5 分钟），请缩短请求或重试。"
-            if assistant_stream_started
-            else "后端处理超时（5 分钟），请缩短请求或重试。"
-        )
-        if not assistant_stream_started:
-            await queue.put({"type": "assistant_reset", "payload": {"id": assistant_id}})
-
-        for chunk in chunk_text(failure_message):
-            if not chunk:
-                continue
-            await queue.put(
-                {
-                    "type": "assistant_delta",
-                    "payload": {
-                        "id": assistant_id,
-                        "delta": chunk,
-                    },
-                }
-            )
-
-        session.history_messages.append(
-            {
-                "id": assistant_id,
-                "role": "assistant",
-                "content": failure_message.strip(),
-            }
-        )
-        session.touch()
-        await queue.put({"type": "assistant_done", "payload": {"id": assistant_id}})
-        await queue.put(None)
-        return
     except Exception as exc:  # noqa: BLE001 - 流式接口需要兜底，避免 SSE 半路中断
         finalize_plan_steps(session)
         await queue.put(
@@ -1126,24 +1349,30 @@ async def run_agent_stream(
                 }
             )
 
-        session.history_messages.append(
+        session.history_messages = upsert_message(
+            session.history_messages,
             {
                 "id": assistant_id,
                 "role": "assistant",
                 "content": failure_message.strip(),
-            }
+            },
         )
         session.touch()
         await queue.put({"type": "assistant_done", "payload": {"id": assistant_id}})
         await queue.put(None)
         return
 
-    session.history_messages.append(
+    if session.cancel_event.is_set():
+        await queue.put(None)
+        return
+
+    session.history_messages = upsert_message(
+        session.history_messages,
         {
             "id": assistant_id,
             "role": "assistant",
             "content": response.final_output,
-        }
+        },
     )
     session.touch()
     remaining_output = response.final_output
@@ -1297,6 +1526,15 @@ def upsert_tool(current: list[dict[str, Any]], next_tool: dict[str, Any]) -> lis
             updated[index] = {**tool, **next_tool}
             return updated
     return [*current, next_tool]
+
+
+def upsert_message(current: list[dict[str, Any]], next_message: dict[str, Any]) -> list[dict[str, Any]]:
+    for index, message in enumerate(current):
+        if message.get("id") == next_message.get("id"):
+            updated = current[:]
+            updated[index] = {**message, **next_message}
+            return updated
+    return [*current, next_message]
 
 
 def update_plan_steps_for_tool(session: UISession, step_index: int | None, tool_name: str) -> None:
@@ -1667,6 +1905,7 @@ if __name__ == "__main__":
 
     def _force_shutdown(signum: int, frame: Any) -> None:
         for session in _sessions.values():
+            stop_session_execution(session)
             if session.terminal_runtime is not None:
                 session.terminal_runtime.close()
             if session.interactive_command_session is not None:

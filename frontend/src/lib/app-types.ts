@@ -5,9 +5,14 @@ export type ToolCallRecord = {
   output?: unknown;
   errorMessage?: string;
   error_message?: string | null;
-  success?: boolean;
+  success?: boolean | null;
   streamedInput?: string;
-  state: 'running' | 'completed' | 'error';
+  approval?: {
+    id: string;
+    approved?: boolean;
+    reason?: string;
+  };
+  state: 'running' | 'completed' | 'error' | 'approval-requested' | 'output-available' | 'output-denied';
 };
 
 export type ContentBlock =
@@ -124,6 +129,28 @@ export type TerminalSnapshotPayload = {
   revision: number;
   isAlive: boolean;
   shell: string;
+  fileTree?: FileTreeNode[] | null;
+  processes?: ManagedProcessPayload[] | null;
+};
+
+export type ManagedProcessInfo = {
+  pid: number;
+  parent_pid: number;
+  name: string;
+  command_line: string;
+  is_root: boolean;
+};
+
+export type ManagedProcessPayload = {
+  terminalId: string;
+  command: string;
+  rootPid: number;
+  status: 'running' | 'orphaned' | 'terminated' | 'completed' | 'unknown' | string;
+  returnCode?: number | null;
+  startedAt: number;
+  terminatedAt?: number | null;
+  processCount: number;
+  processes: ManagedProcessInfo[];
 };
 
 export type ModelOption = {

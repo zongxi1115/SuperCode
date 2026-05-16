@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -29,6 +31,10 @@ DEFAULT_IGNORED_DIR_NAMES = {
     "venv",
 }
 READ_FILE_MAX_OUTPUT_CHARS = 3500
+APPLY_PATCH_BEGIN = "*** Begin Patch"
+APPLY_PATCH_END = "*** End Patch"
+APPLY_PATCH_UPDATE_PREFIX = "*** Update File: "
+APPLY_PATCH_EOF_MARKER = "*** End of File"
 
 
 def _kill_process_tree(process: subprocess.Popen[str]) -> None:
@@ -49,6 +55,156 @@ def _kill_process_tree(process: subprocess.Popen[str]) -> None:
         return
 
     process.kill()
+
+
+def _kill_processes_by_pid(pids: list[int]) -> None:
+    """按 PID 逐个强制终止，兼容父进程已退出但子进程残留的情况。"""
+
+    unique_pids = sorted({pid for pid in pids if pid > 0}, reverse=True)
+    if not unique_pids:
+        return
+
+    if sys.platform == "win32":
+        for pid in unique_pids:
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    timeout=5,
+                    check=False,
+                )
+            except Exception:
+                continue
+        return
+
+    for pid in unique_pids:
+        try:
+            subprocess.run(
+                ["kill", "-9", str(pid)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=5,
+                check=False,
+            )
+        except Exception:
+            continue
+
+
+def _query_process_table() -> list[dict[str, Any]]:
+    """读取系统进程快照，用于定位由 AI 拉起但已脱离父 shell 的残留进程。"""
+
+    if sys.platform == "win32":
+        command = (
+            "Get-CimInstance Win32_Process | "
+            "Select-Object ProcessId, ParentProcessId, Name, CommandLine | "
+            "ConvertTo-Json -Compress"
+        )
+        try:
+            completed = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", command],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+                check=False,
+            )
+        except Exception:
+            return []
+
+        raw = completed.stdout.strip()
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+
+        rows = parsed if isinstance(parsed, list) else [parsed]
+        normalized: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                pid = int(row.get("ProcessId") or 0)
+                parent_pid = int(row.get("ParentProcessId") or 0)
+            except (TypeError, ValueError):
+                continue
+            normalized.append(
+                {
+                    "pid": pid,
+                    "parent_pid": parent_pid,
+                    "name": str(row.get("Name") or ""),
+                    "command_line": str(row.get("CommandLine") or ""),
+                }
+            )
+        return normalized
+
+    return []
+
+
+def _collect_process_tree(root_pid: int, process_table: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """基于 ParentProcessId 递归找出 root_pid 及其后代。"""
+
+    if root_pid <= 0:
+        return []
+
+    by_pid: dict[int, dict[str, Any]] = {}
+    by_parent_pid: dict[int, list[int]] = {}
+    for row in process_table:
+        try:
+            pid = int(row.get("pid") or 0)
+            parent_pid = int(row.get("parent_pid") or 0)
+        except (TypeError, ValueError):
+            continue
+        if pid <= 0:
+            continue
+        by_pid[pid] = row
+        by_parent_pid.setdefault(parent_pid, []).append(pid)
+
+    visited: set[int] = set()
+    queue: deque[int] = deque([root_pid])
+    collected: list[dict[str, Any]] = []
+
+    while queue:
+        current_pid = queue.popleft()
+        if current_pid in visited:
+            continue
+        visited.add(current_pid)
+
+        current = by_pid.get(current_pid)
+        if current is not None:
+            collected.append(
+                {
+                    "pid": current_pid,
+                    "parent_pid": int(current.get("parent_pid") or 0),
+                    "name": str(current.get("name") or ""),
+                    "command_line": str(current.get("command_line") or ""),
+                    "is_root": current_pid == root_pid,
+                }
+            )
+
+        for child_pid in by_parent_pid.get(current_pid, []):
+            if child_pid not in visited:
+                queue.append(child_pid)
+
+    collected.sort(key=lambda item: (0 if bool(item.get("is_root")) else 1, int(item.get("pid") or 0)))
+    return collected
+
+
+@dataclass
+class ManagedCommandProcess:
+    """记录 AI 工具拉起过的命令根进程，便于后续监控和终止。"""
+
+    terminal_id: str
+    command: str
+    root_pid: int
+    started_at: float = field(default_factory=time.time)
+    terminated_at: float | None = None
+    last_return_code: int | None = None
 
 
 @dataclass
@@ -162,6 +318,7 @@ class InteractiveCommandSession:
     workspace: Path
     idle_timeout: float = INTERACTIVE_IDLE_SECONDS
     active_commands: dict[str, InteractiveCommand] = field(default_factory=dict, init=False, repr=False)
+    managed_processes: dict[str, ManagedCommandProcess] = field(default_factory=dict, init=False, repr=False)
     next_terminal_index: int = field(default=1, init=False, repr=False)
     lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
@@ -188,6 +345,11 @@ class InteractiveCommandSession:
                 process=process,
             )
             self.active_commands[resolved_terminal_id] = active_command
+            self.managed_processes[resolved_terminal_id] = ManagedCommandProcess(
+                terminal_id=resolved_terminal_id,
+                command=command,
+                root_pid=process.pid,
+            )
 
         return self._await_progress(active_command, timeout)
 
@@ -222,7 +384,68 @@ class InteractiveCommandSession:
             self.active_commands = {}
 
         for active_command in active_commands:
+            managed_process = self.managed_processes.get(active_command.terminal_id)
             active_command.close()
+            if managed_process is not None:
+                managed_process.terminated_at = time.time()
+                managed_process.last_return_code = active_command.process.returncode
+
+    def list_managed_processes(self, only_active: bool = False) -> list[dict[str, Any]]:
+        with self.lock:
+            self._clear_finished_locked()
+            managed_processes = list(self.managed_processes.values())
+            active_commands = dict(self.active_commands)
+
+        process_table = _query_process_table()
+        rows = [
+            self._serialize_managed_process(
+                managed_process,
+                active_commands.get(managed_process.terminal_id),
+                process_table,
+            )
+            for managed_process in managed_processes
+        ]
+        if only_active:
+            rows = [
+                row
+                for row in rows
+                if str(row.get("status")) in {"running", "orphaned"}
+            ]
+        rows.sort(key=lambda row: int(row.get("startedAt") or 0), reverse=True)
+        return rows
+
+    def terminate_command(self, terminal_id: str) -> dict[str, Any]:
+        with self.lock:
+            active_command = self.active_commands.pop(terminal_id, None)
+            managed_process = self.managed_processes.get(terminal_id)
+
+        if managed_process is None:
+            raise RuntimeError(f"未找到受管进程: {terminal_id}")
+
+        if active_command is not None:
+            active_command.close()
+            managed_process.last_return_code = active_command.process.returncode
+
+        process_table = _query_process_table()
+        descendants = _collect_process_tree(managed_process.root_pid, process_table)
+        _kill_processes_by_pid([managed_process.root_pid, *[int(item.get('pid') or 0) for item in descendants]])
+        managed_process.terminated_at = time.time()
+
+        refreshed_table = _query_process_table()
+        return self._serialize_managed_process(managed_process, None, refreshed_table)
+
+    def terminate_all(self) -> list[dict[str, Any]]:
+        active_processes = self.list_managed_processes(only_active=True)
+        terminated: list[dict[str, Any]] = []
+        for process in active_processes:
+            terminal_id = str(process.get("terminalId") or "").strip()
+            if not terminal_id:
+                continue
+            try:
+                terminated.append(self.terminate_command(terminal_id))
+            except Exception:
+                continue
+        return terminated
 
     def _spawn_process(self, command: str) -> subprocess.Popen[str]:
         return subprocess.Popen(
@@ -275,6 +498,9 @@ class InteractiveCommandSession:
         status: str,
     ) -> dict[str, object]:
         delta, full_output = active_command.consume_delta()
+        managed_process = self.managed_processes.get(active_command.terminal_id)
+        if managed_process is not None:
+            managed_process.last_return_code = active_command.process.returncode
         awaiting_input = status == "running" and self._looks_like_prompt(full_output)
         return {
             "terminal_id": active_command.terminal_id,
@@ -293,7 +519,10 @@ class InteractiveCommandSession:
             if not active_command.is_alive()
         ]
         for terminal_id in finished_ids:
-            self.active_commands.pop(terminal_id, None)
+            finished_command = self.active_commands.pop(terminal_id, None)
+            managed_process = self.managed_processes.get(terminal_id)
+            if finished_command is not None and managed_process is not None:
+                managed_process.last_return_code = finished_command.process.returncode
 
     def _allocate_terminal_id_locked(self) -> str:
         while True:
@@ -324,6 +553,38 @@ class InteractiveCommandSession:
             "当前存在多个活动终端，请显式传入 terminal_id。"
             f"可用 terminal_id: {terminal_ids}"
         )
+
+    def _serialize_managed_process(
+        self,
+        managed_process: ManagedCommandProcess,
+        active_command: InteractiveCommand | None,
+        process_table: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        descendants = _collect_process_tree(managed_process.root_pid, process_table)
+        is_running = active_command is not None and active_command.is_alive()
+
+        if is_running:
+            status = "running"
+        elif descendants:
+            status = "orphaned"
+        elif managed_process.terminated_at is not None:
+            status = "terminated"
+        elif managed_process.last_return_code is not None:
+            status = "completed"
+        else:
+            status = "unknown"
+
+        return {
+            "terminalId": managed_process.terminal_id,
+            "command": managed_process.command,
+            "rootPid": managed_process.root_pid,
+            "status": status,
+            "returnCode": managed_process.last_return_code,
+            "startedAt": int(managed_process.started_at * 1000),
+            "terminatedAt": int(managed_process.terminated_at * 1000) if managed_process.terminated_at is not None else None,
+            "processCount": len(descendants),
+            "processes": descendants,
+        }
 
     def _looks_like_prompt(self, full_output: str) -> bool:
         lines = [line.strip().lower() for line in full_output.splitlines() if line.strip()]
@@ -370,6 +631,11 @@ class CodingBaseTool(BaseTool):
 
         return target.read_text(encoding="utf-8")
 
+    def _write_text(self, target: Path, content: str) -> None:
+        """统一按 UTF-8 写回文本。"""
+
+        target.write_text(content, encoding="utf-8")
+
     def _format_numbered_text(
         self,
         file_path: str,
@@ -398,6 +664,14 @@ class ListFileTool(CodingBaseTool):
         "默认会跳过 node_modules、.git、dist、build、__pycache__ 等生成目录。"
     )
     supports_parallel = True
+    parameters_schema = {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "include_ignored": {"type": "boolean"},
+        },
+        "additionalProperties": False,
+    }
 
     def run(self, arguments: dict[str, object], context: ToolContext) -> str:
         relative_path = str(arguments.get("path", "."))
@@ -464,6 +738,16 @@ class ReadFileTool(CodingBaseTool):
         "此时必须缩小范围，改用 start_line/end_line 分段读取。"
     )
     supports_parallel = True
+    parameters_schema = {
+        "type": "object",
+        "properties": {
+            "filename": {"type": "string"},
+            "start_line": {"type": "integer"},
+            "end_line": {"type": "integer"},
+        },
+        "required": ["filename"],
+        "additionalProperties": False,
+    }
 
     def run(self, arguments: dict[str, object], context: ToolContext) -> str:
         filename = str(arguments["filename"])
@@ -503,6 +787,15 @@ class GrepFileTool(CodingBaseTool):
         "只返回命中的文件、行号和对应行内容。"
     )
     supports_parallel = True
+    parameters_schema = {
+        "type": "object",
+        "properties": {
+            "regex": {"type": "string"},
+            "search_path": {"type": "string"},
+        },
+        "required": ["regex"],
+        "additionalProperties": False,
+    }
 
     def run(self, arguments: dict[str, object], context: ToolContext) -> str:
         regex = str(arguments["regex"])
@@ -550,6 +843,15 @@ class WriteFileTool(CodingBaseTool):
 
     name = "write_file"
     description = "创建并写入新文件，参数：filename、content。若文件已存在会报错。"
+    parameters_schema = {
+        "type": "object",
+        "properties": {
+            "filename": {"type": "string"},
+            "content": {"type": "string"},
+        },
+        "required": ["filename", "content"],
+        "additionalProperties": False,
+    }
 
     def run(self, arguments: dict[str, object], context: ToolContext) -> str:
         filename = str(arguments["filename"])
@@ -563,11 +865,169 @@ class WriteFileTool(CodingBaseTool):
         return f"已创建文件: {filename}"
 
 
+class ApplyPatchTool(CodingBaseTool):
+    """用补丁修改已有文件。"""
+
+    name = "apply_patch"
+    description = (
+        "对已有文件应用补丁，参数：patch。"
+        "补丁格式使用 *** Begin Patch / *** Update File。"
+        "只允许更新已有文件，不负责新建或删除。"
+    )
+    parameters_schema = {
+        "type": "object",
+        "properties": {
+            "patch": {"type": "string"},
+        },
+        "required": ["patch"],
+        "additionalProperties": False,
+    }
+
+    def run(self, arguments: dict[str, object], context: ToolContext) -> dict[str, object]:
+        patch_text = str(arguments.get("patch", ""))
+        if not patch_text.strip():
+            raise ValueError("patch 不能为空。")
+
+        operations = self._parse_patch(patch_text)
+        touched_files: list[str] = []
+        for operation in operations:
+            relative_path = str(operation["path"])
+            self._apply_update_patch(relative_path, list(operation["hunks"]), context)
+            touched_files.append(relative_path)
+
+        return {
+            "summary": f"已应用补丁，涉及 {len(touched_files)} 个文件。",
+            "files": touched_files,
+        }
+
+    def _parse_patch(self, patch_text: str) -> list[dict[str, object]]:
+        lines = patch_text.splitlines()
+        if not lines or lines[0] != APPLY_PATCH_BEGIN or lines[-1] != APPLY_PATCH_END:
+            raise ValueError("patch 必须以 *** Begin Patch 开始，并以 *** End Patch 结束。")
+
+        operations: list[dict[str, object]] = []
+        index = 1
+        while index < len(lines) - 1:
+            line = lines[index]
+            if not line.strip():
+                index += 1
+                continue
+            if not line.startswith(APPLY_PATCH_UPDATE_PREFIX):
+                raise ValueError("apply_patch 目前只支持 *** Update File。新增文件请用 write_file，删除请用 delete_file。")
+
+            path = line.removeprefix(APPLY_PATCH_UPDATE_PREFIX).strip()
+            index += 1
+            hunk_lines: list[list[str]] = []
+            current_hunk: list[str] = []
+            while index < len(lines) - 1 and not lines[index].startswith("*** "):
+                current_line = lines[index]
+                if current_line.startswith("@@") and current_hunk:
+                    hunk_lines.append(current_hunk)
+                    current_hunk = []
+                current_hunk.append(current_line)
+                index += 1
+
+            if current_hunk:
+                hunk_lines.append(current_hunk)
+            if not hunk_lines:
+                raise ValueError(f"补丁缺少 Update File 的 hunk 内容: {path}")
+            operations.append({"path": path, "hunks": hunk_lines})
+
+        return operations
+
+    def _apply_update_patch(
+        self,
+        relative_path: str,
+        hunks: list[object],
+        context: ToolContext,
+    ) -> None:
+        target = self._resolve_path(relative_path, context)
+        if not target.exists():
+            raise FileNotFoundError(f"补丁目标文件不存在: {relative_path}")
+        if not target.is_file():
+            raise IsADirectoryError(f"补丁目标不是文件: {relative_path}")
+
+        original_text = self._read_text(target)
+        had_trailing_newline = original_text.endswith("\n")
+        current_lines = original_text.splitlines()
+        cursor = 0
+
+        for raw_hunk in hunks:
+            if not isinstance(raw_hunk, list):
+                raise ValueError("补丁 hunk 结构无效。")
+            pattern_lines: list[str] = []
+            replacement_lines: list[str] = []
+
+            for line in raw_hunk:
+                if not isinstance(line, str):
+                    raise ValueError("补丁 hunk 行必须是字符串。")
+                if line.startswith("@@") or line == APPLY_PATCH_EOF_MARKER:
+                    continue
+                if not line or line[0] not in {" ", "+", "-"}:
+                    raise ValueError(f"无法解析的补丁行: {line}")
+
+                payload = line[1:]
+                if line[0] in {" ", "-"}:
+                    pattern_lines.append(payload)
+                if line[0] in {" ", "+"}:
+                    replacement_lines.append(payload)
+
+            if not pattern_lines:
+                raise ValueError(f"补丁 hunk 缺少可匹配的上下文: {relative_path}")
+
+            start_index = self._find_unique_line_block(current_lines, pattern_lines, cursor, relative_path)
+            end_index = start_index + len(pattern_lines)
+            current_lines[start_index:end_index] = replacement_lines
+            cursor = start_index + len(replacement_lines)
+
+        updated_text = "\n".join(current_lines)
+        if had_trailing_newline and (updated_text or original_text):
+            updated_text += "\n"
+        self._write_text(target, updated_text)
+
+    def _find_unique_line_block(
+        self,
+        current_lines: list[str],
+        pattern_lines: list[str],
+        cursor: int,
+        relative_path: str,
+    ) -> int:
+        matches: list[int] = []
+        max_start = len(current_lines) - len(pattern_lines)
+
+        for start_index in range(max(cursor, 0), max_start + 1):
+            if current_lines[start_index : start_index + len(pattern_lines)] == pattern_lines:
+                matches.append(start_index)
+
+        if len(matches) == 1:
+            return matches[0]
+        if not matches and cursor > 0:
+            for start_index in range(0, max_start + 1):
+                if current_lines[start_index : start_index + len(pattern_lines)] == pattern_lines:
+                    matches.append(start_index)
+            if len(matches) == 1:
+                return matches[0]
+
+        if not matches:
+            raise ValueError(f"补丁上下文未匹配到目标文件内容: {relative_path}")
+        raise ValueError(f"补丁上下文匹配到多处，无法唯一定位: {relative_path}")
+
+
 class ReplaceFileTool(CodingBaseTool):
     """局部替换文件内容。"""
 
     name = "replace_file"
     description = "替换已有文件中的一段内容，参数：filename、old_content、new_content。"
+    parameters_schema = {
+        "type": "object",
+        "properties": {
+            "filename": {"type": "string"},
+            "old_content": {"type": "string"},
+            "new_content": {"type": "string"},
+        },
+        "required": ["filename", "old_content", "new_content"],
+        "additionalProperties": False,
+    }
 
     def run(self, arguments: dict[str, object], context: ToolContext) -> str:
         filename = str(arguments["filename"])
@@ -591,6 +1051,50 @@ class ReplaceFileTool(CodingBaseTool):
         return f"已更新文件: {filename}"
 
 
+def delete_file_in_workspace(raw_path: str, workspace: Path) -> str:
+    """在工作区内安全删除单个文件。"""
+
+    workspace_root = workspace.resolve()
+    candidate = (workspace_root / raw_path).resolve()
+    if workspace_root != candidate and workspace_root not in candidate.parents:
+        raise ValueError(f"路径越界，不允许删除工作区外部文件: {raw_path}")
+    if not candidate.exists():
+        raise FileNotFoundError(f"文件不存在: {raw_path}")
+    if not candidate.is_file():
+        raise IsADirectoryError(f"目标不是文件: {raw_path}")
+
+    candidate.unlink()
+    return f"已删除文件: {raw_path}"
+
+
+class DeleteFileTool(CodingBaseTool):
+    """删除文件，但先返回确认请求。"""
+
+    name = "delete_file"
+    description = "删除文件，参数：filename。执行前需要用户确认。"
+    parameters_schema = {
+        "type": "object",
+        "properties": {
+            "filename": {"type": "string"},
+        },
+        "required": ["filename"],
+        "additionalProperties": False,
+    }
+
+    def run(self, arguments: dict[str, object], context: ToolContext) -> dict[str, object]:
+        filename = str(arguments["filename"])
+        target = self._resolve_path(filename, context)
+        if not target.exists():
+            raise FileNotFoundError(f"文件不存在: {filename}")
+        if not target.is_file():
+            raise IsADirectoryError(f"目标不是文件: {filename}")
+
+        return {
+            "requires_confirmation": True,
+            "filename": filename,
+            "absolute_path": str(target),
+            "message": f"确认删除文件 {filename}？",
+        }
 class ExecuteTool(CodingBaseTool):
     """执行命令。"""
 
@@ -599,6 +1103,16 @@ class ExecuteTool(CodingBaseTool):
         "在工作区内执行命令，参数：content、timeout（必填，单位秒）、terminal_id（可选）。"
         "若命令持续运行，会返回 terminal_id 和当前输出，后续可用 terminal_input / terminal_wait 按 terminal_id 继续交互。"
     )
+    parameters_schema = {
+        "type": "object",
+        "properties": {
+            "content": {"type": "string"},
+            "timeout": {"type": "integer"},
+            "terminal_id": {"type": "string"},
+        },
+        "required": ["content", "timeout"],
+        "additionalProperties": False,
+    }
 
     def run(self, arguments: dict[str, object], context: ToolContext) -> str:
         command = str(arguments["content"]).strip()
@@ -710,6 +1224,16 @@ class TerminalInputTool(CodingBaseTool):
         "向当前正在运行的交互式终端命令发送输入，参数：content、timeout（必填，单位秒）、terminal_id（可选）。"
         "如果同时存在多个活动终端，terminal_id 为必填；如果 content 不带换行，会自动补一个回车。"
     )
+    parameters_schema = {
+        "type": "object",
+        "properties": {
+            "content": {"type": "string"},
+            "timeout": {"type": "integer"},
+            "terminal_id": {"type": "string"},
+        },
+        "required": ["content", "timeout"],
+        "additionalProperties": False,
+    }
 
     def run(self, arguments: dict[str, object], context: ToolContext) -> dict[str, object]:
         content = str(arguments.get("content", ""))
@@ -751,6 +1275,15 @@ class TerminalWaitTool(CodingBaseTool):
         "继续等待当前正在运行的终端命令，参数：timeout（必填，单位秒）、terminal_id（可选）。"
         "如果同时存在多个活动终端，terminal_id 为必填。用于后台安装、构建或下载仍在继续时收集后续输出。"
     )
+    parameters_schema = {
+        "type": "object",
+        "properties": {
+            "timeout": {"type": "integer"},
+            "terminal_id": {"type": "string"},
+        },
+        "required": ["timeout"],
+        "additionalProperties": False,
+    }
 
     def run(self, arguments: dict[str, object], context: ToolContext) -> dict[str, object]:
         timeout = self._parse_timeout(arguments)
@@ -798,6 +1331,15 @@ class OpenBrowserTool(CodingBaseTool):
         "如果 path 指向目录，会自动寻找其中的 index.html 或 index.htm。"
         "不要把本地文件路径塞进 url，也不要把网络地址塞进 path。"
     )
+    parameters_schema = {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string"},
+            "path": {"type": "string"},
+            "target": {"type": "string"},
+        },
+        "additionalProperties": False,
+    }
 
     def run(self, arguments: dict[str, object], context: ToolContext) -> dict[str, str]:
         raw_path = str(arguments.get("path") or "").strip()
@@ -886,8 +1428,10 @@ def build_coding_tools() -> list[BaseTool]:
         ListFileTool(),
         ReadFileTool(),
         GrepFileTool(),
+        ApplyPatchTool(),
         WriteFileTool(),
         ReplaceFileTool(),
+        DeleteFileTool(),
         TerminalInputTool(),
         TerminalWaitTool(),
         OpenBrowserTool(),

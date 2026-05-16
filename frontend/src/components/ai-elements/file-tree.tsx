@@ -149,9 +149,21 @@ export const FileTreeFolder = ({
     togglePath(path);
   }, [togglePath, path]);
 
-  const handleSelect = useCallback(() => {
+  const handleFolderClick = useCallback(() => {
     onSelect?.(path);
-  }, [onSelect, path]);
+    togglePath(path);
+  }, [onSelect, path, togglePath]);
+
+  const handleFolderKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLButtonElement>) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        onSelect?.(path);
+        togglePath(path);
+      }
+    },
+    [onSelect, path, togglePath]
+  );
 
   const folderContextValue = useMemo(
     () => ({ isExpanded, name, path }),
@@ -188,7 +200,8 @@ export const FileTreeFolder = ({
             </CollapsibleTrigger>
             <button
               className="flex min-w-0 flex-1 cursor-pointer items-center gap-1 border-none bg-transparent p-0 text-left"
-              onClick={handleSelect}
+              onClick={handleFolderClick}
+              onKeyDown={handleFolderKeyDown}
               type="button"
             >
               <FileTreeIcon>

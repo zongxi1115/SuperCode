@@ -11,6 +11,7 @@ import type {
   ContentBlock,
   DirectoryNode,
   FileTreeNode,
+  ManagedProcessPayload,
   ModelOption,
   SessionContextPayload,
   SessionHistoryItem,
@@ -54,6 +55,8 @@ export default function App() {
   const [terminalOutput, setTerminalOutput] = useState('');
   const [terminalInput, setTerminalInput] = useState('');
   const [isTerminalSubmitting, setIsTerminalSubmitting] = useState(false);
+  const [managedProcesses, setManagedProcesses] = useState<ManagedProcessPayload[]>([]);
+  const [isStoppingProcesses, setIsStoppingProcesses] = useState(false);
   const [selectedFileContent, setSelectedFileContent] = useState('');
   const [selectedFilePath, setSelectedFilePath] = useState('');
   const [backendMode, setBackendMode] = useState<'agent' | 'demo'>('demo');
@@ -80,22 +83,47 @@ export default function App() {
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
   const activeRequestRef = useRef<AbortController | null>(null);
 
-  const refreshFileTree = useCallback(
-    async (targetSessionId?: string) => {
-      const currentSessionId = targetSessionId ?? sessionId;
-      if (!currentSessionId) return;
+  const refreshTerminalState = useCallback(
+    async (options?: {
+      targetSessionId?: string;
+      includeFileTree?: boolean;
+      includeProcesses?: boolean;
+      silent?: boolean;
+    }) => {
+      const currentSessionId = options?.targetSessionId ?? sessionId;
+      if (!currentSessionId) {
+        if (options?.includeProcesses) {
+          setManagedProcesses([]);
+        }
+        return;
+      }
 
       try {
-        const res = await fetch(`http://localhost:8000/api/sessions/${currentSessionId}/file-tree`);
-        if (!res.ok) {
-          throw new Error('读取文件树失败');
+        const query = new URLSearchParams();
+        if (options?.includeFileTree) {
+          query.set('include_file_tree', 'true');
         }
-        const data = await res.json();
-        if (data.fileTree) {
+        if (options?.includeProcesses) {
+          query.set('include_processes', 'true');
+        }
+        const res = await fetch(
+          `http://localhost:8000/api/sessions/${currentSessionId}/terminal${query.size ? `?${query.toString()}` : ''}`
+        );
+        if (!res.ok) {
+          throw new Error('读取终端状态失败');
+        }
+        const data: TerminalSnapshotPayload = await res.json();
+        setTerminalOutput(data.output ?? '');
+        if (Array.isArray(data.fileTree)) {
           setFileTree(data.fileTree);
         }
+        if (options?.includeProcesses) {
+          setManagedProcesses(Array.isArray(data.processes) ? data.processes : []);
+        }
       } catch (error) {
-        console.error(error);
+        if (!options?.silent) {
+          console.error(error);
+        }
       }
     },
     [sessionId]
@@ -183,6 +211,7 @@ export default function App() {
     setMessages(hydrateMessages(data.messages ?? [], data.thoughts, data.toolCalls));
     setFileTree(data.fileTree ?? []);
     setTerminalOutput(data.terminalOutput ?? '');
+    setManagedProcesses([]);
     setWebPreviewUrl(data.previewUrl ?? DEFAULT_WEB_PREVIEW_URL);
     setSelectedFilePath(data.selectedFilePath ?? '');
     setSelectedFileContent(data.selectedFileContent ?? '');
@@ -271,23 +300,17 @@ export default function App() {
   useEffect(() => {
     if (!sessionId || !hasTerminalBeenOpened || !isTerminalOpen) return;
 
-    const pollTerminal = async () => {
-      try {
-        const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/terminal`);
-        if (!res.ok) {
-          return;
-        }
-        const data: TerminalSnapshotPayload = await res.json();
-        setTerminalOutput(data.output ?? '');
-      } catch {
-        // silent fail for polling
-      }
-    };
+    const pollTerminalState = () =>
+      refreshTerminalState({
+        targetSessionId: sessionId,
+        includeProcesses: true,
+        silent: true,
+      });
 
-    void pollTerminal();
-    const intervalId = setInterval(pollTerminal, 1000);
+    void pollTerminalState();
+    const intervalId = setInterval(pollTerminalState, 1000);
     return () => clearInterval(intervalId);
-  }, [hasTerminalBeenOpened, isTerminalOpen, sessionId]);
+  }, [hasTerminalBeenOpened, isTerminalOpen, refreshTerminalState, sessionId]);
 
   const createSession = async () => {
     const workspace = customWorkspace.trim() || selectedWorkspace;
@@ -403,6 +426,53 @@ export default function App() {
     setHasTerminalBeenOpened(true);
     setIsTerminalOpen((prev) => !prev);
   }, []);
+
+  const terminateManagedProcess = useCallback(
+    async (terminalId: string) => {
+      if (!sessionId || !terminalId) return;
+      setIsStoppingProcesses(true);
+      try {
+        const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/processes/${terminalId}/terminate`, {
+          method: 'POST',
+        });
+        if (!res.ok) {
+          throw new Error('终止 AI 进程失败');
+        }
+        await refreshTerminalState({
+          targetSessionId: sessionId,
+          includeProcesses: true,
+        });
+      } catch (error) {
+        console.error(error);
+      } finally {
+        setIsStoppingProcesses(false);
+      }
+    },
+    [refreshTerminalState, sessionId]
+  );
+
+  const stopManagedProcesses = useCallback(
+    async (targetSessionId?: string) => {
+      const currentSessionId = targetSessionId ?? sessionId;
+      if (!currentSessionId) return;
+      setIsStoppingProcesses(true);
+      try {
+        const res = await fetch(`http://localhost:8000/api/sessions/${currentSessionId}/stop`, {
+          method: 'POST',
+        });
+        if (!res.ok) {
+          throw new Error('停止 AI 执行失败');
+        }
+        const data = await res.json();
+        setManagedProcesses(Array.isArray(data.remaining) ? data.remaining : []);
+      } catch (error) {
+        console.error(error);
+      } finally {
+        setIsStoppingProcesses(false);
+      }
+    },
+    [sessionId]
+  );
 
   const handleContextOpenChange = useCallback(
     (open: boolean) => {
@@ -659,6 +729,11 @@ export default function App() {
 
           const handleToolResultSideEffects = (payload: Record<string, unknown>) => {
             const toolName = String(payload.name ?? '');
+            const outputPayload = (
+              payload.output &&
+              typeof payload.output === 'object' &&
+              !Array.isArray(payload.output)
+            ) ? payload.output as Record<string, unknown> : undefined;
             if (
               toolName === 'execute' ||
               toolName === 'excecute' ||
@@ -671,8 +746,14 @@ export default function App() {
                 setTerminalOutput(payload.output);
               }
             }
-            if (['write_file', 'replace_file', 'delete_file'].includes(toolName)) {
-              void refreshFileTree();
+            if (
+              ['write_file', 'replace_file', 'apply_patch'].includes(toolName) ||
+              (toolName === 'delete_file' && outputPayload?.requires_confirmation !== true)
+            ) {
+              void refreshTerminalState({
+                includeFileTree: true,
+                includeProcesses: isTerminalOpen,
+              });
             }
             if (toolName === 'open_browser') {
               const previewUrl = getPreviewUrlFromToolPayload(payload);
@@ -777,13 +858,24 @@ export default function App() {
             const toolName = String(payload.name ?? toolNamesById.get(toolCallId) ?? 'tool');
             toolNamesById.set(toolCallId, toolName);
             handleToolResultSideEffects(payload);
+            const nextState =
+              typeof payload.state === 'string'
+                ? payload.state
+                : payload.success === false
+                  ? 'error'
+                  : 'completed';
             updateToolPart(assistantId, toolCallId, (toolCall) => ({
               ...toolCall,
               ...payload,
               id: toolCallId,
               name: toolName,
+              approval: (
+                payload.approval &&
+                typeof payload.approval === 'object' &&
+                !Array.isArray(payload.approval)
+              ) ? payload.approval as ToolCallRecord['approval'] : toolCall.approval,
               errorMessage: typeof payload.error_message === 'string' ? payload.error_message : toolCall.errorMessage,
-              state: payload.success === false ? 'error' : 'completed'
+              state: nextState as ToolCallRecord['state']
             }));
           } else if (data.type === 'data-plan-steps') {
             const steps = data.data?.steps;
@@ -934,6 +1026,10 @@ export default function App() {
         activeRequestRef.current = null;
       }
       setIsLoading(false);
+      void refreshTerminalState({
+        includeProcesses: isTerminalOpen,
+        silent: true,
+      });
       void loadSessionContext({ silent: !isContextOpen });
       void loadSessionHistory();
     }
@@ -946,11 +1042,80 @@ export default function App() {
     }
   };
 
+  const resolveDeleteConfirmation = useCallback(
+    async (toolCallId: string, approved: boolean) => {
+      if (!sessionId) return;
+
+      try {
+        const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/tools/${toolCallId}/confirm-delete`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ approved }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(String(data.detail ?? data.error_message ?? '确认删除失败'));
+        }
+
+        setMessages((prev) =>
+          prev.map((message) => ({
+            ...message,
+            toolCalls: (message.toolCalls ?? []).map((toolCall) =>
+              toolCall.id === toolCallId
+                ? {
+                    ...toolCall,
+                    output: data.output,
+                    success: data.success ?? toolCall.success,
+                    errorMessage: data.error_message ?? toolCall.errorMessage,
+                    approval: data.approval ?? toolCall.approval,
+                    state: data.state ?? toolCall.state,
+                  }
+                : toolCall
+            ),
+            parts: (message.parts ?? []).map((part) =>
+              part.type === 'tool_call' && part.toolCall.id === toolCallId
+                ? {
+                    ...part,
+                    toolCall: {
+                      ...part.toolCall,
+                      output: data.output,
+                      success: data.success ?? part.toolCall.success,
+                      errorMessage: data.error_message ?? part.toolCall.errorMessage,
+                      approval: data.approval ?? part.toolCall.approval,
+                      state: data.state ?? part.toolCall.state,
+                    },
+                  }
+                : part
+            ),
+          }))
+        );
+
+        if (data.selectedFileCleared) {
+          setSelectedFilePath('');
+          setSelectedFileContent('');
+        }
+
+        if (approved) {
+          void refreshTerminalState({
+            includeFileTree: true,
+            includeProcesses: isTerminalOpen,
+          });
+        }
+      } catch (error) {
+        console.error(error);
+      }
+    },
+    [isTerminalOpen, refreshTerminalState, sessionId]
+  );
+
   const stopMessage = useCallback(() => {
+    if (sessionId) {
+      void stopManagedProcesses(sessionId);
+    }
     activeRequestRef.current?.abort();
     activeRequestRef.current = null;
     setIsLoading(false);
-  }, []);
+  }, [sessionId, stopManagedProcesses]);
 
   const toggleSidebar = useCallback(() => {
     setIsSidebarCollapsed((prev) => !prev);
@@ -966,6 +1131,7 @@ export default function App() {
     setMessages([]);
     setFileTree([]);
     setTerminalOutput('');
+    setManagedProcesses([]);
     setSelectedFileContent('');
     setSelectedFilePath('');
     setBackendMode('demo');
@@ -1040,6 +1206,7 @@ export default function App() {
         onKeyDown={handleKeyDown}
         onSendMessage={() => void sendMessage(input)}
         onStopMessage={stopMessage}
+        onResolveDeleteConfirmation={resolveDeleteConfirmation}
         />
       </div>
       <ResizableHandle
@@ -1063,10 +1230,15 @@ export default function App() {
           input={terminalInput}
           isOpen={isTerminalOpen}
           isSubmitting={isTerminalSubmitting}
+          isStoppingProcesses={isStoppingProcesses}
+          processes={managedProcesses}
           onInputChange={setTerminalInput}
           onSubmit={() => void sendTerminalCommand()}
           onToggle={handleTerminalToggle}
           onClear={() => void clearTerminal()}
+          onRefreshProcesses={() => void refreshTerminalState({ includeProcesses: true })}
+          onStopAllProcesses={() => void stopManagedProcesses()}
+          onTerminateProcess={(terminalId) => void terminateManagedProcess(terminalId)}
         />
       </div>
       <WebPreviewPanel

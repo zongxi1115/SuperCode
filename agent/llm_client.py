@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass, field
+from typing import Any
 from collections.abc import Callable
 from urllib import error, request
 
@@ -10,12 +12,35 @@ from .config import AgentLLMConfig
 logger = logging.getLogger(__name__)
 
 
-class OpenAICompatibleClient:
-    """一个极简的 OpenAI 兼容接口客户端。
+@dataclass(slots=True)
+class CompletionToolCall:
+    id: str
+    name: str
+    arguments: str
 
-    这里刻意只实现 demo 当前需要的能力：
-    发送消息，拿回文本，再交给 brain 解析成下一步动作。
-    """
+
+@dataclass(slots=True)
+class CompletionToolCallDelta:
+    index: int
+    id: str | None = None
+    name: str | None = None
+    arguments_delta: str = ""
+    arguments: str = ""
+
+
+@dataclass(slots=True)
+class CompletionResponse:
+    text: str = ""
+    tool_calls: list[CompletionToolCall] = field(default_factory=list)
+    finish_reason: str | None = None
+
+
+class UnsupportedToolCallingError(RuntimeError):
+    """模型服务不支持 tools / tool_choice 参数。"""
+
+
+class OpenAICompatibleClient:
+    """一个极简的 OpenAI 兼容接口客户端。"""
 
     def __init__(self, config: AgentLLMConfig) -> None:
         self.config = config
@@ -33,17 +58,10 @@ class OpenAICompatibleClient:
     def chat_messages(self, messages: list[dict[str, str]]) -> str:
         """向模型发送一轮消息数组并返回文本内容。"""
 
-        try:
-            response_body = self._send_chat_request(messages=messages, stream=False)
-        except error.HTTPError as exc:
-            error_body = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"模型接口请求失败: HTTP {exc.code} - {error_body}") from exc
-        except error.URLError as exc:
-            raise RuntimeError(f"模型接口连接失败: {exc.reason}") from exc
-
-        data = json.loads(response_body)
-        self._log_usage(data.get("usage"))
-        return self._extract_chat_response_text(data)
+        response = self.chat_completion_messages(messages)
+        if not response.text:
+            raise RuntimeError("模型接口没有返回可用文本内容。")
+        return response.text
 
     def chat_stream(
         self,
@@ -51,10 +69,7 @@ class OpenAICompatibleClient:
         user_prompt: str,
         on_delta: Callable[[str], None] | None = None,
     ) -> str:
-        """以 OpenAI 兼容 SSE 方式流式获取文本。
-
-        如果对端不支持流式接口，会自动回退到普通请求，并把完整文本一次性回调出去。
-        """
+        """以 OpenAI 兼容 SSE 方式流式获取文本。"""
 
         return self.chat_stream_messages(
             [
@@ -71,12 +86,59 @@ class OpenAICompatibleClient:
     ) -> str:
         """以 OpenAI 兼容 SSE 方式流式获取文本，支持直接传 messages 数组。"""
 
+        response = self.chat_stream_completion_messages(
+            messages,
+            on_text_delta=on_delta,
+        )
+        if not response.text:
+            raise RuntimeError("模型流式接口没有返回可用文本内容。")
+        return response.text
+
+    def chat_completion_messages(
+        self,
+        messages: list[dict[str, str]],
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: str | dict[str, object] | None = None,
+    ) -> CompletionResponse:
+        """发送非流式 chat/completions，并解析文本或 tool_calls。"""
+
+        try:
+            response_body = self._send_chat_request(
+                messages=messages,
+                stream=False,
+                tools=tools,
+                tool_choice=tool_choice,
+            )
+        except error.HTTPError as exc:
+            error_body = exc.read().decode("utf-8", errors="replace")
+            if tools and self._should_fallback_to_non_tool_calling(exc.code, error_body):
+                raise UnsupportedToolCallingError(error_body) from exc
+            raise RuntimeError(f"模型接口请求失败: HTTP {exc.code} - {error_body}") from exc
+        except error.URLError as exc:
+            raise RuntimeError(f"模型接口连接失败: {exc.reason}") from exc
+
+        data = json.loads(response_body)
+        self._log_usage(data.get("usage"))
+        return self._extract_chat_completion_response(data)
+
+    def chat_stream_completion_messages(
+        self,
+        messages: list[dict[str, str]],
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: str | dict[str, object] | None = None,
+        on_text_delta: Callable[[str], None] | None = None,
+        on_tool_call_delta: Callable[[CompletionToolCallDelta], None] | None = None,
+    ) -> CompletionResponse:
+        """以 SSE 方式流式获取文本和 tool_calls。"""
+
         try:
             api_url = f"{self.config.base_url}/chat/completions"
             http_request = self._build_request(
                 messages=messages,
                 stream=True,
                 api_url=api_url,
+                tools=tools,
+                tool_choice=tool_choice,
             )
             with request.urlopen(http_request, timeout=self.config.timeout) as response:
                 content_type = response.headers.get("Content-Type", "")
@@ -84,13 +146,27 @@ class OpenAICompatibleClient:
                     response_body = response.read().decode("utf-8")
                     data = json.loads(response_body)
                     self._log_usage(data.get("usage"))
-                    text = self._extract_chat_response_text(data)
-                    if text and on_delta is not None:
-                        on_delta(text)
-                    return text
+                    completion = self._extract_chat_completion_response(data)
+                    if completion.text and on_text_delta is not None:
+                        on_text_delta(completion.text)
+                    for index, tool_call in enumerate(completion.tool_calls):
+                        if on_tool_call_delta is not None:
+                            on_tool_call_delta(
+                                CompletionToolCallDelta(
+                                    index=index,
+                                    id=tool_call.id,
+                                    name=tool_call.name,
+                                    arguments_delta=tool_call.arguments,
+                                    arguments=tool_call.arguments,
+                                )
+                            )
+                    return completion
 
-                parts: list[str] = []
+                text_parts: list[str] = []
                 last_usage: object | None = None
+                finish_reason: str | None = None
+                tool_call_buffers: dict[int, dict[str, Any]] = {}
+
                 for event_text in self._iter_sse_events(response):
                     if event_text == "[DONE]":
                         break
@@ -99,26 +175,45 @@ class OpenAICompatibleClient:
                     usage = payload.get("usage")
                     if usage is not None:
                         last_usage = usage
-                    delta_text = self._extract_stream_text(payload)
-                    if not delta_text:
+
+                    choices = payload.get("choices")
+                    if not isinstance(choices, list) or not choices:
                         continue
 
-                    parts.append(delta_text)
-                    if on_delta is not None:
-                        on_delta(delta_text)
+                    first_choice = choices[0]
+                    if not isinstance(first_choice, dict):
+                        continue
 
-                text = "".join(parts).strip()
-                if not text:
-                    raise RuntimeError("模型流式接口没有返回可用文本内容。")
+                    raw_finish_reason = first_choice.get("finish_reason")
+                    if isinstance(raw_finish_reason, str) and raw_finish_reason:
+                        finish_reason = raw_finish_reason
+
+                    delta_text = self._extract_stream_text(payload)
+                    if delta_text:
+                        text_parts.append(delta_text)
+                        if on_text_delta is not None:
+                            on_text_delta(delta_text)
+
+                    for tool_delta in self._extract_stream_tool_call_deltas(first_choice, tool_call_buffers):
+                        if on_tool_call_delta is not None:
+                            on_tool_call_delta(tool_delta)
+
                 self._log_usage(last_usage)
-                return text
+                return CompletionResponse(
+                    text="".join(text_parts).strip(),
+                    tool_calls=self._finalize_stream_tool_calls(tool_call_buffers),
+                    finish_reason=finish_reason,
+                )
         except error.HTTPError as exc:
             error_body = exc.read().decode("utf-8", errors="replace")
+            if tools and self._should_fallback_to_non_tool_calling(exc.code, error_body):
+                raise UnsupportedToolCallingError(error_body) from exc
             if self._should_fallback_to_non_stream(exc.code, error_body):
-                text = self.chat_messages(messages)
-                if text and on_delta is not None:
-                    on_delta(text)
-                return text
+                return self.chat_completion_messages(
+                    messages,
+                    tools=tools,
+                    tool_choice=tool_choice,
+                )
             raise RuntimeError(f"模型接口请求失败: HTTP {exc.code} - {error_body}") from exc
         except error.URLError as exc:
             raise RuntimeError(f"模型接口连接失败: {exc.reason}") from exc
@@ -128,13 +223,18 @@ class OpenAICompatibleClient:
         messages: list[dict[str, str]],
         stream: bool,
         api_url: str,
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: str | dict[str, object] | None = None,
     ) -> request.Request:
-        payload = {
+        payload: dict[str, object] = {
             "model": self.config.model,
             "temperature": 0.2,
             "messages": messages,
             "stream": stream,
         }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = tool_choice or "auto"
         if stream and self._is_deepseek_request():
             payload["stream_options"] = {"include_usage": True}
         body = json.dumps(payload).encode("utf-8")
@@ -148,28 +248,149 @@ class OpenAICompatibleClient:
         self,
         messages: list[dict[str, str]],
         stream: bool,
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: str | dict[str, object] | None = None,
     ) -> str:
         api_url = f"{self.config.base_url}/chat/completions"
         http_request = self._build_request(
             messages=messages,
             stream=stream,
             api_url=api_url,
+            tools=tools,
+            tool_choice=tool_choice,
         )
         with request.urlopen(http_request, timeout=self.config.timeout) as response:
             return response.read().decode("utf-8")
 
-    def _extract_chat_response_text(self, data: dict[str, object]) -> str:
+    def _extract_chat_completion_response(self, data: dict[str, object]) -> CompletionResponse:
         choices = data.get("choices", [])
-        if not choices:
+        if not isinstance(choices, list) or not choices:
             raise RuntimeError("模型接口返回中没有 `choices` 字段内容。")
 
-        message = choices[0].get("message", {})
-        content = self._flatten_content(message.get("content"))
-        if not content.strip():
-            content = self._flatten_content(choices[0].get("text"))
-        if not content.strip():
-            raise RuntimeError("模型接口没有返回可用文本内容。")
-        return content.strip()
+        first_choice = choices[0]
+        if not isinstance(first_choice, dict):
+            raise RuntimeError("模型接口返回的 `choices[0]` 不是对象。")
+
+        message = first_choice.get("message", {})
+        if not isinstance(message, dict):
+            message = {}
+
+        text = self._flatten_content(message.get("content")).strip()
+        if not text:
+            text = self._flatten_content(first_choice.get("text")).strip()
+
+        tool_calls = self._extract_message_tool_calls(message)
+        finish_reason = first_choice.get("finish_reason")
+        normalized_finish_reason = finish_reason if isinstance(finish_reason, str) else None
+
+        return CompletionResponse(
+            text=text,
+            tool_calls=tool_calls,
+            finish_reason=normalized_finish_reason,
+        )
+
+    def _extract_message_tool_calls(self, message: dict[str, object]) -> list[CompletionToolCall]:
+        raw_tool_calls = message.get("tool_calls")
+        if not isinstance(raw_tool_calls, list):
+            return []
+
+        tool_calls: list[CompletionToolCall] = []
+        for index, item in enumerate(raw_tool_calls):
+            if not isinstance(item, dict):
+                continue
+            function = item.get("function")
+            if not isinstance(function, dict):
+                continue
+            name = str(function.get("name", "")).strip()
+            arguments = function.get("arguments", "")
+            if not name:
+                continue
+            tool_calls.append(
+                CompletionToolCall(
+                    id=str(item.get("id") or f"tool-call-{index}"),
+                    name=name,
+                    arguments=arguments if isinstance(arguments, str) else json.dumps(arguments, ensure_ascii=False),
+                )
+            )
+        return tool_calls
+
+    def _extract_stream_tool_call_deltas(
+        self,
+        first_choice: dict[str, object],
+        tool_call_buffers: dict[int, dict[str, Any]],
+    ) -> list[CompletionToolCallDelta]:
+        delta = first_choice.get("delta")
+        if not isinstance(delta, dict):
+            return []
+
+        raw_tool_calls = delta.get("tool_calls")
+        if not isinstance(raw_tool_calls, list):
+            return []
+
+        deltas: list[CompletionToolCallDelta] = []
+        for position, item in enumerate(raw_tool_calls):
+            if not isinstance(item, dict):
+                continue
+            raw_index = item.get("index", position)
+            try:
+                index = int(raw_index)
+            except (TypeError, ValueError):
+                index = position
+
+            buffer = tool_call_buffers.setdefault(
+                index,
+                {
+                    "id": None,
+                    "name": None,
+                    "arguments_parts": [],
+                },
+            )
+
+            item_id = item.get("id")
+            if isinstance(item_id, str) and item_id:
+                buffer["id"] = item_id
+
+            function = item.get("function")
+            arguments_delta = ""
+            if isinstance(function, dict):
+                function_name = function.get("name")
+                if isinstance(function_name, str) and function_name:
+                    buffer["name"] = function_name
+                raw_arguments_delta = function.get("arguments")
+                if isinstance(raw_arguments_delta, str) and raw_arguments_delta:
+                    arguments_delta = raw_arguments_delta
+                    buffer["arguments_parts"].append(raw_arguments_delta)
+
+            deltas.append(
+                CompletionToolCallDelta(
+                    index=index,
+                    id=buffer["id"],
+                    name=buffer["name"],
+                    arguments_delta=arguments_delta,
+                    arguments="".join(buffer["arguments_parts"]),
+                )
+            )
+
+        return deltas
+
+    def _finalize_stream_tool_calls(
+        self,
+        tool_call_buffers: dict[int, dict[str, Any]],
+    ) -> list[CompletionToolCall]:
+        tool_calls: list[CompletionToolCall] = []
+        for index in sorted(tool_call_buffers):
+            buffer = tool_call_buffers[index]
+            name = str(buffer.get("name") or "").strip()
+            if not name:
+                continue
+            tool_calls.append(
+                CompletionToolCall(
+                    id=str(buffer.get("id") or f"tool-call-{index}"),
+                    name=name,
+                    arguments="".join(buffer.get("arguments_parts", [])),
+                )
+            )
+        return tool_calls
 
     def _log_usage(self, usage: object) -> None:
         if not isinstance(usage, dict):
@@ -290,6 +511,24 @@ class OpenAICompatibleClient:
             "event-stream",
             "not support",
             "unsupported",
+            "invalid parameter",
+        ]
+        return any(hint in normalized for hint in hints)
+
+    def _should_fallback_to_non_tool_calling(self, status_code: int, error_body: str) -> bool:
+        if status_code not in {400, 404, 405, 415, 422, 501}:
+            return False
+
+        normalized = error_body.lower()
+        hints = [
+            "\"tools\"",
+            "tools",
+            "tool_choice",
+            "function call",
+            "function_call",
+            "tool calls",
+            "does not support tool",
+            "unsupported tool",
             "invalid parameter",
         ]
         return any(hint in normalized for hint in hints)
