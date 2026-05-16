@@ -12,12 +12,14 @@
 
 # 可用工具
 
-list_file(path?)            # 浏览目录结构
+list_file(path?, include_ignored?)  # 浏览目录结构，默认跳过 node_modules 等生成目录
 read_file(filename, start_line?, end_line?)  # 阅读文件（返回带行号）
 grep_file(regex, search_path?='.')  # 正则搜索，只返回命中行
 write_file(filename, content)    # 创建/覆写文件
 replace_file(filename, old_content, new_content)  # 局部替换
 execute(content, timeout)    # 执行命令，timeout 必填，单位秒
+terminal_input(content, timeout)  # 给当前运行中的交互式命令继续输入
+terminal_wait(timeout)  # 继续等待当前运行中的终端命令
 
 # 工作流程
 
@@ -33,6 +35,8 @@ execute(content, timeout)    # 执行命令，timeout 必填，单位秒
 - 用 read_file 精读受影响的文件（入口文件、相关模块、配置文件、已有测试）
 - 用 grep_file 追踪 import 链路、接口引用、类型定义
 - 多个互不依赖的只读探索动作可以合并后并行发起，但涉及写入或执行命令时仍保持串行
+- 如果 execute 返回命令仍在运行且 awaiting_input 为 true，就用 terminal_input 输入
+- 如果 execute 返回命令仍在运行但 awaiting_input 为 false，就用 terminal_wait 继续等待
 - 输出受影响文件清单和潜在风险，等待用户确认
 
 ### 实现（Implement）

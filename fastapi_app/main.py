@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
+import signal
+
 import asyncio
 import json
 import subprocess
@@ -15,8 +19,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+import re
+
 from agent import AgentEvent, AgentLLMConfig, ChatSession, CodingAgent, OpenAICompatibleClient
-from coding_agent import CodingPromptBrain, build_coding_tools
+from coding_agent import CodingPromptBrain, InteractiveCommandSession, build_coding_tools
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_WORKSPACE = ROOT
@@ -29,12 +35,30 @@ DEFAULT_OPEN_FILES = [
     "FilePreview.tsx",
 ]
 
+FILE_TREE_IGNORED_DIR_NAMES = {
+    ".git",
+    ".next",
+    ".nuxt",
+    ".pytest_cache",
+    ".turbo",
+    ".venv",
+    "__pycache__",
+    "build",
+    "coverage",
+    "dist",
+    "node_modules",
+    "venv",
+}
+FILE_TREE_MAX_DEPTH = 4
+FILE_TREE_MAX_ENTRIES_PER_DIR = 200
+
 
 class CreateSessionResponse(BaseModel):
     sessionId: str
     model: str
     mode: str
     startupError: str | None
+    envFile: str | None
     workspace: str
     workspaceOptions: list[dict[str, str]]
     messages: list[dict[str, Any]]
@@ -80,6 +104,7 @@ class SessionContextResponse(BaseModel):
 
 class CreateSessionRequest(BaseModel):
     workspace: str | None = None
+    env_file: str | None = None
 
 
 class SessionHistoryItem(BaseModel):
@@ -233,10 +258,12 @@ class UISession:
     workspace: str
     mode: str = "demo"
     startup_error: str | None = None
+    env_file: str | None = None
     selected_file_path: str | None = DEFAULT_SELECTED_FILE
     open_files: list[str] = field(default_factory=lambda: list(DEFAULT_OPEN_FILES))
     terminal_output: str = ""
     terminal_runtime: TerminalRuntime | None = field(default=None, repr=False)
+    interactive_command_session: InteractiveCommandSession | None = field(default=None, repr=False)
     chat_session: ChatSession | None = None
     history_messages: list[dict[str, Any]] = field(default_factory=list)
     history_tools: list[dict[str, Any]] = field(default_factory=list)
@@ -286,6 +313,7 @@ class UISession:
             model=self.model,
             mode=self.mode,
             startupError=self.startup_error,
+            envFile=self.env_file,
             workspace=self.workspace,
             workspaceOptions=list_workspace_options(),
             messages=self.history_messages,
@@ -368,7 +396,21 @@ class UISession:
         return "还没有消息内容"
 
 
-app = FastAPI(title="SuperCode Agent UI API")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    def _cleanup_sessions() -> None:
+        for session in _sessions.values():
+            if session.terminal_runtime is not None:
+                session.terminal_runtime.close()
+            if session.interactive_command_session is not None:
+                session.interactive_command_session.close()
+
+    yield
+
+    _cleanup_sessions()
+
+
+app = FastAPI(title="SuperCode Agent UI API", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -379,16 +421,57 @@ app.add_middleware(
 _sessions: dict[str, UISession] = {}
 
 
-@app.on_event("shutdown")
-def shutdown_terminals() -> None:
-    for session in _sessions.values():
-        if session.terminal_runtime is not None:
-            session.terminal_runtime.close()
-
-
 @app.get("/api/workspaces")
 async def get_workspaces() -> JSONResponse:
     return JSONResponse({"workspaces": list_workspace_options()})
+
+
+@app.get("/api/models")
+async def get_models() -> JSONResponse:
+    return JSONResponse({"models": scan_env_models()})
+
+
+class SwitchModelRequest(BaseModel):
+    env_file: str
+
+
+@app.put("/api/sessions/{session_id}/model")
+async def switch_session_model(session_id: str, request: SwitchModelRequest) -> JSONResponse:
+    session = require_session(session_id)
+    env_file_name = request.env_file
+    models = scan_env_models()
+    target = next((m for m in models if m["envFile"] == env_file_name), None)
+    if target is None:
+        raise HTTPException(status_code=400, detail="未找到对应的模型配置")
+
+    try:
+        config = AgentLLMConfig.from_env(ROOT / env_file_name)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    client = OpenAICompatibleClient(config)
+    agent = CodingAgent(
+        brain=CodingPromptBrain(client),
+        tools=build_coding_tools(),
+        workspace=resolve_workspace_path(session.workspace),
+        max_steps=config.max_steps,
+    )
+    interactive_command_session = session.interactive_command_session
+    if interactive_command_session is not None:
+        agent.tool_context_metadata["interactive_command_session"] = interactive_command_session
+
+    session.chat_session = ChatSession(agent=agent)
+    session.model = config.model
+    session.env_file = env_file_name
+    session.mode = "agent"
+    session.startup_error = None
+    session.touch()
+
+    return JSONResponse({
+        "model": session.model,
+        "mode": session.mode,
+        "envFile": session.env_file,
+    })
 
 
 @app.get("/api/directories")
@@ -401,20 +484,62 @@ async def get_directories(path: str = Query(...)) -> JSONResponse:
 async def create_session(request: CreateSessionRequest) -> JSONResponse:
     session_id = uuid.uuid4().hex
     workspace = normalize_workspace(request.workspace)
-    chat_session, model_name, startup_error = build_chat_session(workspace)
+
+    try:
+        chat_session, model_name, startup_error, env_file_used = await asyncio.wait_for(
+            asyncio.to_thread(build_chat_session, workspace, request.env_file),
+            timeout=30,
+        )
+    except asyncio.TimeoutError:
+        chat_session, model_name, startup_error, env_file_used = None, "Demo", "初始化模型超时", None
+
+    interactive_command_session = InteractiveCommandSession(
+        workspace=resolve_workspace_path(workspace)
+    )
     session = UISession(
         session_id=session_id,
         model=model_name,
         workspace=workspace,
+        env_file=env_file_used,
         terminal_runtime=TerminalRuntime(workspace=workspace),
+        interactive_command_session=interactive_command_session,
         chat_session=chat_session,
         mode="agent" if chat_session is not None else "demo",
         startup_error=startup_error,
         selected_file_path=pick_default_file(workspace),
         open_files=build_default_open_files(workspace),
     )
+    if session.chat_session is not None and isinstance(session.chat_session.agent, CodingAgent):
+        session.chat_session.agent.tool_context_metadata["interactive_command_session"] = (
+            interactive_command_session
+        )
     _sessions[session_id] = session
-    return JSONResponse(session.snapshot().model_dump())
+
+    try:
+        snapshot = await asyncio.wait_for(
+            asyncio.to_thread(session.snapshot),
+            timeout=15,
+        )
+    except asyncio.TimeoutError:
+        snapshot = CreateSessionResponse(
+            sessionId=session.session_id,
+            model=session.model,
+            mode=session.mode,
+            startupError=session.startup_error,
+            envFile=session.env_file,
+            workspace=session.workspace,
+            workspaceOptions=list_workspace_options(),
+            messages=session.history_messages,
+            toolCalls=session.history_tools,
+            thoughts=session.thoughts,
+            terminalOutput=session.terminal_output,
+            fileTree=[],
+            selectedFilePath=session.selected_file_path,
+            selectedFileContent="",
+            openFiles=session.open_files,
+            planSteps=session.plan_steps,
+        )
+    return JSONResponse(snapshot.model_dump())
 
 
 @app.get("/api/sessions/history")
@@ -430,7 +555,28 @@ async def get_session_history() -> JSONResponse:
 @app.get("/api/sessions/{session_id}")
 async def get_session_snapshot(session_id: str) -> JSONResponse:
     session = require_session(session_id)
-    return JSONResponse(session.snapshot().model_dump())
+    try:
+        snapshot = await asyncio.wait_for(asyncio.to_thread(session.snapshot), timeout=15)
+    except asyncio.TimeoutError:
+        snapshot = CreateSessionResponse(
+            sessionId=session.session_id,
+            model=session.model,
+            mode=session.mode,
+            startupError=session.startup_error,
+            envFile=session.env_file,
+            workspace=session.workspace,
+            workspaceOptions=list_workspace_options(),
+            messages=session.history_messages,
+            toolCalls=session.history_tools,
+            thoughts=session.thoughts,
+            terminalOutput=session.terminal_output,
+            fileTree=[],
+            selectedFilePath=session.selected_file_path,
+            selectedFileContent="",
+            openFiles=session.open_files,
+            planSteps=session.plan_steps,
+        )
+    return JSONResponse(snapshot.model_dump())
 
 
 @app.delete("/api/sessions/{session_id}")
@@ -440,6 +586,8 @@ async def delete_session(session_id: str) -> JSONResponse:
         raise HTTPException(status_code=404, detail="session 不存在")
     if session.terminal_runtime is not None:
         session.terminal_runtime.close()
+    if session.interactive_command_session is not None:
+        session.interactive_command_session.close()
     return JSONResponse({"deleted": True, "sessionId": session_id})
 
 
@@ -468,9 +616,16 @@ async def get_file(
 @app.get("/api/sessions/{session_id}/file-tree")
 async def get_file_tree(session_id: str) -> JSONResponse:
     session = require_session(session_id)
+    try:
+        tree = await asyncio.wait_for(
+            asyncio.to_thread(build_file_tree, resolve_workspace_path(session.workspace)),
+            timeout=15,
+        )
+    except asyncio.TimeoutError:
+        tree = []
     return JSONResponse(
         {
-            "fileTree": build_file_tree(resolve_workspace_path(session.workspace)),
+            "fileTree": tree,
         },
     )
 
@@ -591,9 +746,10 @@ def require_session(session_id: str) -> UISession:
     return session
 
 
-def build_chat_session(workspace: str) -> tuple[ChatSession | None, str, str | None]:
+def build_chat_session(workspace: str, env_file: str | None = None) -> tuple[ChatSession | None, str, str | None, str | None]:
     try:
-        config = AgentLLMConfig.from_env(ROOT / ".env")
+        env_path = ROOT / (env_file or ".env")
+        config = AgentLLMConfig.from_env(env_path)
         client = OpenAICompatibleClient(config)
         agent = CodingAgent(
             brain=CodingPromptBrain(client),
@@ -601,9 +757,9 @@ def build_chat_session(workspace: str) -> tuple[ChatSession | None, str, str | N
             workspace=resolve_workspace_path(workspace),
             max_steps=config.max_steps,
         )
-        return ChatSession(agent=agent), config.model, None
+        return ChatSession(agent=agent), config.model, None, env_file or ".env"
     except Exception as exc:  # noqa: BLE001 - 需要把启动失败原因回传给前端
-        return None, "Claude 3.5 Sonnet · Demo", str(exc)
+        return None, "Demo", str(exc), None
 
 
 async def run_agent_stream(
@@ -715,8 +871,9 @@ async def run_agent_stream(
         if event.type == "tool_result" and event.tool_call is not None and event.tool_result is not None:
             tool_id = event.tool_call.id or event.tool_result.tool_call_id or f"step-{event.step_index}-{event.tool_call.name}"
             output = event.tool_result.output
-            if event.tool_result.name in {"execute", "excecute"} and isinstance(output, str):
-                session.terminal_output = output
+            terminal_output = extract_terminal_output(output)
+            if event.tool_result.name in {"execute", "excecute", "terminal_input", "terminal_wait"} and terminal_output is not None:
+                session.terminal_output = terminal_output
             tool_record = {
                 "id": tool_id,
                 "stepIndex": event.step_index,
@@ -742,6 +899,7 @@ async def run_agent_stream(
                         "output": output,
                         "success": event.tool_result.success,
                         "error_message": event.tool_result.error_message,
+                        "terminal_output": terminal_output,
                     },
                 },
             )
@@ -760,11 +918,57 @@ async def run_agent_stream(
             )
 
     try:
-        response = await asyncio.to_thread(
-            session.chat_session.ask,
-            user_message,
-            on_event,
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                session.chat_session.ask,
+                user_message,
+                on_event,
+            ),
+            timeout=300,
         )
+    except asyncio.TimeoutError:
+        finalize_plan_steps(session)
+        await queue.put(
+            {
+                "type": "plan_steps",
+                "payload": {
+                    "steps": session.plan_steps,
+                },
+            }
+        )
+
+        failure_message = (
+            "\n\n后端处理超时（5 分钟），请缩短请求或重试。"
+            if assistant_stream_started
+            else "后端处理超时（5 分钟），请缩短请求或重试。"
+        )
+        if not assistant_stream_started:
+            await queue.put({"type": "assistant_reset", "payload": {"id": assistant_id}})
+
+        for chunk in chunk_text(failure_message):
+            if not chunk:
+                continue
+            await queue.put(
+                {
+                    "type": "assistant_delta",
+                    "payload": {
+                        "id": assistant_id,
+                        "delta": chunk,
+                    },
+                }
+            )
+
+        session.history_messages.append(
+            {
+                "id": assistant_id,
+                "role": "assistant",
+                "content": failure_message.strip(),
+            }
+        )
+        session.touch()
+        await queue.put({"type": "assistant_done", "payload": {"id": assistant_id}})
+        await queue.put(None)
+        return
     except Exception as exc:  # noqa: BLE001 - 流式接口需要兜底，避免 SSE 半路中断
         finalize_plan_steps(session)
         await queue.put(
@@ -988,7 +1192,7 @@ def update_plan_steps_for_tool(session: UISession, step_index: int | None, tool_
         session.plan_steps[1]["description"] = "已进入代码探索，正在读取结构、文件和引用关系。"
     elif tool_name in {"write_file", "replace_file"}:
         session.plan_steps[2]["description"] = "已开始落地修改，准备把变更写回工作区。"
-    elif tool_name in {"execute", "excecute"}:
+    elif tool_name in {"execute", "excecute", "terminal_input", "terminal_wait"}:
         session.plan_steps[3]["description"] = "正在执行命令并收集终端输出。"
 
 
@@ -1027,21 +1231,29 @@ def normalize_relative_path(raw_path: str, workspace: str) -> str:
     return str(workspace_candidate)
 
 
-def build_file_tree(root: Path) -> list[dict[str, Any]]:
+def build_file_tree(root: Path, max_depth: int = FILE_TREE_MAX_DEPTH) -> list[dict[str, Any]]:
     if not root.exists():
         return []
 
-    def walk(target: Path, prefix: Path) -> list[dict[str, Any]]:
+    def walk(target: Path, prefix: Path, depth: int) -> list[dict[str, Any]]:
+        if depth > max_depth:
+            return []
         items: list[dict[str, Any]] = []
+        count = 0
         for child in sorted(target.iterdir(), key=lambda item: (item.is_file(), item.name.lower())):
+            if count >= FILE_TREE_MAX_ENTRIES_PER_DIR:
+                items.append({"path": str(target.resolve()), "name": "... (too many entries)", "type": "file"})
+                break
             absolute = str(child.resolve())
             if child.is_dir():
+                if child.name in FILE_TREE_IGNORED_DIR_NAMES:
+                    continue
                 items.append(
                     {
                         "path": absolute,
                         "name": child.name,
                         "type": "folder",
-                        "children": walk(child, prefix),
+                        "children": walk(child, prefix, depth + 1),
                     }
                 )
             elif child.suffix in {".ts", ".tsx", ".css", ".json", ".py", ".md", ".toml", ".yaml", ".yml", ".js", ".jsx", ".mjs", ".cjs", ".html", ".sql", ".rs", ".go", ".sh", ".bash", ".zsh", ".bat", ".cmd", ".ps1", ".env", ".gitignore", ".gitattributes", ".dockerignore", ".editorconfig", ".prettierrc", ".eslintrc", ".babelrc", ".svelte", ".vue", ".prisma", ".graphql", ".gql", ".proto", ".xml", ".ini", ".cfg", ".conf", ".config", ".lock", ".sum", ".mod", ".txt", ".log", ".diff", ".patch", ".svg", ".ico", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".woff", ".woff2", ".ttf", ".eot"}:
@@ -1052,6 +1264,7 @@ def build_file_tree(root: Path) -> list[dict[str, Any]]:
                         "type": "file",
                     }
                 )
+            count += 1
         return items
 
     return [
@@ -1059,7 +1272,7 @@ def build_file_tree(root: Path) -> list[dict[str, Any]]:
             "path": str(root.resolve()),
             "name": root.name,
             "type": "folder",
-            "children": walk(root, root),
+            "children": walk(root, root, 1),
         }
     ]
 
@@ -1129,14 +1342,39 @@ def pick_default_file(workspace: str) -> str | None:
     workspace_root = resolve_workspace_path(workspace)
     preferred_names = ["main.py", "App.tsx", "README.md", "index.tsx", "index.ts", "__init__.py"]
     for name in preferred_names:
-        matches = list(workspace_root.rglob(name))
-        if matches:
-            return str(matches[0].resolve())
+        for match in _shallow_glob(workspace_root, name, max_depth=2):
+            return str(match.resolve())
 
-    for file_path in workspace_root.rglob("*"):
-        if file_path.is_file() and file_path.suffix in {".py", ".ts", ".tsx", ".md", ".json"}:
-            return str(file_path.resolve())
+    for match in _shallow_glob_all(workspace_root, max_depth=2):
+        if match.is_file() and match.suffix in {".py", ".ts", ".tsx", ".md", ".json"}:
+            return str(match.resolve())
     return None
+
+
+def _shallow_glob(root: Path, name: str, max_depth: int) -> list[Path]:
+    results: list[Path] = []
+    _walk_shallow(root, max_depth, lambda p: results.append(p) if p.name == name else None)
+    return results[:5]
+
+
+def _shallow_glob_all(root: Path, max_depth: int) -> list[Path]:
+    results: list[Path] = []
+    _walk_shallow(root, max_depth, lambda p: results.append(p))
+    return results[:50]
+
+
+def _walk_shallow(root: Path, max_depth: int, visitor: Any) -> None:
+    if max_depth <= 0:
+        return
+    try:
+        for child in root.iterdir():
+            if child.name in FILE_TREE_IGNORED_DIR_NAMES:
+                continue
+            visitor(child)
+            if child.is_dir():
+                _walk_shallow(child, max_depth - 1, visitor)
+    except PermissionError:
+        pass
 
 
 def pick_demo_file(workspace: str) -> str | None:
@@ -1147,12 +1385,24 @@ def render_demo_list_output(workspace: str) -> str:
     workspace_root = resolve_workspace_path(workspace)
     rendered = [f"# Path: {workspace_root}"]
     for child in sorted(workspace_root.iterdir(), key=lambda item: (item.is_file(), item.name.lower())):
+        if child.is_dir() and child.name in FILE_TREE_IGNORED_DIR_NAMES:
+            continue
         rendered.append(f"{child.name}/" if child.is_dir() else child.name)
     return "\n".join(rendered[:25])
 
 
 def chunk_text(text: str, chunk_size: int = 28) -> list[str]:
     return [text[index : index + chunk_size] for index in range(0, len(text), chunk_size)] or [""]
+
+
+def extract_terminal_output(output: object) -> str | None:
+    if isinstance(output, str):
+        return output
+    if isinstance(output, dict):
+        full_output = output.get("full_output")
+        if isinstance(full_output, str):
+            return full_output
+    return None
 
 
 def estimate_session_tokens(session: UISession) -> int:
@@ -1189,3 +1439,88 @@ def compact_text(value: str, limit: int) -> str:
     if len(compact) <= limit:
         return compact
     return f"{compact[:limit].rstrip()}..."
+
+
+def scan_env_models() -> list[dict[str, str]]:
+    results: list[dict[str, str]] = []
+    seen_models: set[str] = set()
+
+    for env_path in sorted(ROOT.glob(".env*")):
+        name = env_path.name
+        if not env_path.is_file():
+            continue
+        try:
+            text = env_path.read_text(encoding="utf-8")
+        except Exception:
+            continue
+
+        model_match = re.search(r"^SC_AGENT_MODEL\s*=\s*(.+)$", text, re.MULTILINE)
+        base_url_match = re.search(r"^SC_AGENT_BASE_URL\s*=\s*(.+)$", text, re.MULTILINE)
+        if not model_match:
+            continue
+
+        model_value = model_match.group(1).strip().strip("'\"")
+        base_url_value = base_url_match.group(1).strip().strip("'\"") if base_url_match else ""
+
+        if not model_value or model_value in seen_models:
+            continue
+        seen_models.add(model_value)
+
+        provider = infer_provider_from_url(base_url_value)
+        label = f"{model_value}" if name == ".env" else f"{model_value} ({name})"
+        results.append({
+            "id": model_value,
+            "name": model_value,
+            "provider": provider,
+            "envFile": name,
+            "label": label,
+        })
+
+    return results
+
+
+def infer_provider_from_url(base_url: str) -> str:
+    url_lower = base_url.lower()
+    if "anthropic" in url_lower:
+        return "anthropic"
+    if "openai" in url_lower:
+        return "openai"
+    if "deepseek" in url_lower:
+        return "deepseek"
+    if "dashscope" in url_lower or "aliyun" in url_lower or "qwen" in url_lower:
+        return "alibaba-cn"
+    if "google" in url_lower or "gemini" in url_lower:
+        return "google"
+    if "groq" in url_lower:
+        return "groq"
+    if "mistral" in url_lower:
+        return "mistral"
+    if "xai" in url_lower:
+        return "xai"
+    if "openrouter" in url_lower:
+        return "openrouter"
+    if "together" in url_lower:
+        return "togetherai"
+    if "fireworks" in url_lower:
+        return "fireworks-ai"
+    if "cerebras" in url_lower:
+        return "cerebras"
+    return "openrouter"
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    def _force_shutdown(signum: int, frame: Any) -> None:
+        for session in _sessions.values():
+            if session.terminal_runtime is not None:
+                session.terminal_runtime.close()
+            if session.interactive_command_session is not None:
+                session.interactive_command_session.close()
+        import os
+        os._exit(0)
+
+    signal.signal(signal.SIGINT, _force_shutdown)
+    signal.signal(signal.SIGTERM, _force_shutdown)
+
+    uvicorn.run(app, host="0.0.0.0", port=8000)

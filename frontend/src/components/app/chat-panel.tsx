@@ -7,6 +7,7 @@ import {
   ChainOfThoughtStep,
 } from '@/components/ai-elements/chain-of-thought';
 import { CodeBlock, CodeBlockDiff } from '@/components/ai-elements/code-block';
+import { Terminal } from '@/components/ai-elements/terminal';
 import { Message, MessageContent, MessageResponse } from '@/components/ai-elements/message';
 import { Persona, type PersonaState } from '@/components/ai-elements/persona';
 import {
@@ -23,10 +24,30 @@ import {
   TaskItemFile,
   TaskTrigger,
 } from '@/components/ai-elements/task';
+import {
+  Attachments,
+  Attachment,
+  AttachmentPreview,
+  AttachmentInfo,
+  AttachmentRemove,
+  type AttachmentData,
+} from '@/components/ai-elements/attachments';
+import {
+  ModelSelector,
+  ModelSelectorTrigger,
+  ModelSelectorContent,
+  ModelSelectorInput,
+  ModelSelectorList,
+  ModelSelectorEmpty,
+  ModelSelectorGroup,
+  ModelSelectorItem,
+  ModelSelectorName,
+  ModelSelectorLogo,
+} from '@/components/ai-elements/model-selector';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { getFileLanguage } from '@/lib/app-utils';
-import type { ChatMessage, PlanStep, SessionContextPayload, ToolCallRecord } from '@/lib/app-types';
+import type { ChatMessage, ContentBlock, ModelOption, PlanStep, SessionContextPayload, ToolCallRecord } from '@/lib/app-types';
 import {
   ChevronDown,
   ChevronRight,
@@ -36,13 +57,14 @@ import {
   ListChecks,
   PencilIcon,
   PlusIcon,
+  PaperclipIcon,
   Square,
   TerminalIcon,
   Trash2Icon,
 } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
 import type React from 'react';
-import { memo, useMemo, useState } from 'react';
+import { memo, useMemo, useRef, useState, useCallback } from 'react';
 
 type ChatPanelProps = {
   contextData: SessionContextPayload | null;
@@ -51,11 +73,14 @@ type ChatPanelProps = {
   isContextOpen: boolean;
   input: string;
   isLoading: boolean;
+  model: string | null;
+  modelOptions: ModelOption[];
   onContextOpenChange: (open: boolean) => void;
   onInputChange: (value: string) => void;
   onKeyDown: (e: React.KeyboardEvent<HTMLTextAreaElement>) => void;
   onSendMessage: () => void;
   onStopMessage: () => void;
+  onModelChange: (envFile: string) => void;
 };
 
 const TOOL_ICONS: Record<string, React.ReactNode> = {
@@ -65,6 +90,9 @@ const TOOL_ICONS: Record<string, React.ReactNode> = {
   replace_file: <PencilIcon className="size-4" />,
   delete_file: <Trash2Icon className="size-4" />,
   execute: <TerminalIcon className="size-4" />,
+  excecute: <TerminalIcon className="size-4" />,
+  terminal_input: <TerminalIcon className="size-4" />,
+  terminal_wait: <TerminalIcon className="size-4" />,
 };
 
 function getToolIcon(name: string) {
@@ -82,7 +110,18 @@ function ToolBody({ toolCall }: { toolCall: ToolCallRecord }) {
   const content = args.content as string | undefined;
   const oldContent = args.old_content || args.old_code as string | undefined;
   const newContent = args.new_content || args.new_code as string | undefined;
-  const command = args.command || args.cmd as string | undefined;
+  const command = args.command || args.cmd || args.content as string | undefined;
+  const terminalPayload = output && typeof output === 'object' && !Array.isArray(output)
+    ? output as Record<string, unknown>
+    : undefined;
+  const terminalStatus = typeof terminalPayload?.status === 'string'
+    ? terminalPayload.status
+    : undefined;
+  const terminalFullOutput = typeof terminalPayload?.full_output === 'string'
+    ? terminalPayload.full_output
+    : typeof output === 'string'
+      ? output
+      : undefined;
 
   if (toolCall.name === 'write_file' && content) {
     return (
@@ -154,18 +193,32 @@ function ToolBody({ toolCall }: { toolCall: ToolCallRecord }) {
     );
   }
 
-  if (toolCall.name === 'execute' && command) {
+  if (
+    (
+      toolCall.name === 'execute' ||
+      toolCall.name === 'excecute' ||
+      toolCall.name === 'terminal_input' ||
+      toolCall.name === 'terminal_wait'
+    ) &&
+    (command || content || terminalStatus || terminalFullOutput)
+  ) {
+    const cmdText = toolCall.name === 'terminal_input'
+      ? content
+      : toolCall.name === 'terminal_wait'
+        ? `wait ${String(args.timeout ?? '')}s`
+        : command ?? content;
+    const termOutput = [
+      cmdText && `$ ${cmdText}`,
+      terminalFullOutput,
+      errorText,
+    ].filter(Boolean).join('\n');
+    const isRunning = toolCall.state === 'running';
+
     return (
-      <div className="space-y-2">
-        <div className="rounded-md bg-muted/50 p-2 text-xs font-mono">
-          <span className="text-muted-foreground">$</span> {command}
-        </div>
-        {typeof output === 'string' && output && (
-          <pre className="overflow-x-auto rounded-md bg-black/80 p-2 text-xs font-mono text-white whitespace-pre-wrap">
-            {output}
-          </pre>
-        )}
-      </div>
+      <Terminal
+        output={termOutput}
+        isStreaming={isRunning}
+      />
     );
   }
 
@@ -304,85 +357,166 @@ const MessageList = memo(function MessageList({
   isLoading: boolean;
   messages: ChatMessage[];
 }) {
+  const renderToolCall = (tc: ToolCallRecord, isLastTool: boolean) => {
+    const statusLabel =
+      tc.state === 'completed' ? '已完成' :
+      tc.state === 'error' ? '出错' : '执行中';
+
+    return (
+      <Task key={tc.id} defaultOpen={isLastTool}>
+        <TaskTrigger
+          title={`${tc.name} · ${statusLabel}`}
+          icon={getToolIcon(tc.name)}
+        />
+        <TaskContent>
+          <TaskItem>
+            <ToolBody toolCall={tc} />
+          </TaskItem>
+        </TaskContent>
+      </Task>
+    );
+  };
+
+  const renderLegacyAssistant = (msg: ChatMessage, isLast: boolean) => {
+    if (isLast) {
+      const hasThoughts = Boolean(msg.thoughts?.trim());
+      const hasToolCalls = (msg.toolCalls?.length ?? 0) > 0;
+
+      return (
+        <>
+          {hasThoughts ? (
+            <ChainOfThought defaultOpen={isLoading}>
+              <ChainOfThoughtHeader>
+                <span>思考过程</span>
+              </ChainOfThoughtHeader>
+              <ChainOfThoughtContent>
+                <ChainOfThoughtStep
+                  label={msg.thoughts}
+                  status={isLoading ? 'active' : 'complete'}
+                />
+                {hasToolCalls ? (
+                  <div className="space-y-2">
+                    {msg.toolCalls?.map((tc, tci) => renderToolCall(tc, tci === (msg.toolCalls?.length ?? 0) - 1))}
+                  </div>
+                ) : null}
+              </ChainOfThoughtContent>
+            </ChainOfThought>
+          ) : hasToolCalls ? (
+            <div className="space-y-2">
+              {msg.toolCalls?.map((tc, tci) => renderToolCall(tc, tci === (msg.toolCalls?.length ?? 0) - 1))}
+            </div>
+          ) : null}
+        </>
+      );
+    }
+
+    return (msg.toolCalls?.length ?? 0) > 0 ? (
+      <div className="space-y-2">
+        {msg.toolCalls?.map((tc, tci) => renderToolCall(tc, tci === (msg.toolCalls?.length ?? 0) - 1))}
+      </div>
+    ) : null;
+  };
+
+  const renderPartsAssistant = (msg: ChatMessage, isLast: boolean) => {
+    const parts = msg.parts ?? [];
+    const groups: ({ type: 'cot'; blocks: ContentBlock[]; hasThinking: boolean } | { type: 'text'; block: ContentBlock } | { type: 'tools'; blocks: ContentBlock[] })[] = [];
+    let cotBuffer: ContentBlock[] = [];
+
+    const flushCot = () => {
+      if (cotBuffer.length === 0) return;
+      const hasThinking = cotBuffer.some((b) => b.type === 'thinking' && b.text.trim());
+      if (hasThinking) {
+        groups.push({ type: 'cot', blocks: cotBuffer, hasThinking: true });
+      } else {
+        groups.push({ type: 'tools', blocks: cotBuffer });
+      }
+      cotBuffer = [];
+    };
+
+    for (const part of parts) {
+      if (part.type === 'thinking' || part.type === 'tool_call') {
+        cotBuffer.push(part);
+      } else if (part.type === 'text') {
+        flushCot();
+        groups.push({ type: 'text', block: part });
+      }
+    }
+    flushCot();
+
+    return groups.map((group, gi) => {
+      if (group.type === 'text') {
+        return group.block.text ? (
+          <MessageResponse key={`text-${gi}`}>{group.block.text}</MessageResponse>
+        ) : null;
+      }
+
+      if (group.type === 'tools') {
+        const lastToolIdx = [...group.blocks].map((b, i) => b.type === 'tool_call' ? i : -1).filter(i => i >= 0).pop();
+        return (
+          <div key={`tools-${gi}`} className="space-y-2">
+            {group.blocks.map((block, bi) => {
+              if (block.type === 'tool_call') {
+                return renderToolCall(block.toolCall, bi === lastToolIdx);
+              }
+              return null;
+            })}
+          </div>
+        );
+      }
+
+      const hasContent = group.blocks.length > 0;
+      const isActive = isLast && isLoading;
+      return (
+        <ChainOfThought key={`cot-${gi}`} defaultOpen={isActive || hasContent}>
+          <ChainOfThoughtHeader>
+            {isActive && !hasContent ? (
+              <Shimmer duration={1}>正在思考...</Shimmer>
+            ) : (
+              <span>思考过程</span>
+            )}
+          </ChainOfThoughtHeader>
+          <ChainOfThoughtContent>
+            {(() => {
+              const lastToolIdx = [...group.blocks].map((b, i) => b.type === 'tool_call' ? i : -1).filter(i => i >= 0).pop();
+              return group.blocks.map((block, bi) => {
+                if (block.type === 'thinking') {
+                  return block.text.trim() ? (
+                    <ChainOfThoughtStep
+                      key={`thinking-${gi}-${bi}`}
+                      label={block.text}
+                      status={isActive ? 'active' : 'complete'}
+                    />
+                  ) : null;
+                }
+                if (block.type === 'tool_call') {
+                  return <div key={`tool-${gi}-${bi}`}>{renderToolCall(block.toolCall, bi === lastToolIdx)}</div>;
+                }
+                return null;
+              });
+            })()}
+          </ChainOfThoughtContent>
+        </ChainOfThought>
+      );
+    });
+  };
+
   return (
     <>
-      {messages.map((msg, idx) => (
-        <Message key={msg.id || idx} from={msg.role}>
-          <MessageContent>
-            {msg.role === 'assistant' && idx === messages.length - 1 && (
-              <>
-                {msg.thoughts?.trim() || (msg.toolCalls?.length ?? 0) > 0 || (isLoading && !msg.content) ? (
-                  <ChainOfThought defaultOpen={isLoading}>
-                    <ChainOfThoughtHeader>
-                      {isLoading ? (
-                        <Shimmer duration={1}>正在思考...</Shimmer>
-                      ) : (
-                        <span>思考过程</span>
-                      )}
-                    </ChainOfThoughtHeader>
-                    <ChainOfThoughtContent>
-                      {msg.thoughts?.trim() ? (
-                        <ChainOfThoughtStep
-                          label={msg.thoughts}
-                          status={isLoading ? 'active' : 'complete'}
-                        />
-                      ) : null}
-
-                      {(msg.toolCalls?.length ?? 0) > 0 ? (
-                        <div className="space-y-2">
-                          {msg.toolCalls?.map((tc) => {
-                            const statusLabel =
-                              tc.state === 'completed' ? '已完成' :
-                              tc.state === 'error' ? '出错' : '执行中';
-
-                            return (
-                              <Task key={tc.id}>
-                                <TaskTrigger
-                                  title={`${tc.name} · ${statusLabel}`}
-                                  icon={getToolIcon(tc.name)}
-                                />
-                                <TaskContent>
-                                  <TaskItem>
-                                    <ToolBody toolCall={tc} />
-                                  </TaskItem>
-                                </TaskContent>
-                              </Task>
-                            );
-                          })}
-                        </div>
-                      ) : null}
-                    </ChainOfThoughtContent>
-                  </ChainOfThought>
-                ) : null}
-              </>
-            )}
-            {msg.role === 'assistant' && idx !== messages.length - 1 && (msg.toolCalls?.length ?? 0) > 0 && (
-              <div className="space-y-2">
-                {msg.toolCalls?.map((tc) => {
-                  const statusLabel =
-                    tc.state === 'completed' ? '已完成' :
-                    tc.state === 'error' ? '出错' : '执行中';
-
-                  return (
-                    <Task key={tc.id}>
-                      <TaskTrigger
-                        title={`${tc.name} · ${statusLabel}`}
-                        icon={getToolIcon(tc.name)}
-                      />
-                      <TaskContent>
-                        <TaskItem>
-                          <ToolBody toolCall={tc} />
-                        </TaskItem>
-                      </TaskContent>
-                    </Task>
-                  );
-                })}
-              </div>
-            )}
-            {msg.content ? <MessageResponse>{msg.content}</MessageResponse> : null}
-          </MessageContent>
-        </Message>
-      ))}
+      {messages.map((msg, idx) => {
+        const isLast = idx === messages.length - 1;
+        return (
+          <Message key={msg.id || idx} from={msg.role}>
+            <MessageContent>
+              {msg.role === 'assistant' && (
+                msg.parts
+                  ? renderPartsAssistant(msg, isLast)
+                  : renderLegacyAssistant(msg, isLast)
+              )}
+              {!msg.parts && msg.content ? <MessageResponse>{msg.content}</MessageResponse> : null}
+            </MessageContent>
+          </Message>
+        );
+      })}
     </>
   );
 });
@@ -415,14 +549,49 @@ export function ChatPanel({
   isContextOpen,
   input,
   isLoading,
+  model,
+  modelOptions,
   onContextOpenChange,
   onInputChange,
   onKeyDown,
   onSendMessage,
   onStopMessage,
+  onModelChange,
 }: ChatPanelProps) {
   const planSteps = contextData?.planSteps ?? [];
   const [isFocused, setIsFocused] = useState(false);
+  const [attachmentFiles, setAttachmentFiles] = useState<AttachmentData[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [isModelSelectorOpen, setIsModelSelectorOpen] = useState(false);
+
+  const handleAddFiles = useCallback((fileList: FileList | File[]) => {
+    const incoming = Array.from(fileList);
+    const newFiles: AttachmentData[] = incoming.map((file) => ({
+      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      type: 'file' as const,
+      filename: file.name,
+      mediaType: file.type,
+      url: URL.createObjectURL(file),
+    }));
+    setAttachmentFiles((prev) => [...prev, ...newFiles]);
+  }, []);
+
+  const handleRemoveAttachment = useCallback((id: string) => {
+    setAttachmentFiles((prev) => {
+      const found = prev.find((f) => f.id === id);
+      if (found && 'url' in found && found.url) URL.revokeObjectURL(found.url);
+      return prev.filter((f) => f.id !== id);
+    });
+  }, []);
+
+  const handleFileInputChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files) {
+      handleAddFiles(e.target.files);
+      e.target.value = '';
+    }
+  }, [handleAddFiles]);
+
+  const selectedModel = modelOptions.find((m) => m.envFile === model) ?? modelOptions[0];
 
   const lastAssistantMessage = useMemo(() => {
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -473,6 +642,32 @@ export function ChatPanel({
 
         <div className="p-3 pt-2">
           <div className="flex flex-col rounded-lg border bg-muted/30 p-2 shadow-sm focus-within:ring-1 focus-within:ring-ring">
+            <input
+              ref={fileInputRef}
+              type="file"
+              className="hidden"
+              multiple
+              onChange={handleFileInputChange}
+            />
+
+            {attachmentFiles.length > 0 && (
+              <div className="pb-2">
+                <Attachments variant="inline">
+                  {attachmentFiles.map((file) => (
+                    <Attachment
+                      key={file.id}
+                      data={file}
+                      onRemove={() => handleRemoveAttachment(file.id)}
+                    >
+                      <AttachmentPreview />
+                      <AttachmentInfo />
+                      <AttachmentRemove />
+                    </Attachment>
+                  ))}
+                </Attachments>
+              </div>
+            )}
+
             <Textarea
               value={input}
               onChange={(e) => onInputChange(e.target.value)}
@@ -483,13 +678,59 @@ export function ChatPanel({
               className="min-h-[80px] resize-none border-0 bg-transparent px-1 py-1.5 shadow-none focus-visible:ring-0"
               rows={3}
             />
-            <div className="mt-1.5 flex items-center justify-end gap-2 border-t border-border/50 pt-2">
-              <ContextViewer
-                contextData={contextData}
-                isLoading={isContextLoading}
-                onOpenChange={onContextOpenChange}
-                open={isContextOpen}
-              />
+            <div className="mt-1.5 flex items-center justify-between gap-2 border-t border-border/50 pt-2">
+              <div className="flex items-center gap-1">
+                <Button
+                  size="icon-sm"
+                  variant="ghost"
+                  onClick={() => fileInputRef.current?.click()}
+                  aria-label="添加附件"
+                  title="添加附件"
+                >
+                  <PaperclipIcon className="w-4 h-4" />
+                </Button>
+
+                <ModelSelector open={isModelSelectorOpen} onOpenChange={setIsModelSelectorOpen}>
+                  <ModelSelectorTrigger asChild>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 gap-1.5 px-2 text-xs font-medium text-muted-foreground hover:text-foreground"
+                    >
+                      <ModelSelectorLogo provider={selectedModel?.provider ?? 'openrouter'} />
+                      <ModelSelectorName>{selectedModel?.name ?? '选择模型'}</ModelSelectorName>
+                    </Button>
+                  </ModelSelectorTrigger>
+                  <ModelSelectorContent title="选择模型">
+                    <ModelSelectorInput placeholder="搜索模型..." />
+                    <ModelSelectorList>
+                      <ModelSelectorEmpty>未找到模型</ModelSelectorEmpty>
+                      <ModelSelectorGroup heading="可用模型">
+                        {modelOptions.map((m) => (
+                          <ModelSelectorItem
+                            key={m.envFile}
+                            onSelect={() => {
+                              onModelChange(m.envFile);
+                              setIsModelSelectorOpen(false);
+                            }}
+                            className="gap-2"
+                          >
+                            <ModelSelectorLogo provider={m.provider} />
+                            <ModelSelectorName>{m.name}</ModelSelectorName>
+                          </ModelSelectorItem>
+                        ))}
+                      </ModelSelectorGroup>
+                    </ModelSelectorList>
+                  </ModelSelectorContent>
+                </ModelSelector>
+
+                <ContextViewer
+                  contextData={contextData}
+                  isLoading={isContextLoading}
+                  onOpenChange={onContextOpenChange}
+                  open={isContextOpen}
+                />
+              </div>
               {isLoading ? (
                 <Button
                   size="icon"

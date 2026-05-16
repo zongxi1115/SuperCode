@@ -1,4 +1,4 @@
-import type { ChatMessage, DirectoryNode, FileTreeNode, ToolCallRecord, WorkspaceOption } from '@/lib/app-types';
+import type { ChatMessage, ContentBlock, DirectoryNode, FileTreeNode, ToolCallRecord, WorkspaceOption } from '@/lib/app-types';
 
 export const LAST_SESSION_KEY = 'supercode_last_session';
 export const FILE_TREE_POLL_INTERVAL = 5000;
@@ -106,10 +106,25 @@ export function hydrateMessages(
       return message;
     }
 
+    const mergedThoughts = message.thoughts ?? thoughts?.join('\n\n') ?? '';
+    const mergedToolCalls = message.toolCalls ?? toolCalls ?? [];
+
+    const parts: ContentBlock[] = [];
+    if (mergedThoughts) {
+      parts.push({ type: 'thinking', text: mergedThoughts });
+    }
+    for (const tc of mergedToolCalls) {
+      parts.push({ type: 'tool_call', toolCall: tc });
+    }
+    if (message.content) {
+      parts.push({ type: 'text', text: message.content });
+    }
+
     return {
       ...message,
-      thoughts: message.thoughts ?? thoughts?.join('\n\n') ?? '',
-      toolCalls: message.toolCalls ?? toolCalls ?? []
+      thoughts: mergedThoughts,
+      toolCalls: mergedToolCalls,
+      parts
     };
   });
 }

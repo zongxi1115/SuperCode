@@ -194,6 +194,7 @@ class OpenAICompatibleBrain(AgentBrain):
             cleaned = cleaned.strip()
 
         decoder = json.JSONDecoder()
+        fallback_payload: dict[str, object] | None = None
         for start_index, char in enumerate(cleaned):
             if char != "{":
                 continue
@@ -203,10 +204,31 @@ class OpenAICompatibleBrain(AgentBrain):
             except json.JSONDecodeError:
                 continue
 
-            if isinstance(payload, dict):
+            if not isinstance(payload, dict):
+                continue
+
+            if self._looks_like_decision_payload(payload):
                 return payload
+            if fallback_payload is None:
+                fallback_payload = payload
+
+        if fallback_payload is not None:
+            return fallback_payload
 
         raise ValueError(f"模型返回 JSON 解析失败: {raw_output}")
+
+    def _looks_like_decision_payload(self, payload: dict[str, object]) -> bool:
+        """判断一个对象是否像 agent 决策 JSON。"""
+
+        action = str(payload.get("action", "")).strip().lower()
+        if action in {"tool", "final"}:
+            return True
+
+        if "tool_calls" in payload or "tool_name" in payload:
+            return True
+        if "final_answer" in payload:
+            return True
+        return False
 
     def _extract_partial_string_field(self, text: str, field_name: str) -> str | None:
         marker = f'"{field_name}"'
@@ -291,6 +313,12 @@ class OpenAICompatibleBrain(AgentBrain):
         action = str(payload.get("action", "")).strip().lower()
         thought = str(payload.get("thought", "")).strip() or "模型未提供思路。"
 
+        if not action:
+            if "tool_calls" in payload or "tool_name" in payload:
+                action = "tool"
+            elif "final_answer" in payload:
+                action = "final"
+
         if action == "tool":
             tool_calls = payload.get("tool_calls")
             if tool_calls is not None:
@@ -333,4 +361,6 @@ class OpenAICompatibleBrain(AgentBrain):
                 raise ValueError("模型决定结束，但没有返回 final_answer。")
             return BrainDecision.finish(thought=thought, final_answer=final_answer)
 
-        raise ValueError(f"模型返回了不支持的 action: {action}")
+        raise ValueError(
+            "模型返回了不支持的 action，且无法从 tool_name/tool_calls/final_answer 推断动作。"
+        )

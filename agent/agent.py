@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from .brain import AgentBrain, BrainStreamingUpdate
 from .schema import AgentEvent, AgentResponse, AgentState, StepRecord, ToolCall, ToolResult
@@ -24,6 +24,7 @@ class CodingAgent:
         tools: list[BaseTool],
         workspace: str | Path = ".",
         max_steps: int = 8,
+        tool_context_metadata: dict[str, Any] | None = None,
     ) -> None:
         """初始化智能体。
 
@@ -38,6 +39,7 @@ class CodingAgent:
         self.workspace = Path(workspace).resolve()
         self.max_steps = max_steps
         self.tools = {tool.name: tool for tool in tools}
+        self.tool_context_metadata = tool_context_metadata or {}
 
     def run(
         self,
@@ -68,7 +70,10 @@ class CodingAgent:
         state.tool_results = []
         state.data["step_records"] = steps
         tool_descriptions = {name: tool.description for name, tool in self.tools.items()}
-        context = ToolContext(workspace=self.workspace)
+        context = ToolContext(
+            workspace=self.workspace,
+            metadata=self.tool_context_metadata,
+        )
         self._emit_event(
             on_event,
             AgentEvent(

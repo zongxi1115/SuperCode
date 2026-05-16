@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +15,7 @@ class ToolContext:
     """
 
     workspace: Path
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class BaseTool(ABC):

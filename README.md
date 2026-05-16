@@ -89,12 +89,14 @@ response = session.ask("先看看项目结构", on_event=on_event)
 
 `coding_agent` 当前提供这些工具名：
 
-- `list_file(path)`
+- `list_file(path, include_ignored?)`
 - `read_file(filename, start_line, end_line)`
 - `grep_file(regex, search_path)`
 - `write_file(filename, content)`
 - `replace_file(filename, old_content, new_content)`
-- `excecute(content)`
+- `excecute(content, timeout)`
+- `terminal_input(content, timeout)`
+- `terminal_wait(timeout)`
 
 ### 配置项说明
 

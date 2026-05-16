@@ -8,8 +8,10 @@ import { TerminalPanel } from '@/components/app/terminal-panel';
 import { WorkspacePicker } from '@/components/app/workspace-picker';
 import type {
   ChatMessage,
+  ContentBlock,
   DirectoryNode,
   FileTreeNode,
+  ModelOption,
   SessionContextPayload,
   SessionHistoryItem,
   SessionPayload,
@@ -54,6 +56,8 @@ export default function App() {
   const [chatPanelWidth, setChatPanelWidth] = useState(820);
   const [sessionHistory, setSessionHistory] = useState<SessionHistoryItem[]>([]);
   const [isHistoryLoading, setIsHistoryLoading] = useState(false);
+  const [selectedModelEnvFile, setSelectedModelEnvFile] = useState<string | null>(null);
+  const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
   const activeRequestRef = useRef<AbortController | null>(null);
 
   const refreshFileTree = useCallback(
@@ -141,6 +145,13 @@ export default function App() {
         }
       })
       .catch(console.error);
+
+    fetch('http://localhost:8000/api/models')
+      .then((res) => res.json())
+      .then((data: { models: ModelOption[] }) => {
+        setModelOptions(data.models ?? []);
+      })
+      .catch(console.error);
   }, [initialWorkspace]);
 
   const applySessionPayload = useCallback((data: SessionPayload) => {
@@ -148,6 +159,7 @@ export default function App() {
     setBackendMode(data.mode);
     setStartupError(data.startupError ?? null);
     setSelectedWorkspace(data.workspace);
+    setSelectedModelEnvFile(data.envFile ?? null);
     setMessages(hydrateMessages(data.messages ?? [], data.thoughts, data.toolCalls));
     setFileTree(data.fileTree ?? []);
     setTerminalOutput(data.terminalOutput ?? '');
@@ -182,11 +194,17 @@ export default function App() {
     setSessionError(null);
 
     try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 60000);
+
       const res = await fetch('http://localhost:8000/api/sessions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workspace })
+        body: JSON.stringify({ workspace, env_file: selectedModelEnvFile }),
+        signal: controller.signal,
       });
+      clearTimeout(timeoutId);
+
       if (!res.ok) {
         const errorText = await res.text();
         throw new Error(errorText || '创建会话失败');
@@ -196,7 +214,11 @@ export default function App() {
       await loadSessionHistory();
     } catch (error) {
       console.error(error);
-      setSessionError(error instanceof Error ? error.message : '创建会话失败');
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        setSessionError('创建会话超时（60秒），请检查后端是否正常运行');
+      } else {
+        setSessionError(error instanceof Error ? error.message : '创建会话失败');
+      }
     } finally {
       setIsSessionBooting(false);
     }
@@ -209,10 +231,16 @@ export default function App() {
     if (!shouldRestoreSession || !initialWorkspace) return;
 
     hasRestoredRef.current = true;
-    const id = setTimeout(() => {
-      createSessionWithWorkspace(initialWorkspace);
-    }, 0);
-    return () => clearTimeout(id);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 45000);
+
+    createSessionWithWorkspace(initialWorkspace)
+      .catch((err) => {
+        console.error('自动恢复会话失败:', err);
+        setShowWorkspacePicker(true);
+        clearLastSession();
+      })
+      .finally(() => clearTimeout(timeoutId));
   }, [shouldRestoreSession, initialWorkspace, createSessionWithWorkspace]);
 
   useEffect(() => {
@@ -374,7 +402,14 @@ export default function App() {
       setIsSessionBooting(true);
       setSessionError(null);
       try {
-        const res = await fetch(`http://localhost:8000/api/sessions/${targetSessionId}`);
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 30000);
+
+        const res = await fetch(`http://localhost:8000/api/sessions/${targetSessionId}`, {
+          signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+
         if (!res.ok) {
           throw new Error('恢复历史会话失败');
         }
@@ -382,12 +417,41 @@ export default function App() {
         applySessionPayload(data);
       } catch (error) {
         console.error(error);
-        setSessionError(error instanceof Error ? error.message : '恢复历史会话失败');
+        if (error instanceof DOMException && error.name === 'AbortError') {
+          setSessionError('恢复会话超时，请重试');
+        } else {
+          setSessionError(error instanceof Error ? error.message : '恢复历史会话失败');
+        }
       } finally {
         setIsSessionBooting(false);
       }
     },
     [applySessionPayload, sessionId]
+  );
+
+  const handleModelChange = useCallback(
+    async (envFile: string) => {
+      if (!sessionId) return;
+      try {
+        const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/model`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ env_file: envFile }),
+        });
+        if (!res.ok) {
+          const errText = await res.text();
+          throw new Error(errText || '切换模型失败');
+        }
+        const data = await res.json();
+        setSelectedModelEnvFile(data.envFile ?? envFile);
+        setBackendMode(data.mode ?? 'agent');
+        setStartupError(null);
+      } catch (error) {
+        console.error(error);
+        setSessionError(error instanceof Error ? error.message : '切换模型失败');
+      }
+    },
+    [sessionId],
   );
 
   const handleNewSession = useCallback(() => {
@@ -481,7 +545,7 @@ export default function App() {
 
           return [
             ...next,
-            updater({ id: assistantId, role: 'assistant', content: '', thoughts: '', toolCalls: [] })
+            updater({ id: assistantId, role: 'assistant', content: '', thoughts: '', toolCalls: [], parts: [] })
           ];
         });
       };
@@ -491,6 +555,14 @@ export default function App() {
 
         try {
           const data = JSON.parse(eventStr.replace('data: ', ''));
+          const appendToLastPart = (message: ChatMessage, partType: 'thinking' | 'text', delta: string): ContentBlock[] => {
+            const parts = message.parts ?? [];
+            const last = parts[parts.length - 1];
+            if (last && last.type === partType) {
+              return [...parts.slice(0, -1), { ...last, text: last.text + delta }];
+            }
+            return [...parts, { type: partType, text: delta }];
+          };
 
           if (data.type === 'assistant_started') {
             currentAssistantId = data.payload.id || currentAssistantId || Math.random().toString();
@@ -499,13 +571,15 @@ export default function App() {
             currentAssistantId = data.payload.id || currentAssistantId || Math.random().toString();
             updateAssistantMessage(currentAssistantId, (message) => ({
               ...message,
-              content: `${message.content}${data.payload.delta ?? ''}`
+              content: `${message.content}${data.payload.delta ?? ''}`,
+              parts: appendToLastPart(message, 'text', data.payload.delta ?? '')
             }));
           } else if (data.type === 'assistant_reset') {
             currentAssistantId = data.payload.id || currentAssistantId || Math.random().toString();
             updateAssistantMessage(currentAssistantId, (message) => ({
               ...message,
-              content: ''
+              content: '',
+              parts: (message.parts ?? []).filter((p) => p.type !== 'text')
             }));
           } else if (data.type === 'thought_delta') {
             const assistantId = data.payload.assistant_id || currentAssistantId;
@@ -513,7 +587,8 @@ export default function App() {
             currentAssistantId = assistantId;
             updateAssistantMessage(assistantId, (message) => ({
               ...message,
-              thoughts: `${message.thoughts ?? ''}${data.payload.delta ?? ''}`
+              thoughts: `${message.thoughts ?? ''}${data.payload.delta ?? ''}`,
+              parts: appendToLastPart(message, 'thinking', data.payload.delta ?? '')
             }));
           } else if (data.type === 'thought') {
             const assistantId = data.payload.assistant_id || currentAssistantId;
@@ -524,25 +599,38 @@ export default function App() {
               if (!nextThought || message.thoughts?.trim()) {
                 return message;
               }
+              const newParts = appendToLastPart(message, 'thinking', nextThought);
               return {
                 ...message,
-                thoughts: nextThought
+                thoughts: nextThought,
+                parts: newParts
               };
             });
           } else if (data.type === 'tool_call') {
             const assistantId = data.payload.assistant_id || currentAssistantId;
             if (!assistantId) return;
             currentAssistantId = assistantId;
+            const toolCallRecord = { ...data.payload, state: 'running' as const };
             updateAssistantMessage(assistantId, (message) => ({
               ...message,
-              toolCalls: [...(message.toolCalls ?? []), { ...data.payload, state: 'running' }]
+              toolCalls: [...(message.toolCalls ?? []), toolCallRecord],
+              parts: [...(message.parts ?? []), { type: 'tool_call' as const, toolCall: toolCallRecord }]
             }));
             if (data.payload.name === 'read_file' && typeof data.payload.arguments?.filename === 'string') {
               void loadFile(data.payload.arguments.filename);
             }
           } else if (data.type === 'tool_result') {
-            if (data.payload.name === 'execute' || data.payload.name === 'excecute') {
-              setTerminalOutput(data.payload.output);
+            if (
+              data.payload.name === 'execute' ||
+              data.payload.name === 'excecute' ||
+              data.payload.name === 'terminal_input' ||
+              data.payload.name === 'terminal_wait'
+            ) {
+              if (typeof data.payload.terminal_output === 'string') {
+                setTerminalOutput(data.payload.terminal_output);
+              } else if (typeof data.payload.output === 'string') {
+                setTerminalOutput(data.payload.output);
+              }
             }
             if (['write_file', 'replace_file', 'delete_file'].includes(String(data.payload.name))) {
               void refreshFileTree();
@@ -550,17 +638,21 @@ export default function App() {
             const assistantId = data.payload.assistant_id || currentAssistantId;
             if (!assistantId) return;
             currentAssistantId = assistantId;
+            const updatedTool = {
+              errorMessage: data.payload.error_message ?? undefined,
+              state: data.payload.success ? 'completed' as const : 'error' as const
+            };
             updateAssistantMessage(assistantId, (message) => ({
               ...message,
               toolCalls: (message.toolCalls ?? []).map((tc) =>
                 tc.id === data.payload.id
-                  ? {
-                      ...tc,
-                      ...data.payload,
-                      errorMessage: data.payload.error_message ?? tc.errorMessage,
-                      state: data.payload.success ? 'completed' : 'error'
-                    }
+                  ? { ...tc, ...data.payload, errorMessage: data.payload.error_message ?? tc.errorMessage, state: data.payload.success ? 'completed' : 'error' }
                   : tc
+              ),
+              parts: (message.parts ?? []).map((p) =>
+                p.type === 'tool_call' && p.toolCall.id === data.payload.id
+                  ? { ...p, toolCall: { ...p.toolCall, ...data.payload, ...updatedTool } }
+                  : p
               )
             }));
           }
@@ -687,6 +779,9 @@ export default function App() {
         messages={messages}
         input={input}
         isLoading={isLoading}
+        model={selectedModelEnvFile}
+        modelOptions={modelOptions}
+        onModelChange={handleModelChange}
         onContextOpenChange={handleContextOpenChange}
         onInputChange={setInput}
         onKeyDown={handleKeyDown}

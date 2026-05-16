@@ -9,12 +9,18 @@ export type ToolCallRecord = {
   state: 'running' | 'completed' | 'error';
 };
 
+export type ContentBlock =
+  | { type: 'thinking'; text: string }
+  | { type: 'tool_call'; toolCall: ToolCallRecord }
+  | { type: 'text'; text: string };
+
 export type ChatMessage = {
   id: string;
   role: 'user' | 'assistant';
   content: string;
   thoughts?: string;
   toolCalls?: ToolCallRecord[];
+  parts?: ContentBlock[];
 };
 
 export type FileTreeNode = {
@@ -78,6 +84,7 @@ export type SessionPayload = {
   model?: string;
   mode: 'agent' | 'demo';
   startupError?: string | null;
+  envFile?: string | null;
   workspace: string;
   workspaceOptions: WorkspaceOption[];
   messages?: ChatMessage[];
@@ -114,4 +121,12 @@ export type TerminalSnapshotPayload = {
   revision: number;
   isAlive: boolean;
   shell: string;
+};
+
+export type ModelOption = {
+  id: string;
+  name: string;
+  provider: string;
+  envFile: string;
+  label: string;
 };

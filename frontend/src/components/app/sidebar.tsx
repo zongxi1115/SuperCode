@@ -128,9 +128,9 @@ export function Sidebar({
                       onClick={() => onSelectHistory(item.sessionId)}
                     >
                       <div className="flex items-center gap-2">
-                        <div className="min-w-0 flex-1 overflow-hidden">
+                        <div className="min-w-0 flex-1">
                           <div className="truncate text-xs font-medium leading-5">{item.title}</div>
-                          <div className="truncate text-[11px] text-muted-foreground/70 leading-4 mt-0.5">{item.preview}</div>
+                          <div className="line-clamp-2 break-words text-[11px] text-muted-foreground/70 leading-4 mt-0.5">{item.preview}</div>
                         </div>
                         <button
                           type="button"
