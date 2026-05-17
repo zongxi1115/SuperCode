@@ -143,38 +143,15 @@
   pointer-events: auto;
 }
 
-.fade-edge-r {
-  position: relative;
-}
-.fade-edge-r::after {
+.fade-edge-r::after,
+.streaming-tail-fade > :last-child::after {
   content: "";
-  position: absolute;
-  right: -0.25rem;
-  bottom: 0;
+  display: inline-block;
   width: 4.5rem;
-  height: 1.6em;
+  max-width: 35%;
+  height: 1em;
+  margin-left: -3.25rem;
   pointer-events: none;
-  filter: blur(2px);
-  animation: fade-edge-pulse 1.5s ease-in-out infinite;
-  background: linear-gradient(to right, transparent, var(--background) 72%);
-}
-@keyframes fade-edge-pulse {
-  0%, 100% { opacity: 0.4; }
-  50% { opacity: 1; }
-}
-
-.streaming-tail-fade {
-  position: relative;
-}
-.streaming-tail-fade::after {
-  content: "";
-  position: absolute;
-  right: -0.25rem;
-  bottom: 0;
-  width: 4.5rem;
-  height: 1.6em;
-  pointer-events: none;
-  filter: blur(2px);
-  animation: fade-edge-pulse 1.5s ease-in-out infinite;
+  vertical-align: bottom;
   background: linear-gradient(to right, transparent, var(--background) 72%);
 }

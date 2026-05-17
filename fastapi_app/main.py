@@ -395,7 +395,7 @@ def hydrate_session_from_state(state: PersistedSessionState) -> UISession:
         pending_tag_confirmations=state.pending_tag_confirmations,
     )
     if session.chat_session is not None:
-        seed_chat_session_history(session.chat_session, state.history_messages)
+        seed_chat_session_history(session.chat_session, state.history_messages, state.history_tools)
     if session.chat_session is not None and isinstance(session.chat_session.agent, CodingAgent):
         attach_agent_runtime_metadata(
             session.chat_session.agent,
@@ -490,7 +490,7 @@ async def switch_session_model(session_id: str, request: SwitchModelRequest) -> 
     interactive_command_session = session.interactive_command_session
 
     session.chat_session = ChatSession(agent=agent)
-    seed_chat_session_history(session.chat_session, session.history_messages)
+    seed_chat_session_history(session.chat_session, session.history_messages, session.history_tools)
     if isinstance(session.chat_session.agent, CodingAgent):
         attach_agent_runtime_metadata(
             session.chat_session.agent,
@@ -1139,6 +1139,7 @@ async def confirm_tag_tool(
         raise HTTPException(status_code=404, detail="未找到待确认的标签动作")
 
     approval = {"id": tool_id, "approved": request.approved}
+    assistant_id = str(pending.get("assistant_id") or "").strip()
     if not request.approved:
         tool_record = {
             "id": tool_id,

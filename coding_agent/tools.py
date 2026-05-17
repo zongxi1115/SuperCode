@@ -30,7 +30,7 @@ DEFAULT_IGNORED_DIR_NAMES = {
     "node_modules",
     "venv",
 }
-READ_FILE_MAX_OUTPUT_CHARS = 3500
+READ_FILE_MAX_OUTPUT_CHARS = 5000
 APPLY_PATCH_BEGIN = "*** Begin Patch"
 APPLY_PATCH_END = "*** End Patch"
 APPLY_PATCH_UPDATE_PREFIX = "*** Update File: "

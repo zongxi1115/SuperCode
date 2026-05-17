@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import json
 import platform
 from pathlib import Path
 
 from agent.llm_brain import OpenAICompatibleBrain
 from agent.llm_client import OpenAICompatibleClient
 from agent.schema import AgentState, StepRecord
+
+
+MAX_CONVERSATION_MESSAGES = 12
+MAX_TOOL_RECORDS_IN_CONTEXT = 40
+MAX_PLANNING_RECORDS_IN_CONTEXT = 20
+TOOL_RECORD_VALUE_LIMIT = 4_000
+PLANNING_RECORD_VALUE_LIMIT = 1_200
 
 
 class CodingPromptBrain(OpenAICompatibleBrain):
@@ -48,6 +56,8 @@ class CodingPromptBrain(OpenAICompatibleBrain):
                 "6. 命令执行工具优先使用 `excecute`；如果输出里提到 `execute`，可视为同义工具。调用时必须提供 `content` 和 `timeout`（秒），并可选传 `terminal_id`。",
                 "7. 如果 execute/excecute 返回的结果里 `status` 是 `running` 且 `awaiting_input` 为 true，说明命令很可能在等输入，应根据输出调用 `terminal_input`。如果结果里带有 `terminal_id`，后续继续交互时要沿用同一个 `terminal_id`。",
                 "8. 如果 execute/excecute 返回的结果里 `status` 是 `running` 且 `awaiting_input` 为 false，说明命令大概率仍在后台执行，应调用 `terminal_wait` 继续等待。多个活动终端并存时，必须显式传 `terminal_id`。",
+                "9. 如果用户目标已经完成，必须直接输出最终答复，不要为了“继续”而调用无必要工具。",
+                "10. 已成功完成的工具调用会出现在内部工具调用记录里，不要重复同一工具调用；刚刚 write_file 创建的新文件内容以调用参数为准，不要立刻 read_file 回读。",
             ]
         else:
             protocol_lines = [
@@ -69,6 +79,8 @@ class CodingPromptBrain(OpenAICompatibleBrain):
                 "7. 命令执行工具优先使用 `excecute`；如果输出里提到 `execute`，可视为同义工具。调用时必须提供 `content` 和 `timeout`（秒），并可选传 `terminal_id`。",
                 "8. 如果 execute/excecute 返回的结果里 `status` 是 `running` 且 `awaiting_input` 为 true，说明命令很可能在等输入，应根据输出调用 `terminal_input`。如果结果里带有 `terminal_id`，后续继续交互时要沿用同一个 `terminal_id`。",
                 "9. 如果 execute/excecute 返回的结果里 `status` 是 `running` 且 `awaiting_input` 为 false，说明命令大概率仍在后台执行，应调用 `terminal_wait` 继续等待。多个活动终端并存时，必须显式传 `terminal_id`。",
+                "10. 如果用户目标已经完成，必须 action=final，不要为了“继续”而调用无必要工具。",
+                "11. 已成功完成的工具调用会出现在内部工具调用记录里，不要重复同一工具调用；刚刚 write_file 创建的新文件内容以调用参数为准，不要立刻 read_file 回读。",
             ]
 
         return "\n\n".join(
@@ -91,14 +103,19 @@ class CodingPromptBrain(OpenAICompatibleBrain):
             {"role": "system", "content": self._build_system_prompt(tool_definitions, response_mode=response_mode)}
         ]
 
-        if state.conversation_messages:
-            messages.extend(
-                {
-                    "role": message.role,
-                    "content": message.content,
-                }
-                for message in state.conversation_messages
-            )
+        previous_messages, latest_user_message = self._split_latest_user_message(state)
+        messages.extend(self._conversation_messages_for_model(previous_messages))
+
+        planning_records_context = self._build_planning_records_context(state)
+        if planning_records_context:
+            messages.append({"role": "assistant", "content": planning_records_context})
+
+        tool_records_context = self._build_tool_records_context(state)
+        if tool_records_context:
+            messages.append({"role": "assistant", "content": tool_records_context})
+
+        if latest_user_message:
+            messages.append({"role": "user", "content": latest_user_message})
         elif state.current_input.strip():
             messages.append({"role": "user", "content": state.current_input.strip()})
 
@@ -124,6 +141,8 @@ class CodingPromptBrain(OpenAICompatibleBrain):
             return (
                 "请基于当前轮已完成的工具调用和工具输出继续决策。"
                 "不要重复已经完成且结果成功的工具调用。"
+                "刚刚 write_file 创建的新文件内容已经在调用参数里，不要为了确认内容立刻 read_file。"
+                "如果用户目标已经完成，直接输出最终答复，不要继续调用工具。"
                 "如果还需要工具，请直接使用原生 tool calling；"
                 "如果信息已经足够，直接输出给用户的最终答复文本。"
             )
@@ -131,7 +150,150 @@ class CodingPromptBrain(OpenAICompatibleBrain):
         return (
             "请基于当前轮已完成的工具调用和工具输出，继续输出下一步决策 JSON。"
             "不要重复已经完成且结果成功的工具调用。"
+            "刚刚 write_file 创建的新文件内容已经在调用参数里，不要为了确认内容立刻 read_file。"
+            "如果用户目标已经完成，必须 action=final，不要继续调用工具。"
         )
+
+    def _split_latest_user_message(self, state: AgentState) -> tuple[list[object], str]:
+        messages = list(state.conversation_messages)
+        current_input = state.current_input.strip()
+        if not messages:
+            return [], current_input
+
+        last_message = messages[-1]
+        last_role = str(getattr(last_message, "role", ""))
+        last_content = str(getattr(last_message, "content", ""))
+        if last_role == "user" and current_input and last_content.strip() == current_input:
+            return messages[:-1], last_content
+        return messages, current_input
+
+    def _conversation_messages_for_model(self, raw_messages: list[object]) -> list[dict[str, str]]:
+        model_messages: list[dict[str, str]] = []
+        for message in raw_messages[-MAX_CONVERSATION_MESSAGES:]:
+            role = str(getattr(message, "role", ""))
+            content = str(getattr(message, "content", "")).strip()
+            if role not in {"user", "assistant"} or not content:
+                continue
+            if content.startswith("[内部工具轨迹摘要]"):
+                continue
+            model_messages.append({"role": role, "content": content})
+        return model_messages
+
+    def _build_tool_records_context(self, state: AgentState) -> str:
+        raw_records = state.data.get("tool_records", [])
+        records = raw_records if isinstance(raw_records, list) else []
+        raw_external_records = state.data.get("external_records", [])
+        external_records = raw_external_records if isinstance(raw_external_records, list) else []
+        current_turn_index = state.data.get("turn_index")
+        historical_records = [
+            record
+            for record in records
+            if not (
+                isinstance(record, dict)
+                and current_turn_index is not None
+                and record.get("turn_index") == current_turn_index
+            )
+        ]
+        if not historical_records and not external_records:
+            return ""
+
+        lines = [
+            "[内部工具调用记录] 以下是真实工具调用记录，不是摘要，也不是新的用户请求。",
+            "只用它判断哪些文件已经读取、写入、验证或确认；最终答复不要复读工具输出原文。",
+        ]
+        for index, record in enumerate(historical_records[-MAX_TOOL_RECORDS_IN_CONTEXT:], start=1):
+            if isinstance(record, dict):
+                lines.extend(self._format_tool_record(index, record))
+        if external_records:
+            lines.append("[内部确认记录]")
+            for item in external_records[-20:]:
+                text = str(item).strip()
+                if text:
+                    lines.append(f"- {text}")
+        return "\n".join(lines)
+
+    def _build_planning_records_context(self, state: AgentState) -> str:
+        raw_records = state.data.get("planning_records", [])
+        records = raw_records if isinstance(raw_records, list) else []
+        current_turn_index = state.data.get("turn_index")
+        historical_records = [
+            record
+            for record in records
+            if not (
+                isinstance(record, dict)
+                and current_turn_index is not None
+                and record.get("turn_index") == current_turn_index
+            )
+        ]
+        if not historical_records:
+            return ""
+
+        lines = [
+            "[内部规划记录] 以下是前面已经确定过的方案、约束和下一步意图，不是新的用户请求。",
+            "继续执行时优先沿用这些结论；只有工具结果推翻它们时才重新规划。",
+        ]
+        for index, record in enumerate(historical_records[-MAX_PLANNING_RECORDS_IN_CONTEXT:], start=1):
+            if not isinstance(record, dict):
+                continue
+            lines.extend(self._format_planning_record(index, record))
+        return "\n".join(lines)
+
+    def _format_planning_record(self, index: int, record: dict[str, object]) -> list[str]:
+        lines = [f"规划 {index}:"]
+        for label, key in (
+            ("turn", "turn_index"),
+            ("step", "step_index"),
+            ("action", "action"),
+        ):
+            value = record.get(key)
+            if value is not None and value != "":
+                lines.append(f"- {label}: {value}")
+        tools = record.get("tools")
+        if tools:
+            lines.append(f"- tools: {self._stringify_planning_value(tools)}")
+        thought = record.get("thought")
+        if thought:
+            lines.append(f"- decided: {self._stringify_planning_value(thought)}")
+        return lines
+
+    def _stringify_planning_value(self, value: object) -> str:
+        text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        text = text.strip()
+        if len(text) <= PLANNING_RECORD_VALUE_LIMIT:
+            return text
+        return f"{text[:PLANNING_RECORD_VALUE_LIMIT].rstrip()}... [truncated]"
+
+    def _format_tool_record(self, index: int, record: dict[str, object]) -> list[str]:
+        lines = [f"记录 {index}:"]
+        for label, key in (
+            ("id", "id"),
+            ("turn", "turn_index"),
+            ("step", "step_index"),
+            ("tool", "name"),
+            ("state", "state"),
+            ("success", "success"),
+        ):
+            value = record.get(key)
+            if value is not None and value != "":
+                lines.append(f"- {label}: {value}")
+
+        arguments = record.get("arguments")
+        if arguments:
+            lines.append(f"- arguments: {self._stringify_record_value(arguments)}")
+        output = record.get("output")
+        if output is not None and output != "":
+            lines.append(f"- output: {self._stringify_record_value(output)}")
+        error_message = record.get("error_message")
+        if error_message:
+            lines.append(f"- error: {self._stringify_record_value(error_message)}")
+        return lines
+
+    def _stringify_record_value(self, value: object) -> str:
+        text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        text = text.strip()
+        if len(text) <= TOOL_RECORD_VALUE_LIMIT:
+            return text
+        return f"{text[:TOOL_RECORD_VALUE_LIMIT].rstrip()}... [truncated]"
 
     def _build_current_turn_history(self, state: AgentState) -> str:
         turn_index = state.data.get("turn_index")
@@ -152,10 +314,10 @@ class CodingPromptBrain(OpenAICompatibleBrain):
 
         return "\n".join(
             [
-                "[内部当前轮工具轨迹] 以下是本轮已经完成的步骤，必须作为下一步决策依据。",
+                "[内部当前轮工具调用记录] 以下是本轮已经完成的真实工具调用记录，必须作为下一步决策依据。",
                 self._format_history(
                     current_turn_steps,
-                    include_thoughts=bool(state.data.get("include_thoughts_in_context", False)),
+                    include_thoughts=True,
                 ),
             ]
         )

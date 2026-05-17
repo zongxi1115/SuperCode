@@ -9,6 +9,9 @@ from .schema import AgentEvent, AgentResponse, AgentState, StepRecord, ToolCall,
 from .tools import BaseTool, ToolContext
 
 
+DEFAULT_MAX_STEPS = 40
+
+
 class CodingAgent:
     """简单编码智能体。
 
@@ -32,12 +35,12 @@ class CodingAgent:
         - `brain`：负责决定下一步动作的对象
         - `tools`：可供调用的工具列表
         - `workspace`：工具默认操作的工作目录
-        - `max_steps`：保留的兼容参数，当前不再限制执行步数
+        - `max_steps`：单轮最大执行步数，防止模型在已完成后仍反复继续
         """
 
         self.brain = brain
         self.workspace = Path(workspace).resolve()
-        self.max_steps = max_steps
+        self.max_steps = max(1, max_steps or DEFAULT_MAX_STEPS)
         self.tools = {tool.name: tool for tool in tools}
         self.tool_context_metadata = tool_context_metadata or {}
 
@@ -97,8 +100,16 @@ class CodingAgent:
             ),
         )
 
-        index = 1
-        while True:
+        if continue_existing_turn:
+            current_turn_indices = [
+                step.index
+                for step in history_steps
+                if isinstance(step, StepRecord) and step.turn_index == turn_index
+            ]
+            index = (max(current_turn_indices) + 1) if current_turn_indices else 1
+        else:
+            index = 1
+        while index <= self.max_steps:
             if self._is_cancelled(context):
                 return self._build_cancelled_response(
                     state=state,
@@ -349,6 +360,15 @@ class CodingAgent:
                 )
             index += 1
 
+        return self._build_limit_response(
+            state=state,
+            steps=steps,
+            history_steps=history_steps,
+            turn_index=turn_index,
+            step_index=index,
+            on_event=on_event,
+        )
+
     def _execute_tool(self, tool_call: ToolCall, context: ToolContext) -> ToolResult:
         """执行单个工具调用，并把异常包装成统一结果。"""
 
@@ -547,6 +567,52 @@ class CodingAgent:
                 step_index=step_index,
                 message="本轮处理已停止。",
                 final_answer=final_output,
+            ),
+        )
+        return response
+
+    def _build_limit_response(
+        self,
+        state: AgentState,
+        steps: list[StepRecord],
+        history_steps: list[StepRecord],
+        turn_index: int,
+        step_index: int,
+        on_event: Callable[[AgentEvent], None] | None,
+    ) -> AgentResponse:
+        final_output = (
+            f"本轮已执行 {self.max_steps} 步仍未收敛，我先停止，避免继续重复调用工具。"
+            "你可以补充更明确的目标后让我继续。"
+        )
+        step_record = StepRecord(
+            turn_index=turn_index,
+            index=step_index,
+            thought="达到单轮安全步数上限，停止继续执行。",
+            final_answer=final_output,
+        )
+        steps.append(step_record)
+        history_steps.append(step_record)
+        response = AgentResponse(
+            task=state.current_input,
+            final_output=final_output,
+            steps=steps,
+        )
+        self._emit_event(
+            on_event,
+            AgentEvent(
+                type="limit_reached",
+                step_index=step_index,
+                message="已达到单轮安全步数上限。",
+                final_answer=final_output,
+            ),
+        )
+        self._emit_event(
+            on_event,
+            AgentEvent(
+                type="turn_finished",
+                step_index=step_index,
+                message="本轮处理结束，但模型没有自然收敛。",
+                final_answer=response.final_output,
             ),
         )
         return response

@@ -516,6 +516,14 @@ export default function App() {
   }, [loadSessionContext, sessionId]);
 
   useEffect(() => {
+    if (!sessionId || !isLoading) return;
+    const interval = setInterval(() => {
+      void loadSessionContext({ silent: true });
+    }, 20_000);
+    return () => clearInterval(interval);
+  }, [isLoading, loadSessionContext, sessionId]);
+
+  useEffect(() => {
     if (!sessionId || !isLoading || activeStreamSessionIdRef.current === sessionId) {
       return;
     }

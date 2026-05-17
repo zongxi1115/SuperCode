@@ -39,7 +39,7 @@ class CodingPromptBrainMessageTests(unittest.TestCase):
 
         self.assertIn("继续输出下一步决策 JSON", messages[-1]["content"])
 
-    def test_current_turn_history_omits_thoughts_by_default(self) -> None:
+    def test_current_turn_history_includes_planning_thoughts_by_default(self) -> None:
         messages = self.brain._build_messages(
             self.state,
             tool_definitions={},
@@ -47,9 +47,9 @@ class CodingPromptBrainMessageTests(unittest.TestCase):
         )
 
         history_message = messages[-2]["content"]
-        self.assertNotIn("思考：先读文件", history_message)
+        self.assertIn("思考：先读文件", history_message)
 
-    def test_current_turn_history_can_include_thoughts_when_enabled(self) -> None:
+    def test_current_turn_history_keeps_planning_thoughts_when_enabled(self) -> None:
         self.state.data["include_thoughts_in_context"] = True
 
         messages = self.brain._build_messages(
@@ -191,15 +191,30 @@ class HumanInLoopPauseTests(unittest.TestCase):
         self.assertEqual(response.final_output, "")
         self.assertEqual(response.steps[0].tool_results[0].output["requires_confirmation"], True)
 
+    def test_continue_existing_turn_continues_step_index(self) -> None:
+        workspace = Path(tempfile.mkdtemp(prefix="supercode-confirmation-"))
+        agent = CodingAgent(
+            brain=_StopAfterConfirmationBrain(),
+            tools=[_ConfirmationTool()],
+            workspace=workspace,
+            max_steps=3,
+        )
+        state = AgentState(task="task", current_input="帮我提交")
+
+        paused_response = agent.run_turn(state)
+        continued_response = agent.run_turn(state, continue_existing_turn=True)
+
+        self.assertEqual(paused_response.steps[0].index, 1)
+        self.assertEqual(continued_response.steps[0].index, 2)
+
 
 class MaxStepsCompatibilityTests(unittest.TestCase):
-    def test_agent_does_not_stop_when_legacy_max_steps_is_too_small(self) -> None:
+    def test_agent_default_step_budget_allows_longer_tasks(self) -> None:
         workspace = Path(tempfile.mkdtemp(prefix="supercode-max-steps-"))
         agent = CodingAgent(
             brain=_DelayedFinishBrain(final_on_call=5),
             tools=[_NoopTool()],
             workspace=workspace,
-            max_steps=1,
         )
 
         response = agent.run("继续执行直到完成")
@@ -207,6 +222,21 @@ class MaxStepsCompatibilityTests(unittest.TestCase):
         self.assertEqual(response.final_output, "done")
         self.assertEqual(len(response.steps), 5)
         self.assertEqual(response.steps[-1].final_answer, "done")
+
+    def test_agent_honors_explicit_step_budget_as_safety_guard(self) -> None:
+        workspace = Path(tempfile.mkdtemp(prefix="supercode-max-steps-"))
+        agent = CodingAgent(
+            brain=_DelayedFinishBrain(final_on_call=5),
+            tools=[_NoopTool()],
+            workspace=workspace,
+            max_steps=2,
+        )
+
+        response = agent.run("继续执行直到完成")
+
+        self.assertIn("仍未收敛", response.final_output)
+        self.assertEqual(len(response.steps), 3)
+        self.assertEqual(response.steps[-1].final_answer, response.final_output)
 
 
 if __name__ == "__main__":
