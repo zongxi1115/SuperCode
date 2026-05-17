@@ -89,6 +89,7 @@ export type SessionContextPayload = {
 export type SessionPayload = {
   sessionId: string;
   model?: string;
+  modelId?: string | null;
   mode: 'agent' | 'demo';
   isGenerating?: boolean;
   startupError?: string | null;
@@ -166,9 +167,28 @@ export type ManagedProcessPayload = {
 export type ModelOption = {
   id: string;
   name: string;
+  model?: string;
   provider: string;
   envFile: string;
   label: string;
+  sourceType?: 'env' | 'ui' | string;
+  sourceLabel?: string;
+  readOnly?: boolean;
+};
+
+export type UIModelProvider = {
+  id?: string | null;
+  name: string;
+  baseUrl: string;
+  apiKey: string;
+  models: string[];
+  provider?: string | null;
+};
+
+export type ModelConfigPayload = {
+  providers: UIModelProvider[];
+  envConfigs: ModelOption[];
+  configPath: string;
 };
 
 export type GitCommitInfo = {

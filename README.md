@@ -60,7 +60,6 @@ agent = CodingAgent(
     brain=CodingPromptBrain(client),
     tools=build_coding_tools(),
     workspace="examples/demo_workspace",
-    max_steps=config.max_steps,
 )
 
 session = ChatSession(agent=agent)
@@ -109,7 +108,6 @@ response = session.ask("先看看项目结构", on_event=on_event)
 - `SC_AGENT_BASE_URL`：OpenAI 兼容接口基础地址，例如 `https://api.openai.com/v1`
 - `SC_AGENT_MODEL`：模型名称
 - `SC_AGENT_TIMEOUT`：接口超时时间，单位秒
-- `SC_AGENT_MAX_STEPS`：智能体最大执行步数
 - `SC_AGENT_INCLUDE_THOUGHTS_IN_CONTEXT`：是否把思考内容写入后续模型上下文，默认 `false`；前端仍会实时展示思考过程
 
 ## 部署运行方案

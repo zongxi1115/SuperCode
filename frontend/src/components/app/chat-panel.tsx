@@ -149,7 +149,7 @@ type ChatPanelProps = {
     type: "commit" | "tag",
     approved: boolean,
   ) => void;
-  onModelChange: (envFile: string) => void;
+  onModelChange: (modelId: string) => void;
   elementAttachments?: ElementAttachment[];
   onRemoveElementAttachment?: (id: string) => void;
 };
@@ -169,6 +169,42 @@ const TOOL_ICONS: Record<string, React.ReactNode> = {
   git_log: <GitBranch className="size-4" />,
   git_tag: <Tag className="size-4" />,
 };
+
+const TOOL_TITLES: Record<string, (args: Record<string, unknown>) => string> = {
+  list_file: () => "正在列出文件",
+  read_file: (args) => {
+    const f = ((args.filename || args.path || args.file_path) as string)?.split(/[\\/]/).pop();
+    return f ? `正在阅读 ${f}` : "正在阅读文件";
+  },
+  write_file: (args) => {
+    const f = ((args.filename || args.path || args.file_path) as string)?.split(/[\\/]/).pop();
+    return f ? `正在创建 ${f}` : "正在创建文件";
+  },
+  apply_patch: (args) => {
+    const f = ((args.filename || args.path || args.file_path) as string)?.split(/[\\/]/).pop();
+    return f ? `正在编辑 ${f}` : "正在编辑文件";
+  },
+  replace_file: (args) => {
+    const f = ((args.filename || args.path || args.file_path) as string)?.split(/[\\/]/).pop();
+    return f ? `正在替换 ${f}` : "正在替换文件";
+  },
+  delete_file: (args) => {
+    const f = ((args.filename || args.path || args.file_path) as string)?.split(/[\\/]/).pop();
+    return f ? `正在删除 ${f}` : "正在删除文件";
+  },
+  execute: () => "正在执行命令",
+  excecute: () => "正在执行命令",
+  terminal_input: () => "正在执行命令",
+  terminal_wait: () => "等待终端",
+  git_commit: () => "正在提交",
+  git_log: () => "正在查看日志",
+  git_tag: () => "正在创建标签",
+};
+
+function getToolTitle(name: string, args: Record<string, unknown>): string {
+  const fn = TOOL_TITLES[name];
+  return fn ? fn(args) : "执行中";
+}
 
 function getToolIcon(name: string) {
   return TOOL_ICONS[name] ?? <FileCodeIcon className="size-4" />;
@@ -295,7 +331,7 @@ function GitCommitPreview({
         <ConfirmationTitle>
           {confirmationMessage ?? `确认提交？`}
         </ConfirmationTitle>
-        <Commit className="mt-2">
+        <Commit className="mt-2" defaultOpen>
           <CommitHeader>
             <CommitAuthor>
               <CommitAuthorAvatar initials="SC" />
@@ -322,11 +358,16 @@ function GitCommitPreview({
               <CommitFiles>
                 {changedFiles.map((rawFile: string, i: number) => {
                   const parsed = parseGitStatus(rawFile);
+                  const fileIcon = getFileIcon(parsed.path.split(/[\\/]/).pop() ?? '');
                   return (
                     <CommitFile key={`${rawFile}-${i}`}>
                       <CommitFileInfo>
                         <CommitFileStatus status={parsed.status} />
-                        <CommitFileIcon />
+                        {fileIcon ? (
+                          <span style={{ color: fileIcon.color }}>{fileIcon.icon}</span>
+                        ) : (
+                          <CommitFileIcon />
+                        )}
                         <CommitFilePath>{parsed.path}</CommitFilePath>
                       </CommitFileInfo>
                       <CommitFileChanges>
@@ -1052,14 +1093,15 @@ const MessageList = memo(function MessageList({
     "output-denied": "已拒绝",
   };
 
-  const renderToolCall = (tc: ToolCallRecord, isLastTool: boolean) => {
+  const renderToolCall = (tc: ToolCallRecord, isLastRunning: boolean) => {
     const statusLabel = statusLabelMap[tc.state] ?? "执行中";
-    const shouldOpen = isLastTool || tc.name.startsWith("git_");
+    const shouldOpen = isLastRunning || tc.name.startsWith("git_");
+    const toolTitle = `${getToolTitle(tc.name, tc.arguments ?? {})} · ${statusLabel}`;
 
     return (
       <Task key={tc.id} defaultOpen={shouldOpen}>
         <TaskTrigger
-          title={`${tc.name} · ${statusLabel}`}
+          title={tc.state === "running" && isLastRunning ? <Shimmer duration={1}>{toolTitle}</Shimmer> : toolTitle}
           icon={getToolIcon(tc.name)}
         />
         <TaskContent>
@@ -1096,21 +1138,24 @@ const MessageList = memo(function MessageList({
                 />
                 {hasToolCalls ? (
                   <div className="space-y-2">
-                    {msg.toolCalls?.map((tc, tci) =>
-                      renderToolCall(
-                        tc,
-                        tci === (msg.toolCalls?.length ?? 0) - 1,
-                      ),
-                    )}
+                    {(() => {
+                      const lastRunningIdx = [...(msg.toolCalls ?? [])].findLastIndex((tc) => tc.state === "running");
+                      return msg.toolCalls?.map((tc, tci) =>
+                        renderToolCall(tc, tci === lastRunningIdx),
+                      );
+                    })()}
                   </div>
                 ) : null}
               </ChainOfThoughtContent>
             </ChainOfThought>
           ) : hasToolCalls ? (
             <div className="space-y-2">
-              {msg.toolCalls?.map((tc, tci) =>
-                renderToolCall(tc, tci === (msg.toolCalls?.length ?? 0) - 1),
-              )}
+              {(() => {
+                const lastRunningIdx = [...(msg.toolCalls ?? [])].findLastIndex((tc) => tc.state === "running");
+                return msg.toolCalls?.map((tc, tci) =>
+                  renderToolCall(tc, tci === lastRunningIdx),
+                );
+              })()}
             </div>
           ) : null}
         </>
@@ -1119,9 +1164,12 @@ const MessageList = memo(function MessageList({
 
     return (msg.toolCalls?.length ?? 0) > 0 ? (
       <div className="space-y-2">
-        {msg.toolCalls?.map((tc, tci) =>
-          renderToolCall(tc, tci === (msg.toolCalls?.length ?? 0) - 1),
-        )}
+        {(() => {
+          const lastRunningIdx = [...(msg.toolCalls ?? [])].findLastIndex((tc) => tc.state === "running");
+          return msg.toolCalls?.map((tc, tci) =>
+            renderToolCall(tc, tci === lastRunningIdx),
+          );
+        })()}
       </div>
     ) : null;
   };
@@ -1176,15 +1224,14 @@ const MessageList = memo(function MessageList({
       }
 
       if (group.type === "tools") {
-        const lastToolIdx = [...group.blocks]
-          .map((b, i) => (b.type === "tool_call" ? i : -1))
-          .filter((i) => i >= 0)
-          .pop();
+        const lastRunningIdx = group.blocks.findLastIndex(
+          (b) => b.type === "tool_call" && b.toolCall.state === "running",
+        );
         return (
           <div key={`tools-${gi}`} className="space-y-2">
             {group.blocks.map((block, bi) => {
               if (block.type === "tool_call") {
-                return renderToolCall(block.toolCall, bi === lastToolIdx);
+                return renderToolCall(block.toolCall, bi === lastRunningIdx);
               }
               return null;
             })}
@@ -1194,21 +1241,37 @@ const MessageList = memo(function MessageList({
 
       const hasContent = group.blocks.length > 0;
       const isActive = isLast && isLoading;
+      const lastRunningTool = isActive
+        ? [...group.blocks]
+            .reverse()
+            .find(
+              (b) =>
+                b.type === "tool_call" &&
+                b.toolCall.state === "running",
+            )
+        : undefined;
+      const activeLabel = lastRunningTool
+        ? getToolTitle(
+            lastRunningTool.toolCall.name,
+            lastRunningTool.toolCall.arguments ?? {},
+          )
+        : isActive
+          ? "正在思考..."
+          : "思考过程";
       return (
         <ChainOfThought key={`cot-${gi}`} defaultOpen={isActive || hasContent}>
           <ChainOfThoughtHeader>
-            {isActive && !hasContent ? (
-              <Shimmer duration={1}>正在思考...</Shimmer>
+            {isActive ? (
+              <Shimmer duration={1}>{activeLabel}</Shimmer>
             ) : (
               <span>思考过程</span>
             )}
           </ChainOfThoughtHeader>
           <ChainOfThoughtContent>
             {(() => {
-              const lastToolIdx = [...group.blocks]
-                .map((b, i) => (b.type === "tool_call" ? i : -1))
-                .filter((i) => i >= 0)
-                .pop();
+              const lastRunningIdx = group.blocks.findLastIndex(
+                (b) => b.type === "tool_call" && b.toolCall.state === "running",
+              );
               return group.blocks.map((block, bi) => {
                 if (block.type === "thinking") {
                   return block.text.trim() ? (
@@ -1222,7 +1285,7 @@ const MessageList = memo(function MessageList({
                 if (block.type === "tool_call") {
                   return (
                     <div key={`tool-${gi}-${bi}`}>
-                      {renderToolCall(block.toolCall, bi === lastToolIdx)}
+                      {renderToolCall(block.toolCall, bi === lastRunningIdx)}
                     </div>
                   );
                 }
@@ -1514,7 +1577,7 @@ export function ChatPanel({
                           provider={selectedModel?.provider ?? "openrouter"}
                         />
                         <ModelSelectorName>
-                          {selectedModel?.name ?? "选择模型"}
+                          {selectedModel?.label ?? selectedModel?.name ?? "选择模型"}
                         </ModelSelectorName>
                       </Button>
                     </ModelSelectorTrigger>
@@ -1533,7 +1596,7 @@ export function ChatPanel({
                               className="gap-2"
                             >
                               <ModelSelectorLogo provider={m.provider} />
-                              <ModelSelectorName>{m.name}</ModelSelectorName>
+                              <ModelSelectorName>{m.label ?? m.name}</ModelSelectorName>
                             </ModelSelectorItem>
                           ))}
                         </ModelSelectorGroup>

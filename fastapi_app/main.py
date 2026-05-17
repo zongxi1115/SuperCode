@@ -26,9 +26,19 @@ try:
 except ImportError:  # pragma: no cover - optional dependency
     PtyProcess = None
 
-from agent import AgentEvent, AgentLLMConfig, ChatSession, CodingAgent, ConversationMessage, OpenAICompatibleClient
+from agent import AgentEvent, ChatSession, CodingAgent, ConversationMessage, OpenAICompatibleClient
 from coding_agent import CodingPromptBrain, InteractiveCommandSession, build_coding_tools
 from coding_agent.tools import delete_file_in_workspace, execute_git_commit, execute_git_tag, init_git_repo
+from fastapi_app.model_config_store import (
+    build_agent_config,
+    config_store_path,
+    discover_provider_models,
+    list_model_options,
+    load_ui_model_providers,
+    resolve_model_option as resolve_stored_model_option,
+    save_ui_model_providers,
+    scan_env_model_sources,
+)
 from fastapi_app.session_store import PersistedSessionState, SQLiteSessionStateAdapter
 from fastapi_app.ui_message_stream import UIMessageStreamAdapter, sse_data
 
@@ -68,6 +78,7 @@ FILE_TREE_MAX_ENTRIES_PER_DIR = 200
 class CreateSessionResponse(BaseModel):
     sessionId: str
     model: str
+    modelId: str | None = None
     mode: str
     isGenerating: bool
     startupError: str | None
@@ -120,6 +131,19 @@ class CreateSessionRequest(BaseModel):
     workspace: str | None = None
     model: str | None = None
     env_file: str | None = None
+
+
+class UIModelProviderPayload(BaseModel):
+    id: str | None = None
+    name: str
+    baseUrl: str
+    apiKey: str
+    models: list[str] = Field(default_factory=list)
+    provider: str | None = None
+
+
+class ModelConfigPayload(BaseModel):
+    providers: list[UIModelProviderPayload] = Field(default_factory=list)
 
 
 class SessionHistoryItem(BaseModel):
@@ -478,6 +502,7 @@ class UISession:
         return CreateSessionResponse(
             sessionId=self.session_id,
             model=self.model,
+            modelId=resolve_model_reference_id(self.model, self.env_file),
             mode=self.mode,
             isGenerating=self.is_generating,
             startupError=self.startup_error,
@@ -1000,7 +1025,45 @@ async def get_workspaces() -> JSONResponse:
 
 @app.get("/api/models")
 async def get_models() -> JSONResponse:
-    return JSONResponse({"models": scan_env_models()})
+    return JSONResponse({"models": list_model_options(ROOT)})
+
+
+@app.get("/api/model-configs")
+async def get_model_configs() -> JSONResponse:
+    return JSONResponse(
+        {
+            "providers": load_ui_model_providers(ROOT),
+            "envConfigs": scan_env_model_sources(ROOT),
+            "configPath": str(config_store_path(ROOT)),
+        }
+    )
+
+
+@app.put("/api/model-configs")
+async def update_model_configs(payload: ModelConfigPayload) -> JSONResponse:
+    providers = save_ui_model_providers(
+        ROOT,
+        [provider.model_dump(exclude_none=True) for provider in payload.providers],
+    )
+    return JSONResponse(
+        {
+            "providers": providers,
+            "envConfigs": scan_env_model_sources(ROOT),
+            "configPath": str(config_store_path(ROOT)),
+        }
+    )
+
+
+@app.post("/api/model-configs/discover-models")
+async def discover_models(payload: UIModelProviderPayload) -> JSONResponse:
+    try:
+        models = await asyncio.to_thread(
+            discover_provider_models,
+            payload.model_dump(exclude_none=True),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse({"models": models})
 
 
 class SwitchModelRequest(BaseModel):
@@ -1012,10 +1075,10 @@ class SwitchModelRequest(BaseModel):
 async def switch_session_model(session_id: str, request: SwitchModelRequest) -> JSONResponse:
     session = require_session(session_id)
     model_option = resolve_model_option(request.model, request.env_file)
-    env_file_name = model_option["envFile"]
+    model_ref = model_option["envFile"]
 
     try:
-        config = AgentLLMConfig.from_env(ROOT / env_file_name)
+        config, normalized_model_ref = build_agent_config(ROOT, model_ref)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1024,7 +1087,6 @@ async def switch_session_model(session_id: str, request: SwitchModelRequest) -> 
         brain=CodingPromptBrain(client, workspace=session.workspace),
         tools=build_coding_tools(),
         workspace=resolve_workspace_path(session.workspace),
-        max_steps=config.max_steps,
         tool_context_metadata={
             "include_thoughts_in_context": config.include_thoughts_in_context,
         },
@@ -1039,15 +1101,17 @@ async def switch_session_model(session_id: str, request: SwitchModelRequest) -> 
             session_id=session.session_id,
             interactive_command_session=interactive_command_session,
             cancel_event=session.cancel_event,
+            include_thoughts_in_context=config.include_thoughts_in_context,
         )
     session.model = config.model
-    session.env_file = env_file_name
+    session.env_file = normalized_model_ref
     session.mode = "agent"
     session.startup_error = None
     session.touch()
 
     return JSONResponse({
         "model": session.model,
+        "modelId": resolve_model_reference_id(session.model, session.env_file),
         "mode": session.mode,
         "envFile": session.env_file,
         "previewUrl": session.preview_url,
@@ -1986,20 +2050,19 @@ def require_session(session_id: str) -> UISession:
 
 
 def resolve_model_option(model_name: str | None, env_file: str | None = None) -> dict[str, str]:
-    models = scan_env_models()
-    if model_name:
-        target = next((model for model in models if model["id"] == model_name), None)
-        if target is None:
-            raise HTTPException(status_code=400, detail="未找到对应的模型配置")
-        return target
+    try:
+        return resolve_stored_model_option(ROOT, model_name, env_file)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    if env_file:
-        target = next((model for model in models if model["envFile"] == env_file), None)
-        if target is None:
-            raise HTTPException(status_code=400, detail="未找到对应的模型配置")
-        return target
 
-    raise HTTPException(status_code=400, detail="必须提供 model。")
+def resolve_model_reference_id(model_name: str | None, env_file: str | None = None) -> str | None:
+    try:
+        if env_file:
+            return resolve_model_option(None, env_file)["id"]
+        return resolve_model_option(model_name, None)["id"]
+    except (HTTPException, KeyError):
+        return env_file or model_name
 
 
 def resolve_requested_env_file(model_name: str | None, env_file: str | None = None) -> str | None:
@@ -2027,19 +2090,17 @@ def attach_agent_runtime_metadata(
 
 def build_chat_session(workspace: str, env_file: str | None = None) -> tuple[ChatSession | None, str, str | None, str | None]:
     try:
-        env_path = ROOT / (env_file or ".env")
-        config = AgentLLMConfig.from_env(env_path)
+        config, normalized_model_ref = build_agent_config(ROOT, env_file)
         client = OpenAICompatibleClient(config)
         agent = CodingAgent(
             brain=CodingPromptBrain(client, workspace=workspace),
             tools=build_coding_tools(),
             workspace=resolve_workspace_path(workspace),
-            max_steps=config.max_steps,
             tool_context_metadata={
                 "include_thoughts_in_context": config.include_thoughts_in_context,
             },
         )
-        return ChatSession(agent=agent), config.model, None, env_file or ".env"
+        return ChatSession(agent=agent), config.model, None, normalized_model_ref
     except Exception as exc:  # noqa: BLE001 - 需要把启动失败原因回传给前端
         return None, "Demo", str(exc), None
 

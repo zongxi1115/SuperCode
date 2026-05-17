@@ -1,6 +1,7 @@
 import {
   WebPreview,
   WebPreviewBody,
+  WebPreviewConsole,
   WebPreviewNavigation,
   WebPreviewNavigationButton,
   WebPreviewUrl,
@@ -8,7 +9,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { AnimatePresence, motion } from 'motion/react';
 import { PanelRightOpen, PanelRightClose, RefreshCw, ExternalLink, MousePointerClick, X } from 'lucide-react';
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 type WebPreviewPanelProps = {
   isOpen: boolean;
@@ -16,6 +17,12 @@ type WebPreviewPanelProps = {
   url: string;
   onUrlChange: (url: string) => void;
   onSelectElement?: (html: string, selector: string) => void;
+};
+
+type PreviewConsoleLog = {
+  level: 'log' | 'warn' | 'error';
+  message: string;
+  timestamp: Date;
 };
 
 function getElementSelector(el: HTMLElement): string {
@@ -57,12 +64,30 @@ export function WebPreviewPanel({ isOpen, onToggle, url, onUrlChange, onSelectEl
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [isSelectMode, setIsSelectMode] = useState(false);
   const cleanupRef = useRef<(() => void) | null>(null);
+  const detachConsoleRef = useRef<(() => void) | null>(null);
+  const [consoleLogs, setConsoleLogs] = useState<PreviewConsoleLog[]>([]);
+
+  const pushConsoleLog = useCallback((level: PreviewConsoleLog['level'], message: string) => {
+    setConsoleLogs((prev) => [
+      ...prev.slice(-199),
+      {
+        level,
+        message,
+        timestamp: new Date(),
+      },
+    ]);
+  }, []);
+
+  const resetConsoleLogs = useCallback(() => {
+    setConsoleLogs([]);
+  }, []);
 
   const handleRefresh = useCallback(() => {
     if (iframeRef.current) {
+      resetConsoleLogs();
       iframeRef.current.src = iframeRef.current.src;
     }
-  }, []);
+  }, [resetConsoleLogs]);
 
   const handleOpenInNewTab = useCallback(() => {
     if (url) {
@@ -77,6 +102,113 @@ export function WebPreviewPanel({ isOpen, onToggle, url, onUrlChange, onSelectEl
     doc.querySelectorAll('.__highlight-selected').forEach((el) => el.classList.remove('__highlight-selected'));
     cleanupRef.current?.();
     cleanupRef.current = null;
+  }, []);
+
+  const attachConsoleCapture = useCallback(() => {
+    detachConsoleRef.current?.();
+    detachConsoleRef.current = null;
+
+    const iframe = iframeRef.current;
+    if (!iframe) {
+      return;
+    }
+
+    try {
+      const win = iframe.contentWindow;
+      if (!win) {
+        return;
+      }
+
+      const originalConsole = {
+        log: win.console.log,
+        warn: win.console.warn,
+        error: win.console.error,
+      };
+
+      const stringifyArgs = (args: unknown[]) =>
+        args
+          .map((arg) => {
+            if (typeof arg === 'string') return arg;
+            try {
+              return JSON.stringify(arg);
+            } catch {
+              return String(arg);
+            }
+          })
+          .join(' ');
+
+      win.console.log = (...args: unknown[]) => {
+        pushConsoleLog('log', stringifyArgs(args));
+        originalConsole.log.apply(win.console, args);
+      };
+      win.console.warn = (...args: unknown[]) => {
+        pushConsoleLog('warn', stringifyArgs(args));
+        originalConsole.warn.apply(win.console, args);
+      };
+      win.console.error = (...args: unknown[]) => {
+        pushConsoleLog('error', stringifyArgs(args));
+        originalConsole.error.apply(win.console, args);
+      };
+
+      const handleError = (event: ErrorEvent) => {
+        pushConsoleLog('error', event.message || 'Unknown error');
+      };
+      const handleRejection = (event: PromiseRejectionEvent) => {
+        const reason = event.reason;
+        const message =
+          typeof reason === 'string'
+            ? reason
+            : reason instanceof Error
+              ? reason.message
+              : (() => {
+                  try {
+                    return JSON.stringify(reason);
+                  } catch {
+                    return String(reason);
+                  }
+                })();
+        pushConsoleLog('error', `Unhandled rejection: ${message}`);
+      };
+
+      win.addEventListener('error', handleError);
+      win.addEventListener('unhandledrejection', handleRejection);
+
+      detachConsoleRef.current = () => {
+        win.console.log = originalConsole.log;
+        win.console.warn = originalConsole.warn;
+        win.console.error = originalConsole.error;
+        win.removeEventListener('error', handleError);
+        win.removeEventListener('unhandledrejection', handleRejection);
+      };
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : '无法访问预览页控制台';
+      pushConsoleLog('warn', `当前预览可能是跨域页面，无法捕获控制台输出：${message}`);
+    }
+  }, [pushConsoleLog]);
+
+  useEffect(() => {
+    const iframe = iframeRef.current;
+    if (!iframe || !isOpen) {
+      return;
+    }
+
+    const handleLoad = () => {
+      resetConsoleLogs();
+      attachConsoleCapture();
+    };
+
+    iframe.addEventListener('load', handleLoad);
+    return () => {
+      iframe.removeEventListener('load', handleLoad);
+    };
+  }, [attachConsoleCapture, isOpen, resetConsoleLogs, url]);
+
+  useEffect(() => {
+    return () => {
+      detachConsoleRef.current?.();
+      detachConsoleRef.current = null;
+    };
   }, []);
 
   const handleSelectElement = useCallback(() => {
@@ -178,6 +310,7 @@ export function WebPreviewPanel({ isOpen, onToggle, url, onUrlChange, onSelectEl
                 </WebPreviewNavigationButton>
               </WebPreviewNavigation>
               <WebPreviewBody ref={iframeRef} className="bg-white" />
+              <WebPreviewConsole logs={consoleLogs} />
             </WebPreview>
           </motion.div>
         )}

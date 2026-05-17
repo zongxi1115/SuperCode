@@ -5,6 +5,7 @@ import { ResizableHandle } from '@/components/app/resizable-handle';
 import { Sidebar } from '@/components/app/sidebar';
 import { WebPreviewPanel } from '@/components/app/web-preview-panel';
 import { TerminalPanel } from '@/components/app/terminal-panel';
+import { ModelConfigDialog } from '@/components/app/model-config-dialog';
 import { WorkspacePicker } from '@/components/app/workspace-picker';
 import type {
   ChatMessage,
@@ -12,12 +13,14 @@ import type {
   DirectoryNode,
   FileTreeNode,
   ManagedProcessPayload,
+  ModelConfigPayload,
   ModelOption,
   RecentProject,
   SessionContextPayload,
   SessionHistoryItem,
   SessionPayload,
   TerminalSnapshotPayload,
+  UIModelProvider,
   WorkspaceOption,
 } from '@/lib/app-types';
 import {
@@ -33,7 +36,7 @@ import {
   workspaceOptionsToDirectoryNodes,
 } from '@/lib/app-utils';
 
-import { PanelRightOpen, PanelRightClose } from 'lucide-react';
+import { PanelRightOpen, PanelRightClose, Settings2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 const DEFAULT_WEB_PREVIEW_URL = 'http://localhost:5173';
@@ -50,6 +53,32 @@ function getPreviewUrlFromToolPayload(payload: { preview_url?: unknown; output?:
     payload.output.resolved_url.trim()
   ) {
     return payload.output.resolved_url;
+  }
+  return null;
+}
+
+function resolveSelectedModelId(
+  data: Pick<SessionPayload, 'model' | 'modelId' | 'envFile'>,
+  modelOptions: ModelOption[],
+) {
+  const uniqueRef = data.modelId ?? data.envFile ?? null;
+  if (uniqueRef) {
+    const exactMatch = modelOptions.find(
+      (option) => option.id === uniqueRef || option.envFile === uniqueRef,
+    );
+    return exactMatch?.id ?? uniqueRef;
+  }
+
+  const modelName = data.model ?? null;
+  if (!modelName) {
+    return null;
+  }
+
+  const nameMatches = modelOptions.filter(
+    (option) => option.name === modelName || option.model === modelName,
+  );
+  if (nameMatches.length === 1) {
+    return nameMatches[0].id;
   }
   return null;
 }
@@ -93,6 +122,10 @@ export default function App() {
   const [recentProjects, setRecentProjects] = useState<RecentProject[]>(() => getRecentProjects());
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
+  const [isModelConfigOpen, setIsModelConfigOpen] = useState(false);
+  const [visualModelProviders, setVisualModelProviders] = useState<UIModelProvider[]>([]);
+  const [envModelConfigs, setEnvModelConfigs] = useState<ModelOption[]>([]);
+  const [modelConfigPath, setModelConfigPath] = useState<string | null>(null);
   const activeRequestRef = useRef<AbortController | null>(null);
   const activeStreamSessionIdRef = useRef<string | null>(null);
   const currentSessionIdRef = useRef<string | null>(null);
@@ -229,6 +262,29 @@ export default function App() {
     return lastSession?.workspace ?? '';
   });
 
+  const loadModels = useCallback(async () => {
+    const res = await fetch('http://localhost:8000/api/models');
+    const data: { models: ModelOption[] } = await res.json();
+    const nextOptions = data.models ?? [];
+    setModelOptions(nextOptions);
+    setSelectedModelId((prev) => {
+      if (prev && nextOptions.some((option) => option.id === prev)) {
+        return prev;
+      }
+      return nextOptions[0]?.id ?? prev ?? null;
+    });
+    return nextOptions;
+  }, []);
+
+  const loadModelConfigs = useCallback(async () => {
+    const res = await fetch('http://localhost:8000/api/model-configs');
+    const data: ModelConfigPayload = await res.json();
+    setVisualModelProviders(data.providers ?? []);
+    setEnvModelConfigs(data.envConfigs ?? []);
+    setModelConfigPath(data.configPath ?? null);
+    return data;
+  }, []);
+
   useEffect(() => {
     fetch('http://localhost:8000/api/workspaces')
       .then((res) => res.json())
@@ -244,7 +300,23 @@ export default function App() {
     fetch('http://localhost:8000/api/models')
       .then((res) => res.json())
       .then((data: { models: ModelOption[] }) => {
-        setModelOptions(data.models ?? []);
+        const nextOptions = data.models ?? [];
+        setModelOptions(nextOptions);
+        setSelectedModelId((prev) => {
+          if (prev && nextOptions.some((option) => option.id === prev)) {
+            return prev;
+          }
+          return nextOptions[0]?.id ?? prev ?? null;
+        });
+      })
+      .catch(console.error);
+
+    fetch('http://localhost:8000/api/model-configs')
+      .then((res) => res.json())
+      .then((data: ModelConfigPayload) => {
+        setVisualModelProviders(data.providers ?? []);
+        setEnvModelConfigs(data.envConfigs ?? []);
+        setModelConfigPath(data.configPath ?? null);
       })
       .catch(console.error);
   }, [initialWorkspace]);
@@ -252,7 +324,7 @@ export default function App() {
   const syncVisibleSessionSnapshot = useCallback((data: SessionPayload) => {
     setBackendMode(data.mode);
     setStartupError(data.startupError ?? null);
-    setSelectedModelId(data.model ?? null);
+    setSelectedModelId((prev) => resolveSelectedModelId(data, modelOptions) ?? prev ?? null);
     setMessages(hydrateMessages(data.messages ?? [], data.thoughts, data.toolCalls));
     setFileTree(data.fileTree ?? []);
     setTerminalOutput(data.terminalOutput ?? '');
@@ -260,7 +332,7 @@ export default function App() {
     setSelectedFilePath(data.selectedFilePath ?? '');
     setSelectedFileContent(data.selectedFileContent ?? '');
     setIsLoading(Boolean(data.isGenerating));
-  }, []);
+  }, [modelOptions]);
 
   const applySessionPayload = useCallback((data: SessionPayload) => {
     setSessionId(data.sessionId);
@@ -666,7 +738,7 @@ export default function App() {
           throw new Error(errText || '切换模型失败');
         }
         const data = await res.json();
-        setSelectedModelId(data.model ?? modelId);
+        setSelectedModelId((prev) => resolveSelectedModelId(data, modelOptions) ?? prev ?? modelId);
         setBackendMode(data.mode ?? 'agent');
         setStartupError(null);
         setSessionError(null);
@@ -685,12 +757,44 @@ export default function App() {
         setSessionError(error instanceof Error ? error.message : '切换模型失败');
       }
     },
-    [sessionId],
+    [modelOptions, sessionId],
   );
 
   const handleNewSession = useCallback(() => {
     void createSessionWithWorkspace(selectedWorkspace);
   }, [createSessionWithWorkspace, selectedWorkspace]);
+
+  const saveModelProviders = useCallback(
+    async (providers: UIModelProvider[]) => {
+      const res = await fetch('http://localhost:8000/api/model-configs', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ providers }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(String(data.detail ?? '保存模型配置失败'));
+      }
+      setVisualModelProviders(data.providers ?? []);
+      setEnvModelConfigs(data.envConfigs ?? []);
+      setModelConfigPath(data.configPath ?? null);
+      await loadModels();
+    },
+    [loadModels],
+  );
+
+  const discoverProviderModels = useCallback(async (provider: UIModelProvider) => {
+    const res = await fetch('http://localhost:8000/api/model-configs/discover-models', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(provider),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(String(data.detail ?? '拉取模型列表失败'));
+    }
+    return Array.isArray(data.models) ? (data.models as string[]) : [];
+  }, []);
 
   const handleDeleteHistory = useCallback(
     async (targetSessionId: string) => {
@@ -1512,6 +1616,19 @@ export default function App() {
         </div>
         <div className="flex-1" />
         <div className="text-[11px] text-muted-foreground truncate max-w-[300px]" title={selectedWorkspace}>{selectedWorkspace}</div>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 gap-2 rounded-full px-3 text-xs"
+          onClick={() => {
+            void loadModelConfigs().catch(console.error);
+            setIsModelConfigOpen(true);
+          }}
+          title="模型与供应商设置"
+        >
+          <Settings2 className="w-3.5 h-3.5" />
+          设置
+        </Button>
         <Button variant="ghost" size="icon" onClick={toggleRightPanel} className="h-7 w-7 ml-2" title={isRightPanelCollapsed ? '展开右侧面板' : '收起右侧面板'}>
           {isRightPanelCollapsed ? <PanelRightOpen className="w-4 h-4" /> : <PanelRightClose className="w-4 h-4" />}
         </Button>
@@ -1580,7 +1697,7 @@ export default function App() {
           sessionId={sessionId}
           isWebPreviewOpen={isWebPreviewOpen}
           onToggleWebPreview={() => setIsWebPreviewOpen((prev) => !prev)}
-          onPreviewHtml={(content, fileName) => {
+          onPreviewHtml={(content) => {
             const blob = new Blob([content], { type: 'text/html' });
             const blobUrl = URL.createObjectURL(blob);
             setWebPreviewUrl(blobUrl);
@@ -1622,6 +1739,17 @@ export default function App() {
       </>
       )}
       </div>
+      {isModelConfigOpen ? (
+        <ModelConfigDialog
+          open={isModelConfigOpen}
+          onOpenChange={setIsModelConfigOpen}
+          providers={visualModelProviders}
+          envConfigs={envModelConfigs}
+          configPath={modelConfigPath}
+          onSaveProviders={saveModelProviders}
+          onDiscoverModels={discoverProviderModels}
+        />
+      ) : null}
     </div>
   );
 }

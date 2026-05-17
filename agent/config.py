@@ -17,7 +17,6 @@ class AgentLLMConfig:
     base_url: str
     model: str
     timeout: int = 60
-    max_steps: int = 8
     max_retries: int = 2
     include_thoughts_in_context: bool = False
 
@@ -26,12 +25,16 @@ class AgentLLMConfig:
         """从 `.env` 和系统环境变量中读取配置。"""
 
         env_values = read_dotenv_values(env_path)
+        return cls.from_mapping(env_values)
+
+    @classmethod
+    def from_mapping(cls, env_values: dict[str, str]) -> "AgentLLMConfig":
+        """从一组键值映射中读取配置。"""
 
         api_key = env_values.get("SC_AGENT_API_KEY", os.getenv("SC_AGENT_API_KEY", "")).strip()
         base_url = env_values.get("SC_AGENT_BASE_URL", os.getenv("SC_AGENT_BASE_URL", "")).strip()
         model = env_values.get("SC_AGENT_MODEL", os.getenv("SC_AGENT_MODEL", "")).strip()
         timeout = int(env_values.get("SC_AGENT_TIMEOUT", os.getenv("SC_AGENT_TIMEOUT", "60")).strip())
-        max_steps = int(env_values.get("SC_AGENT_MAX_STEPS", os.getenv("SC_AGENT_MAX_STEPS", "8")).strip())
         max_retries = int(env_values.get("SC_AGENT_MAX_RETRIES", os.getenv("SC_AGENT_MAX_RETRIES", "2")).strip())
         include_thoughts_in_context = _parse_bool(
             env_values.get(
@@ -67,7 +70,6 @@ class AgentLLMConfig:
             base_url=base_url.rstrip("/"),
             model=model,
             timeout=timeout,
-            max_steps=max_steps,
             max_retries=max(0, max_retries),
             include_thoughts_in_context=include_thoughts_in_context,
         )

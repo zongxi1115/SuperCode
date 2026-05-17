@@ -24,11 +24,18 @@ class SwitchSessionModelTests(unittest.IsolatedAsyncioTestCase):
         self.interactive_session.close()
 
     async def test_switch_session_model_preserves_runtime_metadata(self) -> None:
-        dummy_config = type("DummyConfig", (), {"model": "gpt-test", "max_steps": 6})()
+        dummy_config = type(
+            "DummyConfig",
+            (),
+            {
+                "model": "gpt-test",
+                "include_thoughts_in_context": False,
+            },
+        )()
 
         with (
-            patch.object(api_main, "resolve_model_option", return_value={"envFile": ".env"}),
-            patch.object(api_main.AgentLLMConfig, "from_env", return_value=dummy_config),
+            patch.object(api_main, "resolve_model_option", return_value={"envFile": "ui::provider-1::gpt-test"}),
+            patch.object(api_main, "build_agent_config", return_value=(dummy_config, "ui::provider-1::gpt-test")),
             patch.object(api_main, "OpenAICompatibleClient", return_value=object()),
             patch.object(api_main, "CodingPromptBrain", return_value=object()),
         ):
