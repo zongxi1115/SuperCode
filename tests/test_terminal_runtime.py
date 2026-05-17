@@ -81,6 +81,8 @@ class TerminalRuntimeTests(unittest.TestCase):
                 self.assertEqual(runtime.pty_process.writes[:2], ["\n", "Get-Location\n"])
                 self.assertEqual(runtime.pty_process.controls, ["c"])
                 self.assertIn("Set-Location -LiteralPath", _FakePtyProcess.last_command or "")
+                self.assertIn("$env:PYTHONIOENCODING = 'utf-8';", _FakePtyProcess.last_command or "")
+                self.assertIn("$env:PYTHONUTF8 = '1';", _FakePtyProcess.last_command or "")
             finally:
                 runtime.close()
 

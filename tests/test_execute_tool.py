@@ -50,6 +50,12 @@ class ExecuteToolTests(unittest.TestCase):
         self.assertIn("exit_code: 0", output)
         self.assertIn("stdout:\nok", output)
         self.assertEqual(process.communicate.call_args.kwargs["timeout"], 7)
+        invoked_command = mock_popen.call_args.args[0]
+        self.assertEqual(invoked_command[:3], ["powershell", "-NoProfile", "-Command"])
+        self.assertIn("chcp 65001 > $null;", invoked_command[3])
+        self.assertIn("$env:PYTHONIOENCODING = 'utf-8';", invoked_command[3])
+        self.assertIn("$env:PYTHONUTF8 = '1';", invoked_command[3])
+        self.assertIn("Get-Date", invoked_command[3])
 
     def test_execute_kills_process_tree_on_timeout(self) -> None:
         tool = ExecuteTool()
@@ -108,6 +114,20 @@ class ExecuteToolTests(unittest.TestCase):
 
         self.assertEqual(second_result["status"], "completed")
         self.assertIn("Hello Alice", str(second_result["full_output"]))
+
+    def test_interactive_execute_bootstraps_powershell_utf8(self) -> None:
+        session = InteractiveCommandSession(workspace=self.workspace)
+
+        with patch("coding_agent.tools.subprocess.Popen") as mock_popen:
+            process = mock_popen.return_value
+            session._spawn_process("Get-Date")
+
+        invoked_command = mock_popen.call_args.args[0]
+        self.assertEqual(invoked_command[:3], ["powershell", "-NoProfile", "-Command"])
+        self.assertIn("chcp 65001 > $null;", invoked_command[3])
+        self.assertIn("$env:PYTHONIOENCODING = 'utf-8';", invoked_command[3])
+        self.assertIn("$env:PYTHONUTF8 = '1';", invoked_command[3])
+        self.assertIn("Get-Date", invoked_command[3])
 
     def test_terminal_input_requires_active_command(self) -> None:
         self.interactive_session = InteractiveCommandSession(workspace=self.workspace)

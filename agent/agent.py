@@ -23,7 +23,7 @@ class CodingAgent:
         brain: AgentBrain,
         tools: list[BaseTool],
         workspace: str | Path = ".",
-        max_steps: int = 8,
+        max_steps: int | None = None,
         tool_context_metadata: dict[str, Any] | None = None,
     ) -> None:
         """初始化智能体。
@@ -32,7 +32,7 @@ class CodingAgent:
         - `brain`：负责决定下一步动作的对象
         - `tools`：可供调用的工具列表
         - `workspace`：工具默认操作的工作目录
-        - `max_steps`：最大执行步数，避免死循环
+        - `max_steps`：保留的兼容参数，当前不再限制执行步数
         """
 
         self.brain = brain
@@ -97,7 +97,8 @@ class CodingAgent:
             ),
         )
 
-        for index in range(1, self.max_steps + 1):
+        index = 1
+        while True:
             if self._is_cancelled(context):
                 return self._build_cancelled_response(
                     state=state,
@@ -346,40 +347,7 @@ class CodingAgent:
                     step_index=index,
                     on_event=on_event,
                 )
-
-        final_output = f"任务在 {self.max_steps} 步内未完成，请调整 brain 或增大 max_steps。"
-        step_record = StepRecord(
-            turn_index=turn_index,
-            index=self.max_steps + 1,
-            thought="已达到最大步数限制，停止执行。",
-            final_answer=final_output,
-        )
-        steps.append(step_record)
-        history_steps.append(step_record)
-        response = AgentResponse(
-            task=state.current_input,
-            final_output=final_output,
-            steps=steps,
-        )
-        self._emit_event(
-            on_event,
-            AgentEvent(
-                type="limit_reached",
-                step_index=self.max_steps + 1,
-                message="已达到最大步数限制。",
-                final_answer=final_output,
-            ),
-        )
-        self._emit_event(
-            on_event,
-            AgentEvent(
-                type="turn_finished",
-                step_index=self.max_steps + 1,
-                message="本轮处理结束，但未在限制步数内完成。",
-                final_answer=response.final_output,
-            ),
-        )
-        return response
+            index += 1
 
     def _execute_tool(self, tool_call: ToolCall, context: ToolContext) -> ToolResult:
         """执行单个工具调用，并把异常包装成统一结果。"""

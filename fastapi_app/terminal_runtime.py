@@ -52,6 +52,8 @@ class TerminalRuntimeBase:
                     "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false); "
                     "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
                     "$OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+                    "$env:PYTHONIOENCODING = 'utf-8'; "
+                    "$env:PYTHONUTF8 = '1'; "
                     "chcp 65001 > $null"
                 ),
             ],
@@ -100,6 +102,8 @@ class TerminalRuntimeBase:
             "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false); "
             "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
             "$OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+            "$env:PYTHONIOENCODING = 'utf-8'; "
+            "$env:PYTHONUTF8 = '1'; "
             "chcp 65001 > $null; "
             f"Set-Location -LiteralPath '{escaped_workspace}'"
         )

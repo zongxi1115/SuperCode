@@ -37,6 +37,18 @@ APPLY_PATCH_UPDATE_PREFIX = "*** Update File: "
 APPLY_PATCH_EOF_MARKER = "*** End of File"
 
 
+def _build_powershell_utf8_command(command: str) -> list[str]:
+    bootstrap = (
+        "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false); "
+        "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+        "$OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+        "$env:PYTHONIOENCODING = 'utf-8'; "
+        "$env:PYTHONUTF8 = '1'; "
+        "chcp 65001 > $null; "
+    )
+    return ["powershell", "-NoProfile", "-Command", f"{bootstrap}{command}"]
+
+
 def _parse_bool_argument(value: object) -> bool:
     if isinstance(value, bool):
         return value
@@ -120,7 +132,7 @@ def _query_process_table() -> list[dict[str, Any]]:
         )
         try:
             completed = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", command],
+                _build_powershell_utf8_command(command),
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -465,12 +477,7 @@ class InteractiveCommandSession:
 
     def _spawn_process(self, command: str) -> subprocess.Popen[str]:
         return subprocess.Popen(
-            [
-                "powershell",
-                "-NoProfile",
-                "-Command",
-                command,
-            ],
+            _build_powershell_utf8_command(command),
             cwd=self.workspace,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -1247,17 +1254,13 @@ class ExecuteTool(CodingBaseTool):
         workspace: Path,
     ) -> str:
         process = subprocess.Popen(
-            [
-                "powershell",
-                "-NoProfile",
-                "-Command",
-                command,
-            ],
+            _build_powershell_utf8_command(command),
             cwd=workspace,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
+            errors="replace",
         )
 
         try:

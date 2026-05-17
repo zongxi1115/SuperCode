@@ -127,6 +127,17 @@ class _ConfirmationTool(BaseTool):
         }
 
 
+class _NoopTool(BaseTool):
+    name = "git_commit"
+    description = "普通测试工具"
+
+    def run(self, arguments, context):  # noqa: ANN001
+        return {
+            "ok": True,
+            "arguments": arguments,
+        }
+
+
 class _StopAfterConfirmationBrain:
     def __init__(self) -> None:
         self.calls = 0
@@ -145,6 +156,25 @@ class _StopAfterConfirmationBrain:
         )
 
 
+class _DelayedFinishBrain:
+    def __init__(self, final_on_call: int) -> None:
+        self.calls = 0
+        self.final_on_call = final_on_call
+
+    def decide(self, state, tool_definitions, on_stream=None):  # noqa: ANN001
+        self.calls += 1
+        if self.calls >= self.final_on_call:
+            return BrainDecision.finish(
+                thought="步数足够了，直接收尾",
+                final_answer="done",
+            )
+        return BrainDecision.call_tool(
+            thought=f"继续第 {self.calls} 次占位调用",
+            tool_name="git_commit",
+            tool_arguments={"message": f"round-{self.calls}"},
+        )
+
+
 class HumanInLoopPauseTests(unittest.TestCase):
     def test_agent_pauses_turn_when_tool_requires_confirmation(self) -> None:
         workspace = Path(tempfile.mkdtemp(prefix="supercode-confirmation-"))
@@ -160,6 +190,23 @@ class HumanInLoopPauseTests(unittest.TestCase):
         self.assertEqual(len(response.steps), 1)
         self.assertEqual(response.final_output, "")
         self.assertEqual(response.steps[0].tool_results[0].output["requires_confirmation"], True)
+
+
+class MaxStepsCompatibilityTests(unittest.TestCase):
+    def test_agent_does_not_stop_when_legacy_max_steps_is_too_small(self) -> None:
+        workspace = Path(tempfile.mkdtemp(prefix="supercode-max-steps-"))
+        agent = CodingAgent(
+            brain=_DelayedFinishBrain(final_on_call=5),
+            tools=[_NoopTool()],
+            workspace=workspace,
+            max_steps=1,
+        )
+
+        response = agent.run("继续执行直到完成")
+
+        self.assertEqual(response.final_output, "done")
+        self.assertEqual(len(response.steps), 5)
+        self.assertEqual(response.steps[-1].final_answer, "done")
 
 
 if __name__ == "__main__":

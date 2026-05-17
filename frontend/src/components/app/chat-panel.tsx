@@ -1376,6 +1376,31 @@ const ChatStreamBody = memo(function ChatStreamBody({
   );
 });
 
+function useCompletionNotification(isLoading: boolean, hasMessages: boolean) {
+  const wasLoading = useRef(false);
+
+  useEffect(() => {
+    if (typeof Notification === "undefined") return;
+    if (Notification.permission === "default") {
+      Notification.requestPermission();
+    }
+  }, []);
+
+  useEffect(() => {
+    if (wasLoading.current && !isLoading && hasMessages) {
+      if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+        try {
+          new Notification("SuperCode", {
+            body: "生成完成",
+            tag: "supercode-completion",
+          });
+        } catch {}
+      }
+    }
+    wasLoading.current = isLoading;
+  }, [isLoading, hasMessages]);
+}
+
 export function ChatPanel({
   sessionId,
   contextData,
@@ -1402,6 +1427,8 @@ export function ChatPanel({
   const [attachmentFiles, setAttachmentFiles] = useState<AttachmentData[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isModelSelectorOpen, setIsModelSelectorOpen] = useState(false);
+
+  useCompletionNotification(isLoading, messages.length > 0);
 
   const handleAddFiles = useCallback((fileList: FileList | File[]) => {
     const incoming = Array.from(fileList);
