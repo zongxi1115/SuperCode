@@ -56,6 +56,23 @@ class ApplyPatchToolTests(unittest.TestCase):
                 self.context,
             )
 
+    def test_apply_patch_rejects_final_code_pasted_without_diff_markers(self) -> None:
+        tool = ApplyPatchTool()
+
+        with self.assertRaisesRegex(ValueError, "没有任何 '\\+' 或 '-' 变更行"):
+            tool.run(
+                {
+                    "patch": (
+                        "*** Begin Patch\n"
+                        "*** Update File: src/a.ts\n"
+                        " const after = 1;\n"
+                        " const keep = 2;\n"
+                        "*** End Patch"
+                    )
+                },
+                self.context,
+            )
+
 
 class DeleteFileInWorkspaceTests(unittest.TestCase):
     def test_delete_file_in_workspace_removes_target_file(self) -> None:

@@ -7,7 +7,7 @@ import {
 } from '@/components/ai-elements/web-preview';
 import { Button } from '@/components/ui/button';
 import { AnimatePresence, motion } from 'motion/react';
-import { PanelRightOpen, RefreshCw, ExternalLink, MousePointerClick, X } from 'lucide-react';
+import { PanelRightOpen, PanelRightClose, RefreshCw, ExternalLink, MousePointerClick, X } from 'lucide-react';
 import { useCallback, useRef, useState } from 'react';
 
 type WebPreviewPanelProps = {
@@ -160,6 +160,9 @@ export function WebPreviewPanel({ isOpen, onToggle, url, onUrlChange, onSelectEl
           >
             <WebPreview url={url} onUrlChange={onUrlChange} className="rounded-none border-0">
               <WebPreviewNavigation>
+                <WebPreviewNavigationButton tooltip="关闭侧栏" onClick={onToggle}>
+                  <PanelRightClose className="w-4 h-4" />
+                </WebPreviewNavigationButton>
                 <WebPreviewNavigationButton tooltip="刷新" onClick={handleRefresh}>
                   <RefreshCw className="w-4 h-4" />
                 </WebPreviewNavigationButton>
@@ -181,11 +184,11 @@ export function WebPreviewPanel({ isOpen, onToggle, url, onUrlChange, onSelectEl
       </AnimatePresence>
 
       {!isOpen && (
-        <div className="flex flex-col items-center pt-2 border-l bg-muted/20">
+        <div className="flex flex-col items-center pt-2 gap-1 border-l bg-muted/20 w-10 flex-shrink-0">
           <Button variant="ghost" size="icon" onClick={onToggle} className="h-8 w-8" title="打开浏览器预览">
             <PanelRightOpen className="w-4 h-4" />
           </Button>
-          <div className="mt-1.5 [writing-mode:vertical-lr] text-[10px] text-muted-foreground/60 rotate-180">预览</div>
+          <div className="[writing-mode:vertical-lr] text-[10px] text-muted-foreground/60 rotate-180">预览</div>
         </div>
       )}
     </>

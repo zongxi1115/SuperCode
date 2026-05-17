@@ -5,16 +5,14 @@ import { ResizableHandle } from '@/components/app/resizable-handle';
 import { Button } from '@/components/ui/button';
 import { getFileLanguage } from '@/lib/app-utils';
 import type { FileTreeNode } from '@/lib/app-types';
-import { AnimatePresence, motion } from 'motion/react';
-import { FileCode, Globe, PanelLeftClose, PanelLeftOpen, Pencil, Save, Eye, X } from 'lucide-react';
+import { motion } from 'motion/react';
+import { FileCode, Globe, Pencil, Save, Eye, X } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 type EditorPanelProps = {
   fileTree: FileTreeNode[];
   selectedFilePath: string;
   selectedFileContent: string;
-  isFileTreeCollapsed: boolean;
-  onToggleFileTree: () => void;
   onLoadFile: (path: string) => void | Promise<void>;
   onSaveFile?: (path: string, content: string) => void | Promise<void>;
   sessionId: string | null;
@@ -24,17 +22,14 @@ type EditorPanelProps = {
 };
 
 const EDITOR_FONT = 'font-mono text-[13px] leading-[20px]';
-const COLLAPSED_FILE_TREE_WIDTH = 40;
-const DEFAULT_FILE_TREE_WIDTH = 280;
-const MIN_FILE_TREE_WIDTH = 220;
-const MAX_FILE_TREE_WIDTH = 520;
+const DEFAULT_FILE_TREE_WIDTH = 220;
+const MIN_FILE_TREE_WIDTH = 160;
+const MAX_FILE_TREE_WIDTH = 400;
 
 export function EditorPanel({
   fileTree,
   selectedFilePath,
   selectedFileContent,
-  isFileTreeCollapsed,
-  onToggleFileTree,
   onLoadFile,
   onSaveFile,
   sessionId,
@@ -142,50 +137,30 @@ export function EditorPanel({
     <div className="flex-1 flex flex-col min-h-0">
       <div className="flex-1 overflow-hidden flex min-h-0">
         <motion.div
-          animate={{ width: isFileTreeCollapsed ? COLLAPSED_FILE_TREE_WIDTH : fileTreeWidth }}
+          animate={{ width: fileTreeWidth }}
           transition={{ duration: 0.2, ease: [0.25, 0.1, 0.25, 1] }}
           className="border-r bg-muted/10 flex flex-col flex-shrink-0 overflow-hidden"
         >
-          <div className="flex items-center justify-center px-1 py-1.5 border-b h-8">
-            {!isFileTreeCollapsed && <span className="text-xs font-semibold text-muted-foreground flex-1 ml-1">项目结构</span>}
-            <Button variant="ghost" size="icon" onClick={onToggleFileTree} className="h-6 w-6 shrink-0">
-              {isFileTreeCollapsed ? <PanelLeftOpen className="w-3.5 h-3.5" /> : <PanelLeftClose className="w-3.5 h-3.5" />}
-            </Button>
-            {onToggleWebPreview && (
-              <Button variant={isWebPreviewOpen ? 'secondary' : 'ghost'} size="icon" onClick={onToggleWebPreview} className="h-6 w-6 shrink-0" title="浏览器预览">
-                <Globe className="w-3.5 h-3.5" />
-              </Button>
-            )}
+          <div className="flex items-center px-2 py-1.5 border-b h-8">
+            <span className="text-xs font-semibold text-muted-foreground flex-1">项目结构</span>
           </div>
-          <AnimatePresence mode="wait">
-            {!isFileTreeCollapsed && (
-              <motion.div
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.15 }}
-                className="flex-1 overflow-auto"
-              >
-                <div className="p-2">
-                  {fileTree.length > 0 ? (
-                    <FileTree selectedPath={selectedFilePath} onSelect={onLoadFile}>
-                      {renderFileTreeNodes(fileTree)}
-                    </FileTree>
-                  ) : (
-                    <div className="text-muted-foreground text-center py-4 text-xs">暂无文件结构</div>
-                  )}
-                </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
+          <div className="flex-1 overflow-auto">
+            <div className="p-2">
+              {fileTree.length > 0 ? (
+                <FileTree selectedPath={selectedFilePath} onSelect={onLoadFile}>
+                  {renderFileTreeNodes(fileTree)}
+                </FileTree>
+              ) : (
+                <div className="text-muted-foreground text-center py-4 text-xs">暂无文件结构</div>
+              )}
+            </div>
+          </div>
         </motion.div>
-        {!isFileTreeCollapsed && (
-          <ResizableHandle
-            side="left"
-            onResize={handleFileTreeResize}
-            className="border-r border-border/60 bg-background/40 hover:bg-primary/15"
-          />
-        )}
+        <ResizableHandle
+          side="left"
+          onResize={handleFileTreeResize}
+          className="border-r border-border/60 bg-background/40 hover:bg-primary/15"
+        />
 
         <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
           {selectedFilePath && selectedFileContent ? (
@@ -213,6 +188,11 @@ export function EditorPanel({
                   ) : (
                     <Button variant="ghost" size="icon" className="h-6 w-6" onClick={handleStartEdit} title="编辑文件">
                       <Pencil className="w-3.5 h-3.5" />
+                    </Button>
+                  )}
+                  {onToggleWebPreview && (
+                    <Button variant={isWebPreviewOpen ? 'secondary' : 'ghost'} size="icon" onClick={onToggleWebPreview} className="h-6 w-6" title="浏览器预览">
+                      <Globe className="w-3.5 h-3.5" />
                     </Button>
                   )}
                 </div>
@@ -263,6 +243,12 @@ export function EditorPanel({
               <div className="text-center space-y-2">
                 <FileCode className="w-10 h-10 mx-auto opacity-30" />
                 <p className="text-xs">选择左侧文件以预览代码</p>
+                {onToggleWebPreview && (
+                  <Button variant="outline" size="sm" className="mt-2 gap-1.5 text-xs" onClick={onToggleWebPreview}>
+                    <Globe className="w-3.5 h-3.5" />
+                    打开浏览器预览
+                  </Button>
+                )}
               </div>
             </div>
           )}

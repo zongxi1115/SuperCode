@@ -1,9 +1,10 @@
 import { Button } from '@/components/ui/button';
+import { GitPanel } from '@/components/app/git-panel';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { AnimatePresence, motion } from 'motion/react';
 import type { SessionHistoryItem } from '@/lib/app-types';
 import { cn } from '@/lib/utils';
-import { FileCode, FolderOpen, MessageSquareText, PanelLeftClose, PanelLeftOpen, Plus, Trash2, Wrench } from 'lucide-react';
+import { FileCode, FolderOpen, GitBranch, MessageSquareText, PanelLeftClose, PanelLeftOpen, Plus, Trash2, Wrench } from 'lucide-react';
 
 type SidebarProps = {
   currentSessionId: string | null;
@@ -14,6 +15,8 @@ type SidebarProps = {
   backendMode: 'agent' | 'demo';
   startupError: string | null;
   width: number;
+  isGitPanelOpen: boolean;
+  onGitPanelToggle: () => void;
   onNewSession: () => void;
   onSelectHistory: (sessionId: string) => void;
   onDeleteHistory: (sessionId: string) => void;
@@ -40,6 +43,8 @@ export function Sidebar({
   selectedWorkspace,
   backendMode,
   startupError,
+  isGitPanelOpen,
+  onGitPanelToggle,
   onNewSession,
   onSelectHistory,
   onDeleteHistory,
@@ -164,6 +169,36 @@ export function Sidebar({
                 })}
               </div>
             </ScrollArea>
+
+            <div className="border-t">
+              <button
+                type="button"
+                onClick={onGitPanelToggle}
+                className="flex items-center gap-2 w-full px-3 py-2 text-xs text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-colors"
+              >
+                <GitBranch className="size-3.5 shrink-0" />
+                <span className="flex-1 text-left">Git</span>
+                <motion.span
+                  animate={{ rotate: isGitPanelOpen ? 180 : 0 }}
+                  transition={{ duration: 0.2 }}
+                >
+                  ▾
+                </motion.span>
+              </button>
+              <AnimatePresence>
+                {isGitPanelOpen && (
+                  <motion.div
+                    initial={{ height: 0, opacity: 0 }}
+                    animate={{ height: 320, opacity: 1 }}
+                    exit={{ height: 0, opacity: 0 }}
+                    transition={{ duration: 0.2 }}
+                    className="overflow-hidden border-t"
+                  >
+                    <GitPanel sessionId={currentSessionId} />
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
           </motion.div>
         )}
       </AnimatePresence>
@@ -173,6 +208,14 @@ export function Sidebar({
           <div className="w-7 h-7 rounded-md bg-muted/80 flex items-center justify-center" title={selectedWorkspace}>
             <FileCode className="w-3.5 h-3.5 text-muted-foreground" />
           </div>
+          <button
+            type="button"
+            onClick={onGitPanelToggle}
+            className="w-7 h-7 rounded-md bg-muted/80 flex items-center justify-center hover:bg-muted transition-colors"
+            title="Git"
+          >
+            <GitBranch className="w-3.5 h-3.5 text-muted-foreground" />
+          </button>
         </div>
       )}
     </motion.div>

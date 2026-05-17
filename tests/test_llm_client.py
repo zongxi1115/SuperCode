@@ -1,5 +1,7 @@
 import unittest
 import ssl
+import tempfile
+from pathlib import Path
 
 from agent.config import AgentLLMConfig
 from agent.llm_client import CompletionResponse
@@ -162,6 +164,43 @@ class ClientParsingTests(unittest.TestCase):
         self.assertEqual(response.text, "ok")
         self.assertEqual(deltas, ["ok"])
         self.assertEqual(client.calls, 2)
+
+
+class ConfigParsingTests(unittest.TestCase):
+    def test_include_thoughts_in_context_defaults_to_false(self) -> None:
+        env_path = Path(tempfile.mkdtemp(prefix="supercode-config-")) / ".env"
+        env_path.write_text(
+            "\n".join(
+                [
+                    "SC_AGENT_API_KEY=key",
+                    "SC_AGENT_BASE_URL=https://example.com/v1",
+                    "SC_AGENT_MODEL=demo-model",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        config = AgentLLMConfig.from_env(env_path)
+
+        self.assertFalse(config.include_thoughts_in_context)
+
+    def test_include_thoughts_in_context_can_be_enabled(self) -> None:
+        env_path = Path(tempfile.mkdtemp(prefix="supercode-config-")) / ".env"
+        env_path.write_text(
+            "\n".join(
+                [
+                    "SC_AGENT_API_KEY=key",
+                    "SC_AGENT_BASE_URL=https://example.com/v1",
+                    "SC_AGENT_MODEL=demo-model",
+                    "SC_AGENT_INCLUDE_THOUGHTS_IN_CONTEXT=true",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        config = AgentLLMConfig.from_env(env_path)
+
+        self.assertTrue(config.include_thoughts_in_context)
 
 
 if __name__ == "__main__":

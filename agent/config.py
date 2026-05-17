@@ -19,6 +19,7 @@ class AgentLLMConfig:
     timeout: int = 60
     max_steps: int = 8
     max_retries: int = 2
+    include_thoughts_in_context: bool = False
 
     @classmethod
     def from_env(cls, env_path: str | Path = ".env") -> "AgentLLMConfig":
@@ -32,6 +33,12 @@ class AgentLLMConfig:
         timeout = int(env_values.get("SC_AGENT_TIMEOUT", os.getenv("SC_AGENT_TIMEOUT", "60")).strip())
         max_steps = int(env_values.get("SC_AGENT_MAX_STEPS", os.getenv("SC_AGENT_MAX_STEPS", "8")).strip())
         max_retries = int(env_values.get("SC_AGENT_MAX_RETRIES", os.getenv("SC_AGENT_MAX_RETRIES", "2")).strip())
+        include_thoughts_in_context = _parse_bool(
+            env_values.get(
+                "SC_AGENT_INCLUDE_THOUGHTS_IN_CONTEXT",
+                os.getenv("SC_AGENT_INCLUDE_THOUGHTS_IN_CONTEXT", "false"),
+            )
+        )
 
         missing_fields: list[str] = []
         if not api_key:
@@ -62,6 +69,7 @@ class AgentLLMConfig:
             timeout=timeout,
             max_steps=max_steps,
             max_retries=max(0, max_retries),
+            include_thoughts_in_context=include_thoughts_in_context,
         )
 
 
@@ -116,3 +124,7 @@ def _strip_env_value(value: str) -> str:
     if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
         return value[1:-1]
     return value
+
+
+def _parse_bool(value: str) -> bool:
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}

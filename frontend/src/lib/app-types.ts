@@ -170,3 +170,37 @@ export type ModelOption = {
   envFile: string;
   label: string;
 };
+
+export type GitCommitInfo = {
+  hash: string;
+  author: string;
+  date: string;
+  message: string;
+};
+
+export type GitTagInfo = {
+  name: string;
+  date: string;
+  message: string;
+};
+
+export type GitLogPayload = {
+  commits: GitCommitInfo[];
+  isRepo: boolean;
+  changedFiles?: string[];
+  branch?: string;
+  error?: string;
+};
+
+export type GitStatusPayload = {
+  isRepo: boolean;
+  changedFiles: string[];
+  branch: string;
+  error?: string;
+};
+
+export type GitTagsPayload = {
+  tags: GitTagInfo[];
+  isRepo: boolean;
+  error?: string;
+};

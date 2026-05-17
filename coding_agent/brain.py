@@ -113,11 +113,25 @@ class CodingPromptBrain(OpenAICompatibleBrain):
             messages.append(
                 {
                     "role": "user",
-                    "content": "请基于当前轮已完成的工具调用和工具输出，继续输出下一步决策 JSON。不要重复已经完成且结果成功的工具调用。",
+                    "content": self._build_continuation_instruction(response_mode),
                 }
             )
 
         return messages
+
+    def _build_continuation_instruction(self, response_mode: str) -> str:
+        if response_mode == "native_tools":
+            return (
+                "请基于当前轮已完成的工具调用和工具输出继续决策。"
+                "不要重复已经完成且结果成功的工具调用。"
+                "如果还需要工具，请直接使用原生 tool calling；"
+                "如果信息已经足够，直接输出给用户的最终答复文本。"
+            )
+
+        return (
+            "请基于当前轮已完成的工具调用和工具输出，继续输出下一步决策 JSON。"
+            "不要重复已经完成且结果成功的工具调用。"
+        )
 
     def _build_current_turn_history(self, state: AgentState) -> str:
         turn_index = state.data.get("turn_index")
@@ -139,7 +153,10 @@ class CodingPromptBrain(OpenAICompatibleBrain):
         return "\n".join(
             [
                 "[内部当前轮工具轨迹] 以下是本轮已经完成的步骤，必须作为下一步决策依据。",
-                self._format_history(current_turn_steps),
+                self._format_history(
+                    current_turn_steps,
+                    include_thoughts=bool(state.data.get("include_thoughts_in_context", False)),
+                ),
             ]
         )
 

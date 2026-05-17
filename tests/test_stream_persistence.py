@@ -190,6 +190,7 @@ class StreamPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(parts[0].get("text"), "先看 README")
         self.assertEqual(parts[1].get("toolCall", {}).get("name"), "read_file")
         self.assertEqual(parts[2].get("text"), "结论")
+        self.assertEqual(session.thoughts, ["先看 README"])
 
 
 if __name__ == "__main__":

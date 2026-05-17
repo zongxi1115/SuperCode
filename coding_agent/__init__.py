@@ -11,6 +11,9 @@ from .brain import CodingPromptBrain
 from .tools import (
     ExcecuteTool,
     ExecuteTool,
+    GitCommitTool,
+    GitLogTool,
+    GitTagTool,
     GreepToolCompat,
     GrepFileTool,
     InteractiveCommandSession,
@@ -22,12 +25,18 @@ from .tools import (
     TerminalWaitTool,
     WriteFileTool,
     build_coding_tools,
+    execute_git_commit,
+    execute_git_tag,
+    init_git_repo,
 )
 
 __all__ = [
     "CodingPromptBrain",
     "ExcecuteTool",
     "ExecuteTool",
+    "GitCommitTool",
+    "GitLogTool",
+    "GitTagTool",
     "GreepToolCompat",
     "GrepFileTool",
     "InteractiveCommandSession",
@@ -39,4 +48,7 @@ __all__ = [
     "TerminalWaitTool",
     "WriteFileTool",
     "build_coding_tools",
+    "execute_git_commit",
+    "execute_git_tag",
+    "init_git_repo",
 ]

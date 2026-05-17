@@ -59,6 +59,7 @@ class CodingAgent:
         self,
         state: AgentState,
         on_event: Callable[[AgentEvent], None] | None = None,
+        continue_existing_turn: bool = False,
     ) -> AgentResponse:
         """在已有状态上执行当前这一轮。
 
@@ -67,8 +68,14 @@ class CodingAgent:
         """
 
         history_steps = state.data.setdefault("step_records", [])
-        turn_index = int(state.data.get("turn_index", 0)) + 1
+        if continue_existing_turn and state.data.get("turn_index") is not None:
+            turn_index = int(state.data.get("turn_index", 0))
+        else:
+            turn_index = int(state.data.get("turn_index", 0)) + 1
         state.data["turn_index"] = turn_index
+        state.data["include_thoughts_in_context"] = bool(
+            self.tool_context_metadata.get("include_thoughts_in_context")
+        )
         steps: list[StepRecord] = []
         state.tool_results = []
         tool_definitions = {
@@ -318,6 +325,18 @@ class CodingAgent:
             steps.append(step_record)
             history_steps.append(step_record)
 
+            confirmation_pause = self._build_confirmation_pause_response(
+                state=state,
+                steps=steps,
+                turn_index=turn_index,
+                step_index=index,
+                tool_calls=tool_calls,
+                tool_results=tool_results,
+                on_event=on_event,
+            )
+            if confirmation_pause is not None:
+                return confirmation_pause
+
             if self._is_cancelled(context):
                 return self._build_cancelled_response(
                     state=state,
@@ -476,6 +495,36 @@ class CodingAgent:
 
         tool = self.tools.get(tool_name)
         return bool(tool is not None and getattr(tool, "supports_parallel", False))
+
+    def _build_confirmation_pause_response(
+        self,
+        state: AgentState,
+        steps: list[StepRecord],
+        turn_index: int,
+        step_index: int,
+        tool_calls: list[ToolCall],
+        tool_results: list[ToolResult],
+        on_event: Callable[[AgentEvent], None] | None,
+    ) -> AgentResponse | None:
+        for tool_call, tool_result in zip(tool_calls, tool_results):
+            if not self._requires_user_confirmation(tool_result):
+                continue
+
+            response = AgentResponse(
+                task=state.current_input,
+                final_output="",
+                steps=steps,
+            )
+            return response
+
+        return None
+
+    def _requires_user_confirmation(self, tool_result: ToolResult) -> bool:
+        return bool(
+            tool_result.success
+            and isinstance(tool_result.output, dict)
+            and tool_result.output.get("requires_confirmation") is True
+        )
 
     def _emit_event(
         self,

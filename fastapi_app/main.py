@@ -28,7 +28,7 @@ except ImportError:  # pragma: no cover - optional dependency
 
 from agent import AgentEvent, AgentLLMConfig, ChatSession, CodingAgent, ConversationMessage, OpenAICompatibleClient
 from coding_agent import CodingPromptBrain, InteractiveCommandSession, build_coding_tools
-from coding_agent.tools import delete_file_in_workspace
+from coding_agent.tools import delete_file_in_workspace, execute_git_commit, execute_git_tag, init_git_repo
 from fastapi_app.session_store import PersistedSessionState, SQLiteSessionStateAdapter
 from fastapi_app.ui_message_stream import UIMessageStreamAdapter, sse_data
 
@@ -138,6 +138,11 @@ class SessionHistoryItem(BaseModel):
 class ChatStreamRequest(BaseModel):
     session_id: str = Field(alias="session_id")
     message: str
+
+
+class ContinueChatStreamRequest(BaseModel):
+    session_id: str = Field(alias="session_id")
+    assistant_id: str = Field(alias="assistant_id")
 
 
 class TerminalInputRequest(BaseModel):
@@ -425,6 +430,8 @@ class UISession:
     file_tree_dirty: bool = field(default=True, repr=False)
     file_tree_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     pending_delete_confirmations: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
+    pending_commit_confirmations: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
+    pending_tag_confirmations: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
     history_messages: list[dict[str, Any]] = field(default_factory=list)
     history_tools: list[dict[str, Any]] = field(default_factory=list)
     thoughts: list[str] = field(default_factory=list)
@@ -680,6 +687,8 @@ def session_to_persisted_state(session: UISession) -> PersistedSessionState:
         thoughts=session.thoughts,
         plan_steps=session.plan_steps,
         pending_delete_confirmations=session.pending_delete_confirmations,
+        pending_commit_confirmations=session.pending_commit_confirmations,
+        pending_tag_confirmations=session.pending_tag_confirmations,
     )
 
 
@@ -728,6 +737,8 @@ def hydrate_session_from_state(state: PersistedSessionState) -> UISession:
         updated_at=state.updated_at,
         plan_steps=state.plan_steps,
         pending_delete_confirmations=state.pending_delete_confirmations,
+        pending_commit_confirmations=state.pending_commit_confirmations,
+        pending_tag_confirmations=state.pending_tag_confirmations,
     )
     if session.chat_session is not None:
         seed_chat_session_history(session.chat_session, state.history_messages)
@@ -958,6 +969,17 @@ def seed_chat_session_history(
     ]
 
 
+def record_confirmation_result_for_agent(session: UISession, content: str) -> None:
+    if session.chat_session is None:
+        return
+    text = content.strip()
+    if not text:
+        return
+    session.chat_session.state.conversation_messages.append(
+        ConversationMessage(role="system", content=text)
+    )
+
+
 def stop_session_execution(session: UISession) -> list[dict[str, Any]]:
     """停止当前会话里由 AI 工具托管的命令进程。"""
 
@@ -1003,6 +1025,9 @@ async def switch_session_model(session_id: str, request: SwitchModelRequest) -> 
         tools=build_coding_tools(),
         workspace=resolve_workspace_path(session.workspace),
         max_steps=config.max_steps,
+        tool_context_metadata={
+            "include_thoughts_in_context": config.include_thoughts_in_context,
+        },
     )
     interactive_command_session = session.interactive_command_session
 
@@ -1052,6 +1077,14 @@ async def create_session(request: CreateSessionRequest) -> JSONResponse:
     interactive_command_session = InteractiveCommandSession(
         workspace=resolve_workspace_path(workspace)
     )
+
+    workspace_path = resolve_workspace_path(workspace)
+    if not (workspace_path / ".git").exists():
+        try:
+            await asyncio.to_thread(init_git_repo, workspace_path)
+        except Exception:
+            pass
+
     session = UISession(
         session_id=session_id,
         model=model_name,
@@ -1280,10 +1313,12 @@ async def confirm_delete_tool(
         raise HTTPException(status_code=404, detail="未找到待确认的删除动作")
 
     filename = str(pending.get("filename") or "").strip()
+    assistant_id = str(pending.get("assistant_id") or "").strip()
     if not filename:
         raise HTTPException(status_code=400, detail="待确认删除动作缺少 filename")
 
     approval = {"id": tool_id, "approved": request.approved}
+    assistant_id = str(pending.get("assistant_id") or "").strip()
     if not request.approved:
         tool_record = {
             "id": tool_id,
@@ -1293,6 +1328,7 @@ async def confirm_delete_tool(
             "approval": approval,
         }
         session.history_tools = upsert_tool(session.history_tools, tool_record)
+        record_confirmation_result_for_agent(session, f"[内部确认结果] delete_file 已取消：{filename}")
         session.touch()
         return JSONResponse(
             {
@@ -1303,6 +1339,8 @@ async def confirm_delete_tool(
                 "state": "output-denied",
                 "approval": approval,
                 "selectedFileCleared": False,
+                "assistantId": assistant_id,
+                "shouldContinue": bool(assistant_id),
             }
         )
 
@@ -1321,6 +1359,7 @@ async def confirm_delete_tool(
             "approval": approval,
         }
         session.history_tools = upsert_tool(session.history_tools, tool_record)
+        record_confirmation_result_for_agent(session, f"[内部确认结果] delete_file 已确认并执行成功：{output}")
         session.touch()
         return JSONResponse(
             {
@@ -1331,6 +1370,8 @@ async def confirm_delete_tool(
                 "state": "output-available",
                 "approval": approval,
                 "selectedFileCleared": selected_file_cleared,
+                "assistantId": assistant_id,
+                "shouldContinue": bool(assistant_id),
             }
         )
     except Exception as exc:
@@ -1343,6 +1384,7 @@ async def confirm_delete_tool(
             "approval": approval,
         }
         session.history_tools = upsert_tool(session.history_tools, tool_record)
+        record_confirmation_result_for_agent(session, f"[内部确认结果] delete_file 执行失败：{exc}")
         session.touch()
         return JSONResponse(
             {
@@ -1354,9 +1396,370 @@ async def confirm_delete_tool(
                 "error_message": str(exc),
                 "approval": approval,
                 "selectedFileCleared": False,
+                "assistantId": assistant_id,
+                "shouldContinue": bool(assistant_id),
             },
             status_code=500,
         )
+
+
+class GitCommitRequest(BaseModel):
+    message: str
+
+
+class GitTagRequest(BaseModel):
+    tag: str
+    message: str | None = None
+
+
+@app.post("/api/sessions/{session_id}/git/init")
+async def git_init(session_id: str) -> JSONResponse:
+    session = require_session(session_id)
+    workspace = resolve_workspace_path(session.workspace)
+    try:
+        output = await asyncio.to_thread(init_git_repo, workspace)
+        session.mark_file_tree_dirty()
+        session.touch()
+        return JSONResponse({"success": True, "output": output})
+    except Exception as exc:
+        return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+
+@app.get("/api/sessions/{session_id}/git/log")
+async def git_log(session_id: str, count: int = Query(20)) -> JSONResponse:
+    session = require_session(session_id)
+    workspace = resolve_workspace_path(session.workspace)
+    if not (workspace / ".git").exists():
+        return JSONResponse({"commits": [], "isRepo": False})
+    try:
+        safe_count = min(max(count, 1), 100)
+        result = await asyncio.to_thread(
+            subprocess.run,
+            ["git", "log", f"-{safe_count}", "--pretty=format:%h|%an|%ai|%s"],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+        )
+        if result.returncode != 0:
+            return JSONResponse({"commits": [], "isRepo": True, "error": result.stderr.strip()})
+
+        commits = []
+        for line in result.stdout.strip().splitlines():
+            parts = line.split("|", 3)
+            if len(parts) >= 4:
+                commits.append({
+                    "hash": parts[0],
+                    "author": parts[1],
+                    "date": parts[2],
+                    "message": parts[3],
+                })
+
+        status_result = await asyncio.to_thread(
+            subprocess.run,
+            ["git", "status", "--porcelain"],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+        )
+        changed_files = [l.strip() for l in status_result.stdout.strip().splitlines() if l.strip()] if status_result.stdout.strip() else []
+
+        branch_result = await asyncio.to_thread(
+            subprocess.run,
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
+        )
+        branch = branch_result.stdout.strip() if branch_result.returncode == 0 else "main"
+
+        return JSONResponse({
+            "commits": commits,
+            "isRepo": True,
+            "changedFiles": changed_files,
+            "branch": branch,
+        })
+    except Exception as exc:
+        return JSONResponse({"commits": [], "isRepo": True, "error": str(exc)}, status_code=500)
+
+
+@app.post("/api/sessions/{session_id}/git/commit")
+async def git_commit(session_id: str, request: GitCommitRequest) -> JSONResponse:
+    session = require_session(session_id)
+    workspace = resolve_workspace_path(session.workspace)
+    message = request.message.strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="提交信息不能为空")
+    try:
+        output = await asyncio.to_thread(execute_git_commit, message, workspace)
+        session.mark_file_tree_dirty()
+        session.touch()
+        return JSONResponse({"success": True, "output": output})
+    except Exception as exc:
+        return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+
+@app.post("/api/sessions/{session_id}/git/tag")
+async def git_tag(session_id: str, request: GitTagRequest) -> JSONResponse:
+    session = require_session(session_id)
+    workspace = resolve_workspace_path(session.workspace)
+    tag_name = request.tag.strip()
+    if not tag_name:
+        raise HTTPException(status_code=400, detail="标签名不能为空")
+    tag_message = request.message or f"Release {tag_name}"
+    try:
+        output = await asyncio.to_thread(execute_git_tag, tag_name, tag_message, workspace)
+        session.touch()
+        return JSONResponse({"success": True, "output": output})
+    except Exception as exc:
+        return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+
+@app.get("/api/sessions/{session_id}/git/tags")
+async def git_tags(session_id: str) -> JSONResponse:
+    session = require_session(session_id)
+    workspace = resolve_workspace_path(session.workspace)
+    if not (workspace / ".git").exists():
+        return JSONResponse({"tags": [], "isRepo": False})
+    try:
+        result = await asyncio.to_thread(
+            subprocess.run,
+            ["git", "tag", "-l", "--sort=-creatordate", "--format=%(refname:short)|%(creatordate:short)|%(subject)"],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+        )
+        tags = []
+        for line in result.stdout.strip().splitlines():
+            parts = line.split("|", 2)
+            tags.append({
+                "name": parts[0],
+                "date": parts[1] if len(parts) > 1 else "",
+                "message": parts[2] if len(parts) > 2 else "",
+            })
+        return JSONResponse({"tags": tags, "isRepo": True})
+    except Exception as exc:
+        return JSONResponse({"tags": [], "isRepo": True, "error": str(exc)}, status_code=500)
+
+
+@app.get("/api/sessions/{session_id}/git/status")
+async def git_status(session_id: str) -> JSONResponse:
+    session = require_session(session_id)
+    workspace = resolve_workspace_path(session.workspace)
+    if not (workspace / ".git").exists():
+        return JSONResponse({"isRepo": False, "changedFiles": [], "branch": ""})
+    try:
+        status_result = await asyncio.to_thread(
+            subprocess.run,
+            ["git", "status", "--porcelain"],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+        )
+        changed_files = [l.strip() for l in status_result.stdout.strip().splitlines() if l.strip()] if status_result.stdout.strip() else []
+
+        branch_result = await asyncio.to_thread(
+            subprocess.run,
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
+        )
+        branch = branch_result.stdout.strip() if branch_result.returncode == 0 else "main"
+
+        return JSONResponse({"isRepo": True, "changedFiles": changed_files, "branch": branch})
+    except Exception as exc:
+        return JSONResponse({"isRepo": True, "changedFiles": [], "branch": "", "error": str(exc)}, status_code=500)
+
+
+@app.post("/api/sessions/{session_id}/tools/{tool_id}/confirm-commit")
+async def confirm_commit_tool(
+    session_id: str,
+    tool_id: str,
+    request: ToolConfirmationRequest,
+) -> JSONResponse:
+    session = require_session(session_id)
+    pending = session.pending_commit_confirmations.pop(tool_id, None)
+    if pending is None:
+        raise HTTPException(status_code=404, detail="未找到待确认的提交动作")
+
+    approval = {"id": tool_id, "approved": request.approved}
+    assistant_id = str(pending.get("assistant_id") or "").strip()
+    if not request.approved:
+        tool_record = {
+            "id": tool_id,
+            "output": "已取消提交。",
+            "success": False,
+            "state": "output-denied",
+            "approval": approval,
+        }
+        session.history_tools = upsert_tool(session.history_tools, tool_record)
+        record_confirmation_result_for_agent(session, "[内部确认结果] git_commit 已取消。")
+        session.touch()
+        return JSONResponse({
+            "id": tool_id,
+            "name": "git_commit",
+            "output": "已取消提交。",
+            "success": False,
+            "state": "output-denied",
+            "approval": approval,
+            "assistantId": assistant_id,
+            "shouldContinue": bool(assistant_id),
+        })
+
+    commit_message = str(pending.get("commit_message") or "")
+    if not commit_message:
+        raise HTTPException(status_code=400, detail="待确认提交动作缺少 commit_message")
+
+    try:
+        output = execute_git_commit(commit_message, resolve_workspace_path(session.workspace))
+        session.mark_file_tree_dirty()
+        tool_record = {
+            "id": tool_id,
+            "output": output,
+            "success": True,
+            "state": "output-available",
+            "approval": approval,
+        }
+        session.history_tools = upsert_tool(session.history_tools, tool_record)
+        record_confirmation_result_for_agent(session, f"[内部确认结果] git_commit 已确认并执行成功：{output}")
+        session.touch()
+        return JSONResponse({
+            "id": tool_id,
+            "name": "git_commit",
+            "output": output,
+            "success": True,
+            "state": "output-available",
+            "approval": approval,
+            "assistantId": assistant_id,
+            "shouldContinue": bool(assistant_id),
+        })
+    except Exception as exc:
+        tool_record = {
+            "id": tool_id,
+            "output": None,
+            "success": False,
+            "state": "error",
+            "errorMessage": str(exc),
+            "approval": approval,
+        }
+        session.history_tools = upsert_tool(session.history_tools, tool_record)
+        record_confirmation_result_for_agent(session, f"[内部确认结果] git_commit 执行失败：{exc}")
+        session.touch()
+        return JSONResponse({
+            "id": tool_id,
+            "name": "git_commit",
+            "output": None,
+            "success": False,
+            "state": "error",
+            "error_message": str(exc),
+            "approval": approval,
+            "assistantId": assistant_id,
+            "shouldContinue": bool(assistant_id),
+        }, status_code=500)
+
+
+@app.post("/api/sessions/{session_id}/tools/{tool_id}/confirm-tag")
+async def confirm_tag_tool(
+    session_id: str,
+    tool_id: str,
+    request: ToolConfirmationRequest,
+) -> JSONResponse:
+    session = require_session(session_id)
+    pending = session.pending_tag_confirmations.pop(tool_id, None)
+    if pending is None:
+        raise HTTPException(status_code=404, detail="未找到待确认的标签动作")
+
+    approval = {"id": tool_id, "approved": request.approved}
+    if not request.approved:
+        tool_record = {
+            "id": tool_id,
+            "output": "已取消创建标签。",
+            "success": False,
+            "state": "output-denied",
+            "approval": approval,
+        }
+        session.history_tools = upsert_tool(session.history_tools, tool_record)
+        record_confirmation_result_for_agent(session, "[内部确认结果] git_tag 已取消。")
+        session.touch()
+        return JSONResponse({
+            "id": tool_id,
+            "name": "git_tag",
+            "output": "已取消创建标签。",
+            "success": False,
+            "state": "output-denied",
+            "approval": approval,
+            "assistantId": assistant_id,
+            "shouldContinue": bool(assistant_id),
+        })
+
+    tag_name = str(pending.get("tag") or "")
+    tag_message = str(pending.get("tag_message") or f"Release {tag_name}")
+    if not tag_name:
+        raise HTTPException(status_code=400, detail="待确认标签动作缺少 tag")
+
+    try:
+        output = execute_git_tag(tag_name, tag_message, resolve_workspace_path(session.workspace))
+        tool_record = {
+            "id": tool_id,
+            "output": output,
+            "success": True,
+            "state": "output-available",
+            "approval": approval,
+        }
+        session.history_tools = upsert_tool(session.history_tools, tool_record)
+        record_confirmation_result_for_agent(session, f"[内部确认结果] git_tag 已确认并执行成功：{output}")
+        session.touch()
+        return JSONResponse({
+            "id": tool_id,
+            "name": "git_tag",
+            "output": output,
+            "success": True,
+            "state": "output-available",
+            "approval": approval,
+            "assistantId": assistant_id,
+            "shouldContinue": bool(assistant_id),
+        })
+    except Exception as exc:
+        tool_record = {
+            "id": tool_id,
+            "output": None,
+            "success": False,
+            "state": "error",
+            "errorMessage": str(exc),
+            "approval": approval,
+        }
+        session.history_tools = upsert_tool(session.history_tools, tool_record)
+        record_confirmation_result_for_agent(session, f"[内部确认结果] git_tag 执行失败：{exc}")
+        session.touch()
+        return JSONResponse({
+            "id": tool_id,
+            "name": "git_tag",
+            "output": None,
+            "success": False,
+            "state": "error",
+            "error_message": str(exc),
+            "approval": approval,
+            "assistantId": assistant_id,
+            "shouldContinue": bool(assistant_id),
+        }, status_code=500)
 
 
 @app.get("/api/sessions/{session_id}/context")
@@ -1506,6 +1909,71 @@ async def chat_stream(
     )
 
 
+@app.post("/api/chat/continue")
+async def chat_continue(
+    request: ContinueChatStreamRequest,
+    protocol: str = Query("ui-message"),
+) -> StreamingResponse:
+    session = require_session(request.session_id)
+    session.cancel_event.clear()
+    assistant_id = request.assistant_id.strip()
+    if not assistant_id:
+        raise HTTPException(status_code=400, detail="assistant_id 不能为空")
+
+    async def event_generator():
+        queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+        ui_adapter = UIMessageStreamAdapter()
+        ui_finished = False
+
+        producer = asyncio.create_task(
+            run_agent_stream(session, None, queue, assistant_id=assistant_id, resume_existing_turn=True)
+        )
+
+        try:
+            while True:
+                event = await queue.get()
+                if event is None:
+                    break
+                if protocol == "legacy":
+                    yield sse_data(event)
+                    continue
+
+                for part in ui_adapter.convert(event):
+                    if part.get("type") == "finish":
+                        ui_finished = True
+                    yield sse_data(part)
+                    if part.get("type") == "tool-input-delta":
+                        await asyncio.sleep(0.01)
+
+            if protocol != "legacy" and not ui_finished:
+                for part in ui_adapter.finish_if_needed():
+                    yield sse_data(part)
+            if protocol != "legacy":
+                yield sse_data("[DONE]")
+        except asyncio.CancelledError:
+            stop_session_execution(session)
+            raise
+        finally:
+            if producer.done():
+                await producer
+            else:
+                producer.cancel()
+                with suppress(asyncio.CancelledError):
+                    await producer
+
+    if protocol == "legacy":
+        return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "x-vercel-ai-ui-message-stream": "v1",
+            "Cache-Control": "no-cache",
+        },
+    )
+
+
 def require_session(session_id: str) -> UISession:
     session = _sessions.get(session_id)
     if session is None:
@@ -1545,9 +2013,12 @@ def attach_agent_runtime_metadata(
     session_id: str,
     interactive_command_session: InteractiveCommandSession | None,
     cancel_event: threading.Event | None = None,
+    include_thoughts_in_context: bool | None = None,
 ) -> None:
     agent.tool_context_metadata["session_id"] = session_id
     agent.tool_context_metadata["backend_base_url"] = BACKEND_BASE_URL
+    if include_thoughts_in_context is not None:
+        agent.tool_context_metadata["include_thoughts_in_context"] = include_thoughts_in_context
     if interactive_command_session is not None:
         agent.tool_context_metadata["interactive_command_session"] = interactive_command_session
     if cancel_event is not None:
@@ -1564,6 +2035,9 @@ def build_chat_session(workspace: str, env_file: str | None = None) -> tuple[Cha
             tools=build_coding_tools(),
             workspace=resolve_workspace_path(workspace),
             max_steps=config.max_steps,
+            tool_context_metadata={
+                "include_thoughts_in_context": config.include_thoughts_in_context,
+            },
         )
         return ChatSession(agent=agent), config.model, None, env_file or ".env"
     except Exception as exc:  # noqa: BLE001 - 需要把启动失败原因回传给前端
@@ -1572,14 +2046,17 @@ def build_chat_session(workspace: str, env_file: str | None = None) -> tuple[Cha
 
 async def run_agent_stream(
     session: UISession,
-    user_message: str,
+    user_message: str | None,
     queue: asyncio.Queue[dict[str, Any] | None],
+    assistant_id: str | None = None,
+    resume_existing_turn: bool = False,
 ) -> None:
     loop = asyncio.get_running_loop()
-    assistant_id = uuid.uuid4().hex
+    assistant_id = assistant_id or uuid.uuid4().hex
     streamed_assistant_text = ""
     assistant_stream_started = False
-    ensure_user_message_recorded(session, user_message)
+    if user_message is not None:
+        ensure_user_message_recorded(session, user_message)
     set_session_generating(session, True)
 
     await queue.put(
@@ -1735,7 +2212,9 @@ async def run_agent_stream(
             terminal_output = extract_terminal_output(output)
             preview_url = extract_preview_url(output)
             requires_confirmation = bool(
-                event.tool_result.name == "delete_file"
+                (event.tool_result.name == "delete_file"
+                 or event.tool_result.name == "git_commit"
+                 or event.tool_result.name == "git_tag")
                 and isinstance(output, dict)
                 and output.get("requires_confirmation") is True
             )
@@ -1751,9 +2230,22 @@ async def run_agent_stream(
             tool_success: bool | None = None if requires_confirmation else event.tool_result.success
             approval = {"id": tool_id} if requires_confirmation else None
             if requires_confirmation and isinstance(output, dict):
-                session.pending_delete_confirmations[tool_id] = {
-                    "filename": str(output.get("filename") or ""),
-                }
+                if event.tool_result.name == "delete_file":
+                    session.pending_delete_confirmations[tool_id] = {
+                        "filename": str(output.get("filename") or ""),
+                        "assistant_id": assistant_id,
+                    }
+                elif event.tool_result.name == "git_commit":
+                    session.pending_commit_confirmations[tool_id] = {
+                        "commit_message": str(output.get("commit_message") or ""),
+                        "assistant_id": assistant_id,
+                    }
+                elif event.tool_result.name == "git_tag":
+                    session.pending_tag_confirmations[tool_id] = {
+                        "tag": str(output.get("tag") or ""),
+                        "tag_message": str(output.get("tag_message") or ""),
+                        "assistant_id": assistant_id,
+                    }
             tool_record = {
                 "id": tool_id,
                 "stepIndex": event.step_index,
@@ -1810,11 +2302,19 @@ async def run_agent_stream(
             )
 
     try:
-        response = await asyncio.to_thread(
-            session.chat_session.ask,
-            user_message,
-            on_event,
-        )
+        if resume_existing_turn:
+            response = await asyncio.to_thread(
+                session.chat_session.continue_turn,
+                on_event,
+            )
+        else:
+            if user_message is None:
+                raise RuntimeError("续跑前缺少用户消息。")
+            response = await asyncio.to_thread(
+                session.chat_session.ask,
+                user_message,
+                on_event,
+            )
     except Exception as exc:  # noqa: BLE001 - 流式接口需要兜底，避免 SSE 半路中断
         finalize_plan_steps(session)
         await queue.put(

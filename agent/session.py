@@ -52,21 +52,46 @@ class ChatSession:
 
         response = self.agent.run_turn(self.state, on_event=on_event)
 
-        self.state.conversation_messages.append(
-            ConversationMessage(role="assistant", content=response.final_output)
-        )
+        if response.final_output.strip():
+            self.state.conversation_messages.append(
+                ConversationMessage(role="assistant", content=response.final_output)
+            )
         tool_summary = self._build_tool_summary(response)
         if tool_summary:
             self.state.conversation_messages.append(
                 ConversationMessage(role="system", content=tool_summary)
             )
-        self.turns.append(
-            ConversationTurn(
-                user_message=cleaned_message,
-                assistant_message=response.final_output,
-                response=response,
+        if response.final_output.strip():
+            self.turns.append(
+                ConversationTurn(
+                    user_message=cleaned_message,
+                    assistant_message=response.final_output,
+                    response=response,
+                )
             )
+        return response
+
+    def continue_turn(
+        self,
+        on_event: Callable[[AgentEvent], None] | None = None,
+    ) -> AgentResponse:
+        """在不新增用户消息的情况下继续当前任务。"""
+
+        response = self.agent.run_turn(
+            self.state,
+            on_event=on_event,
+            continue_existing_turn=True,
         )
+
+        if response.final_output.strip():
+            self.state.conversation_messages.append(
+                ConversationMessage(role="assistant", content=response.final_output)
+            )
+        tool_summary = self._build_tool_summary(response)
+        if tool_summary:
+            self.state.conversation_messages.append(
+                ConversationMessage(role="system", content=tool_summary)
+            )
         return response
 
     def clear(self) -> None:
@@ -90,7 +115,7 @@ class ChatSession:
             tool_calls = step.tool_calls or ([step.tool_call] if step.tool_call is not None else [])
             tool_results = step.tool_results or ([step.tool_result] if step.tool_result is not None else [])
 
-            if step.thought:
+            if self._include_thoughts_in_context() and step.thought:
                 lines.append(f"{step_prefix} 思考：{step.thought}")
 
             for tool_call in tool_calls:
@@ -114,6 +139,12 @@ class ChatSession:
                     lines.append(f"{step_prefix} 工具错误：{tool_result.error_message}")
 
         return "\n".join(lines)
+
+    def _include_thoughts_in_context(self) -> bool:
+        metadata = getattr(self.agent, "tool_context_metadata", {})
+        if not isinstance(metadata, dict):
+            return False
+        return bool(metadata.get("include_thoughts_in_context"))
 
     def history_as_text(self) -> str:
         """把历史消息转成纯文本，便于调试。"""

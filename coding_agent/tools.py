@@ -657,11 +657,14 @@ class CodingBaseTool(BaseTool):
         file_path: str,
         content: str,
         start_line: int = 1,
+        metadata_lines: list[str] | None = None,
     ) -> str:
         """把文本格式化成带行号的输出。"""
 
         lines = content.splitlines()
         rendered = [f"# File: {file_path}"]
+        if metadata_lines:
+            rendered.extend(metadata_lines)
         if not lines:
             rendered.append(f"{start_line} | ")
             return "\n".join(rendered)
@@ -739,6 +742,7 @@ class ReadFileTool(CodingBaseTool):
     name = "read_file"
     description = (
         "读取文件内容，可传 filename、start_line、end_line，返回内容带行号。"
+        "输出里会包含 requested_range、actual_range、total_lines 和 eof 元信息。"
         f"如果返回内容超过 {READ_FILE_MAX_OUTPUT_CHARS} 个字符会直接报错，"
         "此时必须缩小范围，改用 start_line/end_line 分段读取。"
     )
@@ -771,10 +775,28 @@ class ReadFileTool(CodingBaseTool):
             raise ValueError("end_line 不能小于 start_line。")
 
         lines = self._read_text(target).splitlines()
+        total_lines = len(lines)
         start_index = start_line - 1
         end_index = end_line if end_line is not None else len(lines)
         sliced = lines[start_index:end_index]
-        rendered = self._format_numbered_text(filename, "\n".join(sliced), start_line=start_line)
+        actual_start_line = start_line if sliced else min(start_line, total_lines + 1)
+        actual_end_line = actual_start_line + len(sliced) - 1 if sliced else actual_start_line - 1
+        requested_end_line = end_line if end_line is not None else total_lines
+        eof = actual_end_line >= total_lines if total_lines > 0 else True
+        metadata_lines = [
+            f"# Requested lines: {start_line}-{requested_end_line}",
+            f"# Actual lines: {actual_start_line}-{actual_end_line}",
+            f"# Total lines: {total_lines}",
+            f"# EOF: {'true' if eof else 'false'}",
+        ]
+        if start_line > total_lines and total_lines > 0:
+            metadata_lines.append("# Note: requested range starts beyond end of file.")
+        rendered = self._format_numbered_text(
+            filename,
+            "\n".join(sliced),
+            start_line=actual_start_line,
+            metadata_lines=metadata_lines,
+        )
         if len(rendered) > READ_FILE_MAX_OUTPUT_CHARS:
             raise ValueError(
                 f"本次 read_file 返回内容过长，已超过 {READ_FILE_MAX_OUTPUT_CHARS} 字符。"
@@ -907,6 +929,7 @@ class ApplyPatchTool(CodingBaseTool):
         "对已有文件应用补丁，参数：patch。"
         "补丁格式使用 *** Begin Patch / *** Update File。"
         "只允许更新已有文件，不负责新建或删除。"
+        "每个 hunk 必须至少包含一行 '-' 或 '+'，不能只粘贴修改后的最终代码。"
     )
     parameters_schema = {
         "type": "object",
@@ -991,6 +1014,7 @@ class ApplyPatchTool(CodingBaseTool):
                 raise ValueError("补丁 hunk 结构无效。")
             pattern_lines: list[str] = []
             replacement_lines: list[str] = []
+            saw_change_line = False
 
             for line in raw_hunk:
                 if not isinstance(line, str):
@@ -1005,9 +1029,17 @@ class ApplyPatchTool(CodingBaseTool):
                     pattern_lines.append(payload)
                 if line[0] in {" ", "+"}:
                     replacement_lines.append(payload)
+                if line[0] in {"-", "+"}:
+                    saw_change_line = True
 
             if not pattern_lines:
                 raise ValueError(f"补丁 hunk 缺少可匹配的上下文: {relative_path}")
+            if not saw_change_line:
+                raise ValueError(
+                    "补丁 hunk 没有任何 '+' 或 '-' 变更行。"
+                    "看起来像是把修改后的最终代码直接贴进了 patch。"
+                    "apply_patch 需要保留上下文行（前缀空格），删除行用 '-'，新增行用 '+'。"
+                )
 
             start_index = self._find_unique_line_block(current_lines, pattern_lines, cursor, relative_path)
             end_index = start_index + len(pattern_lines)
@@ -1455,6 +1487,280 @@ class GreepToolCompat(GrepFileTool):
     """保留一个兼容类名，避免以后手滑拼错导入。"""
 
 
+class GitCommitTool(CodingBaseTool):
+
+    name = "git_commit"
+    description = (
+        "暂存所有变更并创建 git 提交，参数：message（必填，提交信息）。"
+        "执行前需要用户确认。会在工作区根目录执行 git add -A && git commit。"
+    )
+    parameters_schema = {
+        "type": "object",
+        "properties": {
+            "message": {"type": "string"},
+        },
+        "required": ["message"],
+        "additionalProperties": False,
+    }
+
+    def run(self, arguments: dict[str, object], context: ToolContext) -> dict[str, object]:
+        message = str(arguments["message"]).strip()
+        if not message:
+            raise ValueError("提交信息不能为空。")
+
+        workspace = context.workspace.resolve()
+        if not (workspace / ".git").exists():
+            raise RuntimeError("当前工作区不是 git 仓库，请先初始化。")
+
+        status_result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+        )
+        if not status_result.stdout.strip():
+            return {"requires_confirmation": False, "message": "没有待提交的变更。", "has_changes": False}
+
+        changed_files = [line.strip() for line in status_result.stdout.strip().splitlines() if line.strip()]
+
+        return {
+            "requires_confirmation": True,
+            "message": f"确认提交 {len(changed_files)} 个文件变更？提交信息：{message}",
+            "commit_message": message,
+            "changed_files": changed_files[:30],
+            "has_changes": True,
+        }
+
+
+def execute_git_commit(message: str, workspace: Path) -> str:
+    workspace_root = workspace.resolve()
+
+    add_result = subprocess.run(
+        ["git", "add", "-A"],
+        cwd=workspace_root,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+    if add_result.returncode != 0:
+        raise RuntimeError(f"git add 失败：{add_result.stderr.strip()}")
+
+    safe_message = message.replace('"', '\\"')
+    commit_result = subprocess.run(
+        ["git", "commit", "-m", safe_message],
+        cwd=workspace_root,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+    if commit_result.returncode != 0:
+        stderr = commit_result.stderr.strip()
+        if "nothing to commit" in stderr or "nothing to commit" in commit_result.stdout:
+            return "没有待提交的变更。"
+        raise RuntimeError(f"git commit 失败：{stderr}")
+
+    return commit_result.stdout.strip() or "提交成功。"
+
+
+class GitLogTool(CodingBaseTool):
+
+    name = "git_log"
+    description = (
+        "查看 git 提交历史，参数：count（可选，默认 20，最大 100）。"
+        "返回提交哈希、作者、时间和提交信息。"
+    )
+    parameters_schema = {
+        "type": "object",
+        "properties": {
+            "count": {"type": "integer"},
+        },
+        "additionalProperties": False,
+    }
+
+    def run(self, arguments: dict[str, object], context: ToolContext) -> str:
+        raw_count = arguments.get("count", 20)
+        count = min(max(int(raw_count), 1), 100)
+
+        workspace = context.workspace.resolve()
+        if not (workspace / ".git").exists():
+            raise RuntimeError("当前工作区不是 git 仓库。")
+
+        result = subprocess.run(
+            ["git", "log", f"-{count}", "--pretty=format:%h|%an|%ai|%s"],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"git log 失败：{result.stderr.strip()}")
+
+        lines = result.stdout.strip().splitlines()
+        if not lines or not lines[0].strip():
+            return "暂无提交历史。"
+
+        rendered = ["# Git Log"]
+        for line in lines:
+            parts = line.split("|", 3)
+            if len(parts) >= 4:
+                rendered.append(f"{parts[0]} {parts[3]}")
+                rendered.append(f"  作者: {parts[1]}  时间: {parts[2]}")
+            else:
+                rendered.append(line)
+        return "\n".join(rendered)
+
+
+class GitTagTool(CodingBaseTool):
+
+    name = "git_tag"
+    description = (
+        "管理 git 标签（版本），参数：tag（可选，标签名）、message（可选，标签注释）、"
+        "list（可选，默认 false，设为 true 列出已有标签）。"
+        "创建标签需要用户确认。"
+    )
+    parameters_schema = {
+        "type": "object",
+        "properties": {
+            "tag": {"type": "string"},
+            "message": {"type": "string"},
+            "list": {"type": "boolean"},
+        },
+        "additionalProperties": False,
+    }
+
+    def run(self, arguments: dict[str, object], context: ToolContext) -> dict[str, object]:
+        list_tags = _parse_bool_argument(arguments.get("list", False))
+        workspace = context.workspace.resolve()
+
+        if not (workspace / ".git").exists():
+            raise RuntimeError("当前工作区不是 git 仓库。")
+
+        if list_tags:
+            result = subprocess.run(
+                ["git", "tag", "-l", "--sort=-creatordate"],
+                cwd=workspace,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=10,
+            )
+            tags = [t.strip() for t in result.stdout.strip().splitlines() if t.strip()]
+            return {"tags": tags, "count": len(tags)}
+
+        tag_name = str(arguments.get("tag", "")).strip()
+        if not tag_name:
+            raise ValueError("创建标签必须提供 tag 名称。")
+
+        tag_message = str(arguments.get("message", "")).strip() or f"Release {tag_name}"
+
+        return {
+            "requires_confirmation": True,
+            "message": f"确认创建标签 {tag_name}？注释：{tag_message}",
+            "tag": tag_name,
+            "tag_message": tag_message,
+        }
+
+
+def execute_git_tag(tag_name: str, tag_message: str, workspace: Path) -> str:
+    workspace_root = workspace.resolve()
+
+    result = subprocess.run(
+        ["git", "tag", "-a", tag_name, "-m", tag_message],
+        cwd=workspace_root,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=15,
+    )
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        if "already exists" in stderr:
+            raise RuntimeError(f"标签 {tag_name} 已存在。")
+        raise RuntimeError(f"创建标签失败：{stderr}")
+
+    return f"已创建标签: {tag_name}"
+
+
+def init_git_repo(workspace: Path) -> str:
+    workspace_root = workspace.resolve()
+    if (workspace_root / ".git").exists():
+        return "已有 git 仓库。"
+
+    init_result = subprocess.run(
+        ["git", "init"],
+        cwd=workspace_root,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=15,
+    )
+    if init_result.returncode != 0:
+        raise RuntimeError(f"git init 失败：{init_result.stderr.strip()}")
+
+    gitignore_content = (
+        "node_modules/\n"
+        "dist/\n"
+        "build/\n"
+        ".next/\n"
+        ".nuxt/\n"
+        ".venv/\n"
+        "venv/\n"
+        "__pycache__/\n"
+        ".pytest_cache/\n"
+        ".turbo/\n"
+        "*.pyc\n"
+        ".env\n"
+        ".env.*\n"
+        "!.env.example\n"
+        "*.log\n"
+        ".DS_Store\n"
+        "Thumbs.db\n"
+        "*.swp\n"
+        "*.swo\n"
+        "*~\n"
+        ".idea/\n"
+        ".vscode/\n"
+        "coverage/\n"
+    )
+    gitignore_path = workspace_root / ".gitignore"
+    if not gitignore_path.exists():
+        gitignore_path.write_text(gitignore_content, encoding="utf-8")
+
+    add_result = subprocess.run(
+        ["git", "add", "-A"],
+        cwd=workspace_root,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+
+    commit_result = subprocess.run(
+        ["git", "commit", "-m", "Initial commit"],
+        cwd=workspace_root,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+
+    return f"已初始化 git 仓库并创建 .gitignore。"
+
+
 def build_coding_tools() -> list[BaseTool]:
     """构造编码智能体默认工具集。"""
 
@@ -1471,4 +1777,7 @@ def build_coding_tools() -> list[BaseTool]:
         OpenBrowserTool(),
         ExcecuteTool(),
         ExecuteTool(),
+        GitCommitTool(),
+        GitLogTool(),
+        GitTagTool(),
     ]

@@ -33,6 +33,9 @@ import {
   workspaceOptionsToDirectoryNodes,
 } from '@/lib/app-utils';
 
+import { PanelRightOpen, PanelRightClose } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+
 const DEFAULT_WEB_PREVIEW_URL = 'http://localhost:5173';
 
 function getPreviewUrlFromToolPayload(payload: { preview_url?: unknown; output?: unknown }) {
@@ -74,9 +77,9 @@ export default function App() {
   const [isSessionBooting, setIsSessionBooting] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [isRightPanelCollapsed, setIsRightPanelCollapsed] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(280);
-  const [isFileTreeCollapsed, setIsFileTreeCollapsed] = useState(false);
-  const [isContextOpen, setIsContextOpen] = useState(false);
+  const [isGitPanelOpen, setIsGitPanelOpen] = useState(false);  const [isContextOpen, setIsContextOpen] = useState(false);
   const [isContextLoading, setIsContextLoading] = useState(false);
   const [sessionContext, setSessionContext] = useState<SessionContextPayload | null>(null);
   const [isTerminalOpen, setIsTerminalOpen] = useState(false);
@@ -97,6 +100,16 @@ export default function App() {
   useEffect(() => {
     currentSessionIdRef.current = sessionId;
   }, [sessionId]);
+
+  const findAssistantIdByToolCallId = useCallback((toolCallId: string) => {
+    for (const message of messages) {
+      if (message.role !== 'assistant') continue;
+      if ((message.toolCalls ?? []).some((toolCall) => toolCall.id === toolCallId)) {
+        return message.id;
+      }
+    }
+    return null;
+  }, [messages]);
 
   const applyTerminalSnapshot = useCallback((data: Partial<TerminalSnapshotPayload>) => {
     setTerminalOutput((prev) => data.output ?? prev);
@@ -191,7 +204,7 @@ export default function App() {
     [sessionId]
   );
 
-  const [shouldRestoreSession] = useState(() => {
+  const [shouldRestoreSession, setShouldRestoreSession] = useState(() => {
     const lastSession = getLastSession();
     return !!(lastSession && lastSession.workspace);
   });
@@ -331,6 +344,7 @@ export default function App() {
     createSessionWithWorkspace(initialWorkspace)
       .catch((err) => {
         console.error('自动恢复会话失败:', err);
+        setShouldRestoreSession(false);
         setShowWorkspacePicker(true);
         clearLastSession();
       })
@@ -724,33 +738,41 @@ export default function App() {
     [loadSessionHistory, restoreSession, sessionHistory, sessionId]
   );
 
-  const sendMessage = async (msg: string, elements?: { selector: string; html: string; sourceUrl?: string }[]) => {
-    if ((!msg.trim() && (!elements || elements.length === 0)) || !sessionId || isLoading) return;
+  const streamAssistantResponse = useCallback(async ({
+    url,
+    body,
+    streamSessionId,
+    initialAssistantId,
+    userVisibleMessage,
+    clearComposer,
+  }: {
+    url: string;
+    body: Record<string, unknown>;
+    streamSessionId: string;
+    initialAssistantId?: string | null;
+    userVisibleMessage?: string | null;
+    clearComposer?: boolean;
+  }) => {
+    if (!streamSessionId || isLoading) return;
 
-    const streamSessionId = sessionId;
-    setInput('');
-    setElementAttachments([]);
+    if (clearComposer) {
+      setInput('');
+      setElementAttachments([]);
+    }
+    if (userVisibleMessage) {
+      setMessages((prev) => [...prev, { id: Math.random().toString(), role: 'user', content: userVisibleMessage }]);
+    }
+
     setIsLoading(true);
     const abortController = new AbortController();
     activeRequestRef.current = abortController;
     activeStreamSessionIdRef.current = streamSessionId;
 
-    let finalMsg = msg.trim() || '请修改这个元素';
-    if (elements && elements.length > 0) {
-      const elementContext = elements.map((el, i) => {
-        const urlPart = el.sourceUrl ? `\n来源页面: ${el.sourceUrl}` : '';
-        return `[元素${i + 1} 选择器: ${el.selector}]${urlPart}\n${el.html}`;
-      }).join('\n\n');
-      finalMsg = `${elementContext}\n\n${finalMsg}`;
-    }
-
-    setMessages((prev) => [...prev, { id: Math.random().toString(), role: 'user', content: finalMsg }]);
-
     try {
-      const res = await fetch('http://localhost:8000/api/chat/stream', {
+      const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: streamSessionId, message: finalMsg }),
+        body: JSON.stringify(body),
         signal: abortController.signal,
       });
 
@@ -759,7 +781,7 @@ export default function App() {
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
-      let currentAssistantId = '';
+      let currentAssistantId = initialAssistantId ?? '';
       const toolNamesById = new Map<string, string>();
       const isVisibleStreamSession = () => currentSessionIdRef.current === streamSessionId;
 
@@ -828,6 +850,41 @@ export default function App() {
                   : part
               )
             }));
+          };
+
+          const syncGitCommitStatusPreview = async (
+            assistantId: string,
+            toolCallId: string,
+          ) => {
+            if (!isVisibleStreamSession()) {
+              return;
+            }
+            try {
+              const res = await fetch(`http://localhost:8000/api/sessions/${streamSessionId}/git/status`);
+              if (!res.ok) {
+                return;
+              }
+              const data = await res.json();
+              const changedFiles = Array.isArray(data.changedFiles) ? data.changedFiles as string[] : [];
+              updateToolPart(assistantId, toolCallId, (toolCall) => {
+                const existingOutput = (
+                  toolCall.output &&
+                  typeof toolCall.output === 'object' &&
+                  !Array.isArray(toolCall.output)
+                ) ? toolCall.output as Record<string, unknown> : {};
+
+                return {
+                  ...toolCall,
+                  output: {
+                    ...existingOutput,
+                    changed_files: changedFiles,
+                    has_changes: changedFiles.length > 0,
+                  },
+                };
+              });
+            } catch (error) {
+              console.error(error);
+            }
           };
 
           const upsertToolPart = (
@@ -1023,11 +1080,12 @@ export default function App() {
               errorMessage: typeof payload.error_message === 'string' ? payload.error_message : toolCall.errorMessage,
               state: nextState as ToolCallRecord['state']
             }));
+            if (toolName === 'git_commit' && nextState === 'approval-requested') {
+              void syncGitCommitStatusPreview(assistantId, toolCallId);
+            }
           } else if (data.type === 'data-plan-steps') {
             const steps = data.data?.steps;
-            if (Array.isArray(steps) && isVisibleStreamSession()) {
-              setPlanSteps(steps);
-            }
+            void steps;
           } else if (data.type === 'data-terminal-output') {
             if (typeof data.data?.output === 'string' && isVisibleStreamSession()) {
               applyTerminalSnapshot({ output: data.data.output });
@@ -1188,7 +1246,40 @@ export default function App() {
       }
       void loadSessionHistory();
     }
+  }, [applyTerminalSnapshot, isContextOpen, isLoading, isTerminalOpen, loadFile, loadSessionContext, loadSessionHistory, refreshFileTreeAfterTerminalActivity, refreshTerminalState]);
+
+  const sendMessage = async (msg: string, elements?: { selector: string; html: string; sourceUrl?: string }[]) => {
+    if ((!msg.trim() && (!elements || elements.length === 0)) || !sessionId || isLoading) return;
+
+    let finalMsg = msg.trim() || '请修改这个元素';
+    if (elements && elements.length > 0) {
+      const elementContext = elements.map((el, i) => {
+        const urlPart = el.sourceUrl ? `\n来源页面: ${el.sourceUrl}` : '';
+        return `[元素${i + 1} 选择器: ${el.selector}]${urlPart}\n${el.html}`;
+      }).join('\n\n');
+      finalMsg = `${elementContext}\n\n${finalMsg}`;
+    }
+
+    await streamAssistantResponse({
+      url: 'http://localhost:8000/api/chat/stream',
+      body: { session_id: sessionId, message: finalMsg },
+      streamSessionId: sessionId,
+      userVisibleMessage: finalMsg,
+      clearComposer: true,
+    });
   };
+
+  const continueAfterConfirmation = useCallback(async (assistantId: string) => {
+    if (!sessionId || !assistantId) return;
+
+    await streamAssistantResponse({
+      url: 'http://localhost:8000/api/chat/continue',
+      body: { session_id: sessionId, assistant_id: assistantId },
+      streamSessionId: sessionId,
+      initialAssistantId: assistantId,
+      clearComposer: false,
+    });
+  }, [sessionId, streamAssistantResponse]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -1256,11 +1347,89 @@ export default function App() {
             includeProcesses: isTerminalOpen,
           });
         }
+        if (data.shouldContinue) {
+          const assistantId = typeof data.assistantId === 'string' && data.assistantId
+            ? data.assistantId
+            : findAssistantIdByToolCallId(toolCallId);
+          if (assistantId) {
+            void continueAfterConfirmation(assistantId);
+          }
+        }
       } catch (error) {
         console.error(error);
       }
     },
-    [isTerminalOpen, refreshTerminalState, sessionId]
+    [continueAfterConfirmation, findAssistantIdByToolCallId, isTerminalOpen, refreshTerminalState, sessionId]
+  );
+
+  const resolveGitConfirmation = useCallback(
+    async (toolCallId: string, type: 'commit' | 'tag', approved: boolean) => {
+      if (!sessionId) return;
+
+      try {
+        const endpoint = type === 'commit' ? 'confirm-commit' : 'confirm-tag';
+        const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/tools/${toolCallId}/${endpoint}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ approved }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(String(data.detail ?? data.error_message ?? '确认操作失败'));
+        }
+
+        setMessages((prev) =>
+          prev.map((message) => ({
+            ...message,
+            toolCalls: (message.toolCalls ?? []).map((toolCall) =>
+              toolCall.id === toolCallId
+                ? {
+                    ...toolCall,
+                    output: data.output,
+                    success: data.success ?? toolCall.success,
+                    errorMessage: data.error_message ?? toolCall.errorMessage,
+                    approval: data.approval ?? toolCall.approval,
+                    state: data.state ?? toolCall.state,
+                  }
+                : toolCall
+            ),
+            parts: (message.parts ?? []).map((part) =>
+              part.type === 'tool_call' && part.toolCall.id === toolCallId
+                ? {
+                    ...part,
+                    toolCall: {
+                      ...part.toolCall,
+                      output: data.output,
+                      success: data.success ?? part.toolCall.success,
+                      errorMessage: data.error_message ?? part.toolCall.errorMessage,
+                      approval: data.approval ?? part.toolCall.approval,
+                      state: data.state ?? part.toolCall.state,
+                    },
+                  }
+                : part
+            ),
+          }))
+        );
+
+        if (approved) {
+          void refreshTerminalState({
+            includeFileTree: true,
+            includeProcesses: isTerminalOpen,
+          });
+        }
+        if (data.shouldContinue) {
+          const assistantId = typeof data.assistantId === 'string' && data.assistantId
+            ? data.assistantId
+            : findAssistantIdByToolCallId(toolCallId);
+          if (assistantId) {
+            void continueAfterConfirmation(assistantId);
+          }
+        }
+      } catch (error) {
+        console.error(error);
+      }
+    },
+    [continueAfterConfirmation, findAssistantIdByToolCallId, isTerminalOpen, refreshTerminalState, sessionId]
   );
 
   const stopMessage = useCallback(() => {
@@ -1276,12 +1445,13 @@ export default function App() {
     setIsSidebarCollapsed((prev) => !prev);
   }, []);
 
-  const toggleFileTree = useCallback(() => {
-    setIsFileTreeCollapsed((prev) => !prev);
+  const toggleRightPanel = useCallback(() => {
+    setIsRightPanelCollapsed((prev) => !prev);
   }, []);
 
   const handleSelectOtherProject = useCallback(() => {
     clearLastSession();
+    setShouldRestoreSession(false);
     setSessionId(null);
     setMessages([]);
     setFileTree([]);
@@ -1330,7 +1500,23 @@ export default function App() {
   }
 
   return (
-    <div className="flex h-screen bg-background text-foreground text-sm font-sans w-full overflow-hidden">
+    <div className="flex flex-col h-screen bg-background text-foreground text-sm font-sans w-full overflow-hidden">
+      <header className="flex items-center h-10 px-3 border-b bg-muted/30 flex-shrink-0 gap-2">
+        <div className="flex items-center gap-2">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" className="text-primary">
+            <path d="M8 4L2 12L8 20" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/>
+            <path d="M16 4L22 12L16 20" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/>
+            <path d="M14 3L10 21" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+          </svg>
+          <span className="text-sm font-bold tracking-tight">Super Code</span>
+        </div>
+        <div className="flex-1" />
+        <div className="text-[11px] text-muted-foreground truncate max-w-[300px]" title={selectedWorkspace}>{selectedWorkspace}</div>
+        <Button variant="ghost" size="icon" onClick={toggleRightPanel} className="h-7 w-7 ml-2" title={isRightPanelCollapsed ? '展开右侧面板' : '收起右侧面板'}>
+          {isRightPanelCollapsed ? <PanelRightOpen className="w-4 h-4" /> : <PanelRightClose className="w-4 h-4" />}
+        </Button>
+      </header>
+      <div className="flex flex-1 min-h-0">
       <Sidebar
         currentSessionId={sessionId}
         historyItems={sessionHistory}
@@ -1340,6 +1526,8 @@ export default function App() {
         backendMode={backendMode}
         startupError={startupError}
         width={sidebarWidth}
+        isGitPanelOpen={isGitPanelOpen}
+        onGitPanelToggle={() => setIsGitPanelOpen((prev) => !prev)}
         onNewSession={handleNewSession}
         onSelectHistory={(targetSessionId) => void restoreSession(targetSessionId)}
         onDeleteHistory={(targetSessionId) => void handleDeleteHistory(targetSessionId)}
@@ -1352,8 +1540,9 @@ export default function App() {
           onResize={(delta) => setSidebarWidth((prev) => Math.min(Math.max(prev + delta, 220), 480))}
         />
       )}
-      <div style={{ width: chatPanelWidth }} className="flex-shrink-0">
+      <div style={isRightPanelCollapsed ? undefined : { width: chatPanelWidth }} className={isRightPanelCollapsed ? 'flex-1' : 'flex-shrink-0'}>
         <ChatPanel
+        sessionId={sessionId}
         contextData={sessionContext}
         isContextLoading={isContextLoading}
         isContextOpen={isContextOpen}
@@ -1369,21 +1558,24 @@ export default function App() {
         onSendMessage={() => void sendMessage(input, elementAttachments.length > 0 ? elementAttachments : undefined)}
         onStopMessage={stopMessage}
         onResolveDeleteConfirmation={resolveDeleteConfirmation}
+        onResolveGitConfirmation={resolveGitConfirmation}
         elementAttachments={elementAttachments}
         onRemoveElementAttachment={(id) => setElementAttachments((prev) => prev.filter((e) => e.id !== id))}
         />
       </div>
+      {!isRightPanelCollapsed && (
       <ResizableHandle
         side="left"
         onResize={(delta) => setChatPanelWidth((prev) => Math.min(Math.max(prev + delta, 400), 1000))}
       />
+      )}
+      {!isRightPanelCollapsed && (
+      <>
       <div className="flex-1 flex flex-col min-w-0">
         <EditorPanel
           fileTree={fileTree}
           selectedFilePath={selectedFilePath}
           selectedFileContent={selectedFileContent}
-          isFileTreeCollapsed={isFileTreeCollapsed}
-          onToggleFileTree={toggleFileTree}
           onLoadFile={loadFile}
           sessionId={sessionId}
           isWebPreviewOpen={isWebPreviewOpen}
@@ -1427,6 +1619,9 @@ export default function App() {
           ]);
         }}
       />
+      </>
+      )}
+      </div>
     </div>
   );
 }

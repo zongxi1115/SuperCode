@@ -229,7 +229,11 @@ class OpenAICompatibleBrain(AgentBrain):
 
         step_records = state.data.get("step_records", [])
         conversation_text = self._format_conversation(state.conversation_messages)
-        history_text = self._format_history(step_records)
+        include_thoughts = bool(state.data.get("include_thoughts_in_context", False))
+        history_text = self._format_history(
+            step_records,
+            include_thoughts=include_thoughts,
+        )
 
         return "\n".join(
             [
@@ -260,7 +264,11 @@ class OpenAICompatibleBrain(AgentBrain):
             lines.append(f"{role_name}: {message.content}")
         return "\n".join(lines)
 
-    def _format_history(self, step_records: list[StepRecord]) -> str:
+    def _format_history(
+        self,
+        step_records: list[StepRecord],
+        include_thoughts: bool = False,
+    ) -> str:
         """把历史步骤压缩成适合喂给模型的文本。"""
 
         if not step_records:
@@ -269,7 +277,8 @@ class OpenAICompatibleBrain(AgentBrain):
         lines: list[str] = []
         for step in step_records:
             step_prefix = f"第 {step.turn_index} 轮 步骤 {step.index}"
-            lines.append(f"{step_prefix} 思考：{step.thought}")
+            if include_thoughts and step.thought:
+                lines.append(f"{step_prefix} 思考：{step.thought}")
             if step.tool_call:
                 lines.append(
                     f"{step_prefix} 工具调用：{step.tool_call.name} "
