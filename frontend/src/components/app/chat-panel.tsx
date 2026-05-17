@@ -1270,7 +1270,9 @@ const MessageList = memo(function MessageList({
           <ChainOfThoughtContent>
             {(() => {
               const lastRunningIdx = group.blocks.findLastIndex(
-                (b) => b.type === "tool_call" && b.toolCall.state === "running",
+                (b) =>
+                  (b.type === "tool_call" && b.toolCall.state === "running") ||
+                  b.type === "thinking",
               );
               return group.blocks.map((block, bi) => {
                 if (block.type === "thinking") {
@@ -1278,7 +1280,7 @@ const MessageList = memo(function MessageList({
                     <ChainOfThoughtStep
                       key={`thinking-${gi}-${bi}`}
                       label={block.text}
-                      status={isActive ? "active" : "complete"}
+                      status={bi === lastRunningIdx && isActive ? "active" : "complete"}
                     />
                   ) : null;
                 }
