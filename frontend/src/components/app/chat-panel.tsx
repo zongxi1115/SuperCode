@@ -1210,10 +1210,20 @@ const MessageList = memo(function MessageList({
     }
     flushCot();
 
+    const activeCotGroupIdx =
+      isLast && isLoading && groups[groups.length - 1]?.type === "cot"
+        ? groups.length - 1
+        : -1;
+
     return groups.map((group, gi) => {
       if (group.type === "text") {
+        const isStreamingText = isLast && isLoading && gi === groups.length - 1;
         return group.block.text ? (
-          <MessageResponse key={`text-${gi}`}>
+          <MessageResponse
+            key={`text-${gi}`}
+            className={isStreamingText ? "streaming-tail-fade" : undefined}
+            isAnimating={isStreamingText}
+          >
             {group.block.text}
           </MessageResponse>
         ) : null;
@@ -1240,7 +1250,7 @@ const MessageList = memo(function MessageList({
       }
 
       const hasContent = group.blocks.length > 0;
-      const isActive = isLast && isLoading;
+      const isActive = gi === activeCotGroupIdx;
       const lastRunningTool = isActive
         ? [...group.blocks]
             .reverse()
@@ -1269,11 +1279,13 @@ const MessageList = memo(function MessageList({
           </ChainOfThoughtHeader>
           <ChainOfThoughtContent>
             {(() => {
-              const lastRunningIdx = group.blocks.findLastIndex(
-                (b) =>
-                  (b.type === "tool_call" && b.toolCall.state === "running") ||
-                  b.type === "thinking",
-              );
+              const lastRunningIdx = isActive
+                ? group.blocks.findLastIndex(
+                    (b) =>
+                      (b.type === "tool_call" && b.toolCall.state === "running") ||
+                      b.type === "thinking",
+                  )
+                : -1;
               return group.blocks.map((block, bi) => {
                 if (block.type === "thinking") {
                   return block.text.trim() ? (
@@ -1312,7 +1324,12 @@ const MessageList = memo(function MessageList({
                   ? renderPartsAssistant(msg, isLast)
                   : renderLegacyAssistant(msg, isLast))}
               {!msg.parts && msg.content ? (
-                <MessageResponse>{msg.content}</MessageResponse>
+                <MessageResponse
+                  className={isLast && isLoading ? "streaming-tail-fade" : undefined}
+                  isAnimating={isLast && isLoading}
+                >
+                  {msg.content}
+                </MessageResponse>
               ) : null}
             </MessageContent>
           </Message>

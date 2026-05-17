@@ -12,23 +12,39 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field
-
-import re
 
 try:
     from winpty import PtyProcess
 except ImportError:  # pragma: no cover - optional dependency
     PtyProcess = None
 
-from agent import AgentEvent, ChatSession, CodingAgent, ConversationMessage, OpenAICompatibleClient
+from agent import AgentEvent, ChatSession, CodingAgent, OpenAICompatibleClient
 from coding_agent import CodingPromptBrain, InteractiveCommandSession, build_coding_tools
 from coding_agent.tools import delete_file_in_workspace, execute_git_commit, execute_git_tag, init_git_repo
+from fastapi_app.api_models import (
+    ChatStreamRequest,
+    ContinueChatStreamRequest,
+    CreateSessionRequest,
+    CreateSessionResponse,
+    GitCommitRequest,
+    GitTagRequest,
+    ModelConfigPayload,
+    SessionContextMessage,
+    SessionContextResponse,
+    SessionContextTool,
+    SessionHistoryItem,
+    SwitchModelRequest,
+    TerminalControlRequest,
+    TerminalInputRequest,
+    TerminalSnapshotResponse,
+    ToolConfirmationRequest,
+    UIModelProviderPayload,
+)
 from fastapi_app.model_config_store import (
     build_agent_config,
     config_store_path,
@@ -39,8 +55,50 @@ from fastapi_app.model_config_store import (
     save_ui_model_providers,
     scan_env_model_sources,
 )
+from fastapi_app.session_history import (
+    append_assistant_part_delta,
+    append_assistant_tool_call,
+    chunk_text,
+    clear_assistant_text_part,
+    ensure_user_message_recorded,
+    extract_preview_url,
+    extract_terminal_output,
+    finalize_plan_steps,
+    record_confirmation_result_for_agent,
+    replace_assistant_text_part,
+    seed_chat_session_history,
+    sync_assistant_message_fields,
+    update_assistant_history_message,
+    update_assistant_tool_call,
+    update_plan_steps_for_tool,
+    upsert_assistant_thinking_part,
+    upsert_message,
+    upsert_tool,
+)
+from fastapi_app.session_persistence import (
+    persisted_state_to_history_item as persisted_state_to_history_item_impl,
+    persist_session_state as persist_session_state_impl,
+    session_has_persistable_history as session_has_persistable_history_impl,
+    session_to_persisted_state,
+    set_session_generating as set_session_generating_impl,
+)
 from fastapi_app.session_store import PersistedSessionState, SQLiteSessionStateAdapter
+from fastapi_app.terminal_runtime import TerminalRuntimeBase
 from fastapi_app.ui_message_stream import UIMessageStreamAdapter, sse_data
+from fastapi_app.workspace_utils import (
+    build_default_open_files,
+    build_file_tree,
+    list_child_directories,
+    list_workspace_options as list_workspace_options_impl,
+    normalize_relative_path,
+    normalize_workspace as normalize_workspace_impl,
+    pick_default_file,
+    pick_demo_file,
+    read_text_file,
+    render_demo_list_output,
+    resolve_preview_path,
+    resolve_workspace_path,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_WORKSPACE = ROOT
@@ -57,379 +115,9 @@ DEFAULT_OPEN_FILES = [
 STATE_DB_PATH = ROOT / ".supercode" / "state.sqlite3"
 _session_store = SQLiteSessionStateAdapter(STATE_DB_PATH)
 
-FILE_TREE_IGNORED_DIR_NAMES = {
-    ".git",
-    ".next",
-    ".nuxt",
-    ".pytest_cache",
-    ".turbo",
-    ".venv",
-    "__pycache__",
-    "build",
-    "coverage",
-    "dist",
-    "node_modules",
-    "venv",
-}
-FILE_TREE_MAX_DEPTH = 4
-FILE_TREE_MAX_ENTRIES_PER_DIR = 200
-
-
-class CreateSessionResponse(BaseModel):
-    sessionId: str
-    model: str
-    modelId: str | None = None
-    mode: str
-    isGenerating: bool
-    startupError: str | None
-    envFile: str | None
-    workspace: str
-    workspaceOptions: list[dict[str, str]]
-    messages: list[dict[str, Any]]
-    toolCalls: list[dict[str, Any]]
-    thoughts: list[str]
-    terminalOutput: str
-    previewUrl: str
-    fileTree: list[dict[str, Any]]
-    selectedFilePath: str | None
-    selectedFileContent: str
-    openFiles: list[str]
-    planSteps: list[dict[str, str]]
-
-
-class SessionContextMessage(BaseModel):
-    role: str
-    content: str
-
-
-class SessionContextTool(BaseModel):
-    id: str
-    name: str
-    state: str
-    success: bool | None = None
-
-
-class SessionContextResponse(BaseModel):
-    sessionId: str
-    workspace: str
-    mode: str
-    model: str
-    selectedFilePath: str | None
-    openFiles: list[str]
-    messageCount: int
-    toolCallCount: int
-    thoughtCount: int
-    estimatedTokens: int
-    maxTokens: int
-    recentMessages: list[SessionContextMessage]
-    recentThoughts: list[str]
-    recentTools: list[SessionContextTool]
-    planSteps: list[dict[str, str]]
-
-
-class CreateSessionRequest(BaseModel):
-    workspace: str | None = None
-    model: str | None = None
-    env_file: str | None = None
-
-
-class UIModelProviderPayload(BaseModel):
-    id: str | None = None
-    name: str
-    baseUrl: str
-    apiKey: str
-    models: list[str] = Field(default_factory=list)
-    provider: str | None = None
-
-
-class ModelConfigPayload(BaseModel):
-    providers: list[UIModelProviderPayload] = Field(default_factory=list)
-
-
-class SessionHistoryItem(BaseModel):
-    sessionId: str
-    workspace: str
-    mode: str
-    model: str
-    title: str
-    preview: str
-    messageCount: int
-    toolCallCount: int
-    createdAt: int
-    updatedAt: int
-
-
-class ChatStreamRequest(BaseModel):
-    session_id: str = Field(alias="session_id")
-    message: str
-
-
-class ContinueChatStreamRequest(BaseModel):
-    session_id: str = Field(alias="session_id")
-    assistant_id: str = Field(alias="assistant_id")
-
-
-class TerminalInputRequest(BaseModel):
-    command: str = ""
-    submit: bool = True
-
-
-class TerminalControlRequest(BaseModel):
-    action: Literal["interrupt"]
-
-
-class ToolConfirmationRequest(BaseModel):
-    approved: bool
-
-
-class TerminalSnapshotResponse(BaseModel):
-    sessionId: str
-    output: str
-    revision: int
-    isAlive: bool
-    shell: str
-    backend: str = "subprocess"
-    cwd: str | None = None
-    supportsInterrupt: bool = False
-    supportsRawInput: bool = True
-    fileTree: list[dict[str, Any]] | None = None
-    processes: list[dict[str, Any]] | None = None
-
-
-class ManagedProcessInfo(BaseModel):
-    pid: int
-    parent_pid: int
-    name: str
-    command_line: str
-    is_root: bool
-
-
-class ManagedProcessResponse(BaseModel):
-    terminalId: str
-    command: str
-    rootPid: int
-    status: str
-    returnCode: int | None
-    startedAt: int
-    terminatedAt: int | None
-    processCount: int
-    processes: list[ManagedProcessInfo]
-
-
-@dataclass
-class TerminalRuntime:
-    workspace: str
-    shell: str = "powershell"
-    output: str = ""
-    revision: int = 0
-    backend: str = field(default="subprocess", init=False)
-    current_directory: str = field(default="", init=False)
-    supports_interrupt: bool = field(default=False, init=False)
-    supports_raw_input: bool = field(default=True, init=False)
-    pty_process: Any | None = field(default=None, init=False, repr=False)
-    process: subprocess.Popen[str] | None = field(default=None, init=False, repr=False)
-    lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
-    stdout_thread: threading.Thread | None = field(default=None, init=False, repr=False)
-    stderr_thread: threading.Thread | None = field(default=None, init=False, repr=False)
-    prompt_pattern: re.Pattern[str] = field(
-        default=re.compile(r"(?m)^PS (?P<path>[^\r\n>]+)>"),
-        init=False,
-        repr=False,
-    )
-
-    def __post_init__(self) -> None:
-        self.current_directory = self.workspace
-        if PtyProcess is not None:
-            try:
-                self._start_winpty()
-                return
-            except Exception:
-                self.pty_process = None
-        self.process = subprocess.Popen(
-            [
-                "powershell",
-                "-NoLogo",
-                "-NoProfile",
-                "-NoExit",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-Command",
-                (
-                    "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false); "
-                    "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
-                    "$OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
-                    "chcp 65001 > $null"
-                ),
-            ],
-            cwd=self.workspace,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-        )
-        self.backend = "subprocess"
-        self.append_output(f"PowerShell started in {self.workspace}\n")
-        self.stdout_thread = threading.Thread(
-            target=self._pump_pipe_stream,
-            args=(self.process.stdout,),
-            daemon=True,
-        )
-        self.stderr_thread = threading.Thread(
-            target=self._pump_pipe_stream,
-            args=(self.process.stderr,),
-            daemon=True,
-        )
-        self.stdout_thread.start()
-        self.stderr_thread.start()
-
-    def _start_winpty(self) -> None:
-        if PtyProcess is None:
-            raise RuntimeError("winpty 不可用")
-        command = self._build_powershell_command()
-        self.pty_process = PtyProcess.spawn(command)
-        self.backend = "winpty"
-        self.supports_interrupt = True
-        self.append_output(f"PowerShell started in {self.workspace}\n")
-        self.stdout_thread = threading.Thread(
-            target=self._pump_pty_stream,
-            daemon=True,
-        )
-        self.stdout_thread.start()
-
-    def _build_powershell_command(self) -> str:
-        escaped_workspace = self.workspace.replace("'", "''")
-        bootstrap = (
-            "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false); "
-            "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
-            "$OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
-            "chcp 65001 > $null; "
-            f"Set-Location -LiteralPath '{escaped_workspace}'"
-        )
-        return (
-            "powershell "
-            "-NoLogo "
-            "-NoProfile "
-            "-NoExit "
-            "-ExecutionPolicy Bypass "
-            f'-Command "{bootstrap}"'
-        )
-
-    def _pump_pty_stream(self) -> None:
-        if self.pty_process is None:
-            return
-        try:
-            while self.pty_process.isalive():
-                chunk = self.pty_process.read(1024)
-                if chunk == "":
-                    break
-                self.append_output(chunk)
-        except EOFError:
-            return
-        except Exception:
-            self.append_output("\n[terminal reader stopped unexpectedly]\n")
-
-    def _pump_pipe_stream(self, stream: Any) -> None:
-        try:
-            while True:
-                chunk = stream.readline()
-                if chunk == "":
-                    break
-                self.append_output(chunk)
-        except Exception:
-            self.append_output("\n[terminal reader stopped unexpectedly]\n")
-
-    def append_output(self, text: str) -> None:
-        with self.lock:
-            self.output += text
-            inferred_cwd = self._infer_current_directory(self.output[-4096:])
-            if inferred_cwd:
-                self.current_directory = inferred_cwd
-            self.revision += 1
-
-    def _infer_current_directory(self, text: str) -> str | None:
-        matches = list(self.prompt_pattern.finditer(text))
-        if not matches:
-            return None
-        return matches[-1].group("path").strip()
-
-    def send_input(self, content: str, submit: bool = True) -> None:
-        payload = content
-        if submit:
-            payload += "\n"
-        if payload == "":
-            return
-        if self.pty_process is not None:
-            self.pty_process.write(payload)
-            return
-        if self.process is None or self.process.stdin is None:
-            raise RuntimeError("terminal process is not available")
-        self.process.stdin.write(payload)
-        self.process.stdin.flush()
-
-    def write(self, command: str) -> None:
-        self.send_input(command, submit=True)
-
-    def interrupt(self) -> bool:
-        if self.pty_process is None or not hasattr(self.pty_process, "sendcontrol"):
-            return False
-        self.pty_process.sendcontrol("c")
-        return True
-
-    def snapshot(self, session_id: str) -> TerminalSnapshotResponse:
-        with self.lock:
-            return TerminalSnapshotResponse(
-                sessionId=session_id,
-                output=self.output,
-                revision=self.revision,
-                isAlive=self.is_alive(),
-                shell=self.shell,
-                backend=self.backend,
-                cwd=self.current_directory or self.workspace,
-                supportsInterrupt=self.supports_interrupt,
-                supportsRawInput=self.supports_raw_input,
-            )
-
-    def is_alive(self) -> bool:
-        if self.pty_process is not None:
-            return bool(self.pty_process.isalive())
-        return self.process is not None and self.process.poll() is None
-
-    def clear(self) -> None:
-        with self.lock:
-            self.output = ""
-            self.revision += 1
-
-    def close(self) -> None:
-        if self.pty_process is not None:
-            try:
-                self.pty_process.write("exit\n")
-            except Exception:
-                pass
-            try:
-                self.pty_process.terminate(force=True)
-            except Exception:
-                pass
-            self.pty_process = None
-            return
-        if self.process is None:
-            return
-        try:
-            if self.process.stdin is not None:
-                self.process.stdin.write("exit\n")
-                self.process.stdin.flush()
-        except Exception:
-            pass
-        try:
-            self.process.terminate()
-            self.process.wait(timeout=2)
-        except Exception:
-            try:
-                self.process.kill()
-            except Exception:
-                pass
+class TerminalRuntime(TerminalRuntimeBase):
+    def _get_pty_process_class(self) -> Any | None:
+        return PtyProcess
 
 
 @dataclass
@@ -658,78 +346,19 @@ _sessions: dict[str, UISession] = {}
 
 
 def session_has_persistable_history(session: UISession) -> bool:
-    if session.history_messages:
-        return True
-    if session.history_tools:
-        return True
-    if session.thoughts:
-        return True
-    return False
+    return session_has_persistable_history_impl(session)
 
 
 def persist_session_state(session: UISession) -> None:
-    if not session_has_persistable_history(session):
-        try:
-            _session_store.delete(session.session_id)
-        except Exception:
-            pass
-        return
-    try:
-        _session_store.save(session_to_persisted_state(session))
-    except Exception:
-        # Persistence must not interrupt the streaming path.
-        pass
+    persist_session_state_impl(session, _session_store)
 
 
 def set_session_generating(session: UISession, is_generating: bool) -> None:
-    if session.is_generating == is_generating:
-        return
-    session.is_generating = is_generating
-    session.touch()
-
-
-def session_to_persisted_state(session: UISession) -> PersistedSessionState:
-    return PersistedSessionState(
-        session_id=session.session_id,
-        workspace=session.workspace,
-        mode=session.mode,
-        model=session.model,
-        title=session.summary_title(),
-        preview=session.summary_preview(),
-        message_count=len(session.history_messages),
-        tool_call_count=len(session.history_tools),
-        created_at=session.created_at,
-        updated_at=session.updated_at,
-        is_generating=session.is_generating,
-        startup_error=session.startup_error,
-        env_file=session.env_file,
-        selected_file_path=session.selected_file_path,
-        open_files=session.open_files,
-        terminal_output=session.terminal_output,
-        preview_url=session.preview_url,
-        history_messages=session.history_messages,
-        history_tools=session.history_tools,
-        thoughts=session.thoughts,
-        plan_steps=session.plan_steps,
-        pending_delete_confirmations=session.pending_delete_confirmations,
-        pending_commit_confirmations=session.pending_commit_confirmations,
-        pending_tag_confirmations=session.pending_tag_confirmations,
-    )
+    set_session_generating_impl(session, is_generating)
 
 
 def persisted_state_to_history_item(state: PersistedSessionState) -> SessionHistoryItem:
-    return SessionHistoryItem(
-        sessionId=state.session_id,
-        workspace=state.workspace,
-        mode=state.mode,
-        model=state.model,
-        title=state.title,
-        preview=state.preview,
-        messageCount=state.message_count,
-        toolCallCount=state.tool_call_count,
-        createdAt=state.created_at,
-        updatedAt=state.updated_at,
-    )
+    return persisted_state_to_history_item_impl(state)
 
 
 def hydrate_session_from_state(state: PersistedSessionState) -> UISession:
@@ -775,234 +404,6 @@ def hydrate_session_from_state(state: PersistedSessionState) -> UISession:
             cancel_event=session.cancel_event,
         )
     return session
-
-
-def ensure_user_message_recorded(session: UISession, user_message: str) -> None:
-    cleaned_message = user_message.strip()
-    if not cleaned_message:
-        return
-    last_message = session.history_messages[-1] if session.history_messages else None
-    if (
-        isinstance(last_message, dict)
-        and last_message.get("role") == "user"
-        and str(last_message.get("content", "")).strip() == cleaned_message
-    ):
-        return
-    session.history_messages.append(
-        {"id": uuid.uuid4().hex, "role": "user", "content": cleaned_message}
-    )
-    session.touch()
-
-
-def update_assistant_history_message(
-    session: UISession,
-    assistant_id: str,
-    updater: Any,
-) -> None:
-    current_message = next(
-        (
-            message
-            for message in session.history_messages
-            if message.get("id") == assistant_id and message.get("role") == "assistant"
-        ),
-        None,
-    )
-    base_message = (
-        {**current_message}
-        if isinstance(current_message, dict)
-        else {
-            "id": assistant_id,
-            "role": "assistant",
-            "content": "",
-            "thoughts": "",
-            "toolCalls": [],
-            "parts": [],
-        }
-    )
-    next_message = updater(base_message)
-    session.history_messages = upsert_message(session.history_messages, next_message)
-    session.touch()
-
-
-def sync_assistant_message_fields(message: dict[str, Any]) -> dict[str, Any]:
-    parts = message.get("parts")
-    if not isinstance(parts, list):
-        return message
-
-    text_parts = [
-        str(part.get("text") or "")
-        for part in parts
-        if isinstance(part, dict) and part.get("type") == "text"
-    ]
-    thinking_parts = [
-        str(part.get("text") or "")
-        for part in parts
-        if isinstance(part, dict) and part.get("type") == "thinking" and str(part.get("text") or "").strip()
-    ]
-    tool_calls = [
-        part.get("toolCall")
-        for part in parts
-        if isinstance(part, dict) and part.get("type") == "tool_call" and isinstance(part.get("toolCall"), dict)
-    ]
-    return {
-        **message,
-        "content": "".join(text_parts),
-        "thoughts": "\n\n".join(thinking_parts),
-        "toolCalls": tool_calls,
-    }
-
-
-def append_assistant_part_delta(
-    session: UISession,
-    assistant_id: str,
-    part_type: str,
-    delta: str,
-) -> None:
-    if not delta:
-        return
-
-    def _updater(message: dict[str, Any]) -> dict[str, Any]:
-        parts = list(message.get("parts") or [])
-        last_part = parts[-1] if parts else None
-        if isinstance(last_part, dict) and last_part.get("type") == part_type:
-            parts[-1] = {**last_part, "text": f"{str(last_part.get('text') or '')}{delta}"}
-        else:
-            parts.append({"type": part_type, "text": delta})
-        return sync_assistant_message_fields({**message, "parts": parts})
-
-    update_assistant_history_message(session, assistant_id, _updater)
-
-
-def upsert_assistant_thinking_part(
-    session: UISession,
-    assistant_id: str,
-    thought_text: str,
-) -> None:
-    if not thought_text.strip():
-        return
-
-    def _updater(message: dict[str, Any]) -> dict[str, Any]:
-        parts = list(message.get("parts") or [])
-        for index in range(len(parts) - 1, -1, -1):
-            part = parts[index]
-            if not isinstance(part, dict) or part.get("type") != "thinking":
-                continue
-            existing_text = str(part.get("text") or "")
-            if thought_text.startswith(existing_text) or existing_text.startswith(thought_text):
-                parts[index] = {**part, "text": thought_text}
-                return sync_assistant_message_fields({**message, "parts": parts})
-            break
-        parts.append({"type": "thinking", "text": thought_text})
-        return sync_assistant_message_fields({**message, "parts": parts})
-
-    update_assistant_history_message(session, assistant_id, _updater)
-
-
-def replace_assistant_text_part(
-    session: UISession,
-    assistant_id: str,
-    text: str,
-) -> None:
-    def _updater(message: dict[str, Any]) -> dict[str, Any]:
-        parts = [
-            part
-            for part in list(message.get("parts") or [])
-            if not (isinstance(part, dict) and part.get("type") == "text")
-        ]
-        if text:
-            parts.append({"type": "text", "text": text})
-        return sync_assistant_message_fields({**message, "parts": parts})
-
-    update_assistant_history_message(session, assistant_id, _updater)
-
-
-def clear_assistant_text_part(session: UISession, assistant_id: str) -> None:
-    replace_assistant_text_part(session, assistant_id, "")
-
-
-def append_assistant_tool_call(
-    session: UISession,
-    assistant_id: str,
-    tool_call: dict[str, Any],
-) -> None:
-    tool_id = str(tool_call.get("id") or "").strip()
-    if not tool_id:
-        return
-
-    def _updater(message: dict[str, Any]) -> dict[str, Any]:
-        parts = list(message.get("parts") or [])
-        replaced = False
-        next_parts: list[dict[str, Any]] = []
-        for part in parts:
-            if (
-                isinstance(part, dict)
-                and part.get("type") == "tool_call"
-                and isinstance(part.get("toolCall"), dict)
-                and str(part["toolCall"].get("id") or "") == tool_id
-            ):
-                next_parts.append({"type": "tool_call", "toolCall": {**part["toolCall"], **tool_call}})
-                replaced = True
-            else:
-                next_parts.append(part)
-        if not replaced:
-            next_parts.append({"type": "tool_call", "toolCall": tool_call})
-        return sync_assistant_message_fields({**message, "parts": next_parts})
-
-    update_assistant_history_message(session, assistant_id, _updater)
-
-
-def update_assistant_tool_call(
-    session: UISession,
-    assistant_id: str,
-    tool_id: str,
-    updater: Any,
-) -> None:
-    def _message_updater(message: dict[str, Any]) -> dict[str, Any]:
-        parts = list(message.get("parts") or [])
-        next_parts: list[dict[str, Any]] = []
-        found = False
-        for part in parts:
-            if (
-                isinstance(part, dict)
-                and part.get("type") == "tool_call"
-                and isinstance(part.get("toolCall"), dict)
-                and str(part["toolCall"].get("id") or "") == tool_id
-            ):
-                next_parts.append({"type": "tool_call", "toolCall": updater({**part["toolCall"]})})
-                found = True
-            else:
-                next_parts.append(part)
-        if not found:
-            next_parts.append({"type": "tool_call", "toolCall": updater({"id": tool_id})})
-        return sync_assistant_message_fields({**message, "parts": next_parts})
-
-    update_assistant_history_message(session, assistant_id, _message_updater)
-
-
-def seed_chat_session_history(
-    chat_session: ChatSession,
-    history_messages: list[dict[str, Any]],
-) -> None:
-    chat_session.state.conversation_messages = [
-        ConversationMessage(
-            role=str(message.get("role", "")),
-            content=str(message.get("content", "")),
-        )
-        for message in history_messages
-        if str(message.get("role", "")) in {"user", "assistant", "system"}
-        and str(message.get("content", "")).strip()
-    ]
-
-
-def record_confirmation_result_for_agent(session: UISession, content: str) -> None:
-    if session.chat_session is None:
-        return
-    text = content.strip()
-    if not text:
-        return
-    session.chat_session.state.conversation_messages.append(
-        ConversationMessage(role="system", content=text)
-    )
 
 
 def stop_session_execution(session: UISession) -> list[dict[str, Any]]:
@@ -1064,11 +465,6 @@ async def discover_models(payload: UIModelProviderPayload) -> JSONResponse:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return JSONResponse({"models": models})
-
-
-class SwitchModelRequest(BaseModel):
-    model: str | None = None
-    env_file: str | None = None
 
 
 @app.put("/api/sessions/{session_id}/model")
@@ -1465,15 +861,6 @@ async def confirm_delete_tool(
             },
             status_code=500,
         )
-
-
-class GitCommitRequest(BaseModel):
-    message: str
-
-
-class GitTagRequest(BaseModel):
-    tag: str
-    message: str | None = None
 
 
 @app.post("/api/sessions/{session_id}/git/init")
@@ -2603,282 +1990,12 @@ async def run_demo_stream(
     set_session_generating(session, False)
 
 
-def upsert_tool(current: list[dict[str, Any]], next_tool: dict[str, Any]) -> list[dict[str, Any]]:
-    for index, tool in enumerate(current):
-        if tool["id"] == next_tool["id"]:
-            updated = current[:]
-            updated[index] = {**tool, **next_tool}
-            return updated
-    return [*current, next_tool]
-
-
-def upsert_message(current: list[dict[str, Any]], next_message: dict[str, Any]) -> list[dict[str, Any]]:
-    for index, message in enumerate(current):
-        if message.get("id") == next_message.get("id"):
-            updated = current[:]
-            updated[index] = {**message, **next_message}
-            return updated
-    return [*current, next_message]
-
-
-def update_plan_steps_for_tool(session: UISession, step_index: int | None, tool_name: str) -> None:
-    if not session.plan_steps:
-        return
-
-    if step_index is not None:
-        for index, step in enumerate(session.plan_steps):
-            numeric_id = index + 1
-            if numeric_id < step_index:
-                step["status"] = "completed"
-            elif numeric_id == step_index:
-                step["status"] = "in_progress"
-            elif step["status"] != "completed":
-                step["status"] = "pending"
-
-    if tool_name in {"read_file", "list_file", "grep_file"}:
-        session.plan_steps[1]["description"] = "已进入代码探索，正在读取结构、文件和引用关系。"
-    elif tool_name in {"write_file", "replace_file"}:
-        session.plan_steps[2]["description"] = "已开始落地修改，准备把变更写回工作区。"
-    elif tool_name in {"execute", "excecute", "terminal_input", "terminal_wait"}:
-        session.plan_steps[3]["description"] = "正在执行命令并收集终端输出。"
-
-
-def finalize_plan_steps(session: UISession) -> None:
-    for step in session.plan_steps:
-        step["status"] = "completed"
-    if session.plan_steps:
-        session.plan_steps[-1]["description"] = "本轮执行结束，工具结果和最终答复都已沉淀。"
-
-
 def normalize_workspace(raw_workspace: str | None) -> str:
-    if raw_workspace is None or not raw_workspace.strip():
-        return str(DEFAULT_WORKSPACE.resolve())
-    candidate = Path(raw_workspace.strip()).expanduser().resolve()
-    if not candidate.exists():
-        raise HTTPException(status_code=400, detail="工作区不存在")
-    if not candidate.is_dir():
-        raise HTTPException(status_code=400, detail="工作区必须是目录")
-    return str(candidate)
-
-
-def resolve_workspace_path(workspace: str) -> Path:
-    return Path(workspace).expanduser().resolve()
-
-
-def normalize_relative_path(raw_path: str, workspace: str) -> str:
-    workspace_path = resolve_workspace_path(workspace)
-    candidate_path = Path(raw_path)
-    workspace_candidate = (
-        candidate_path.expanduser().resolve()
-        if candidate_path.is_absolute()
-        else (workspace_path / candidate_path).resolve()
-    )
-    if workspace_path != workspace_candidate and workspace_path not in workspace_candidate.parents:
-        raise HTTPException(status_code=400, detail="路径越界")
-    return str(workspace_candidate)
-
-
-def resolve_preview_path(raw_path: str, workspace: str) -> Path:
-    workspace_root = resolve_workspace_path(workspace)
-    normalized = raw_path.strip().strip("/")
-    candidate = workspace_root if not normalized else (workspace_root / normalized).resolve()
-    if workspace_root != candidate and workspace_root not in candidate.parents:
-        raise HTTPException(status_code=400, detail="预览路径越界")
-
-    if candidate.is_dir():
-        for entry_name in ("index.html", "index.htm"):
-            entry = candidate / entry_name
-            if entry.exists() and entry.is_file():
-                return entry
-        raise HTTPException(status_code=404, detail="目录下未找到 index.html")
-
-    if not candidate.exists():
-        raise HTTPException(status_code=404, detail="预览目标不存在")
-    if not candidate.is_file():
-        raise HTTPException(status_code=400, detail="预览目标不是文件")
-    return candidate
-
-
-def build_file_tree(root: Path, max_depth: int = FILE_TREE_MAX_DEPTH) -> list[dict[str, Any]]:
-    if not root.exists():
-        return []
-
-    def walk(target: Path, prefix: Path, depth: int) -> list[dict[str, Any]]:
-        if depth > max_depth:
-            return []
-        items: list[dict[str, Any]] = []
-        count = 0
-        for child in sorted(target.iterdir(), key=lambda item: (item.is_file(), item.name.lower())):
-            if count >= FILE_TREE_MAX_ENTRIES_PER_DIR:
-                items.append({"path": str(target.resolve()), "name": "... (too many entries)", "type": "file"})
-                break
-            absolute = str(child.resolve())
-            if child.is_dir():
-                if child.name in FILE_TREE_IGNORED_DIR_NAMES:
-                    continue
-                items.append(
-                    {
-                        "path": absolute,
-                        "name": child.name,
-                        "type": "folder",
-                        "children": walk(child, prefix, depth + 1),
-                    }
-                )
-            elif child.suffix in {".ts", ".tsx", ".css", ".json", ".py", ".md", ".toml", ".yaml", ".yml", ".js", ".jsx", ".mjs", ".cjs", ".html", ".sql", ".rs", ".go", ".sh", ".bash", ".zsh", ".bat", ".cmd", ".ps1", ".env", ".gitignore", ".gitattributes", ".dockerignore", ".editorconfig", ".prettierrc", ".eslintrc", ".babelrc", ".svelte", ".vue", ".prisma", ".graphql", ".gql", ".proto", ".xml", ".ini", ".cfg", ".conf", ".config", ".lock", ".sum", ".mod", ".txt", ".log", ".diff", ".patch", ".svg", ".ico", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".woff", ".woff2", ".ttf", ".eot"}:
-                items.append(
-                    {
-                        "path": absolute,
-                        "name": child.name,
-                        "type": "file",
-                    }
-                )
-            count += 1
-        return items
-
-    return [
-        {
-            "path": str(root.resolve()),
-            "name": root.name,
-            "type": "folder",
-            "children": walk(root, root, 1),
-        }
-    ]
-
-
-def read_text_file(relative_path: str | None, workspace: str) -> str:
-    if relative_path is None or not str(relative_path).strip():
-        return ""
-    target = Path(relative_path).expanduser().resolve()
-    workspace_root = resolve_workspace_path(workspace)
-    if workspace_root != target and workspace_root not in target.parents:
-        return ""
-    if not target.exists() or not target.is_file():
-        return ""
-    return target.read_text(encoding="utf-8")
+    return normalize_workspace_impl(raw_workspace, DEFAULT_WORKSPACE)
 
 
 def list_workspace_options() -> list[dict[str, str]]:
-    seen: set[str] = set()
-    options: list[dict[str, str]] = []
-
-    def add(path: Path, label: str) -> None:
-        resolved = str(path.expanduser().resolve())
-        if resolved in seen or not Path(resolved).exists() or not Path(resolved).is_dir():
-            return
-        seen.add(resolved)
-        options.append({"value": resolved, "label": label})
-
-    add(DEFAULT_WORKSPACE.resolve(), "当前项目")
-    add(DEFAULT_WORKSPACE.resolve().parent, "当前项目的上级目录")
-    home = Path.home()
-    add(home, "用户目录")
-    add(home / "Desktop", "桌面")
-    add(home / "Documents", "文档")
-
-    for drive in ("C:/", "D:/", "E:/", "F:/"):
-        add(Path(drive), drive.rstrip("/"))
-
-    return options
-
-
-def list_child_directories(path: str | Path) -> list[dict[str, str]]:
-    root = Path(path).expanduser().resolve()
-    if not root.exists() or not root.is_dir():
-        return []
-
-    children: list[dict[str, str]] = []
-    for child in sorted(root.iterdir(), key=lambda item: item.name.lower()):
-        if not child.is_dir():
-            continue
-        children.append(
-            {
-                "value": str(child.resolve()),
-                "label": child.name,
-            }
-        )
-    return children
-
-
-def build_default_open_files(workspace: str) -> list[str]:
-    default_file = pick_default_file(workspace)
-    if default_file is None:
-        return []
-    return [Path(default_file).name]
-
-
-def pick_default_file(workspace: str) -> str | None:
-    workspace_root = resolve_workspace_path(workspace)
-    preferred_names = ["main.py", "App.tsx", "README.md", "index.tsx", "index.ts", "__init__.py"]
-    for name in preferred_names:
-        for match in _shallow_glob(workspace_root, name, max_depth=2):
-            return str(match.resolve())
-
-    for match in _shallow_glob_all(workspace_root, max_depth=2):
-        if match.is_file() and match.suffix in {".py", ".ts", ".tsx", ".md", ".json"}:
-            return str(match.resolve())
-    return None
-
-
-def _shallow_glob(root: Path, name: str, max_depth: int) -> list[Path]:
-    results: list[Path] = []
-    _walk_shallow(root, max_depth, lambda p: results.append(p) if p.name == name else None)
-    return results[:5]
-
-
-def _shallow_glob_all(root: Path, max_depth: int) -> list[Path]:
-    results: list[Path] = []
-    _walk_shallow(root, max_depth, lambda p: results.append(p))
-    return results[:50]
-
-
-def _walk_shallow(root: Path, max_depth: int, visitor: Any) -> None:
-    if max_depth <= 0:
-        return
-    try:
-        for child in root.iterdir():
-            if child.name in FILE_TREE_IGNORED_DIR_NAMES:
-                continue
-            visitor(child)
-            if child.is_dir():
-                _walk_shallow(child, max_depth - 1, visitor)
-    except PermissionError:
-        pass
-
-
-def pick_demo_file(workspace: str) -> str | None:
-    return pick_default_file(workspace)
-
-
-def render_demo_list_output(workspace: str) -> str:
-    workspace_root = resolve_workspace_path(workspace)
-    rendered = [f"# Path: {workspace_root}"]
-    for child in sorted(workspace_root.iterdir(), key=lambda item: (item.is_file(), item.name.lower())):
-        if child.is_dir() and child.name in FILE_TREE_IGNORED_DIR_NAMES:
-            continue
-        rendered.append(f"{child.name}/" if child.is_dir() else child.name)
-    return "\n".join(rendered[:25])
-
-
-def chunk_text(text: str, chunk_size: int = 28) -> list[str]:
-    return [text[index : index + chunk_size] for index in range(0, len(text), chunk_size)] or [""]
-
-
-def extract_terminal_output(output: object) -> str | None:
-    if isinstance(output, str):
-        return output
-    if isinstance(output, dict):
-        full_output = output.get("full_output")
-        if isinstance(full_output, str):
-            return full_output
-    return None
-
-
-def extract_preview_url(output: object) -> str | None:
-    if isinstance(output, dict):
-        resolved_url = output.get("resolved_url")
-        if isinstance(resolved_url, str) and resolved_url.strip():
-            return resolved_url
-    return None
+    return list_workspace_options_impl(DEFAULT_WORKSPACE)
 
 
 def estimate_session_tokens(session: UISession) -> int:
@@ -2915,73 +2032,6 @@ def compact_text(value: str, limit: int) -> str:
     if len(compact) <= limit:
         return compact
     return f"{compact[:limit].rstrip()}..."
-
-
-def scan_env_models() -> list[dict[str, str]]:
-    results: list[dict[str, str]] = []
-    seen_models: set[str] = set()
-
-    for env_path in sorted(ROOT.glob(".env*")):
-        name = env_path.name
-        if not env_path.is_file():
-            continue
-        try:
-            text = env_path.read_text(encoding="utf-8")
-        except Exception:
-            continue
-
-        model_match = re.search(r"^SC_AGENT_MODEL\s*=\s*(.+)$", text, re.MULTILINE)
-        base_url_match = re.search(r"^SC_AGENT_BASE_URL\s*=\s*(.+)$", text, re.MULTILINE)
-        if not model_match:
-            continue
-
-        model_value = model_match.group(1).strip().strip("'\"")
-        base_url_value = base_url_match.group(1).strip().strip("'\"") if base_url_match else ""
-
-        if not model_value or model_value in seen_models:
-            continue
-        seen_models.add(model_value)
-
-        provider = infer_provider_from_url(base_url_value)
-        label = f"{model_value}" if name == ".env" else f"{model_value} ({name})"
-        results.append({
-            "id": model_value,
-            "name": model_value,
-            "provider": provider,
-            "envFile": name,
-            "label": label,
-        })
-
-    return results
-
-
-def infer_provider_from_url(base_url: str) -> str:
-    url_lower = base_url.lower()
-    if "anthropic" in url_lower:
-        return "anthropic"
-    if "openai" in url_lower:
-        return "openai"
-    if "deepseek" in url_lower:
-        return "deepseek"
-    if "dashscope" in url_lower or "aliyun" in url_lower or "qwen" in url_lower:
-        return "alibaba-cn"
-    if "google" in url_lower or "gemini" in url_lower:
-        return "google"
-    if "groq" in url_lower:
-        return "groq"
-    if "mistral" in url_lower:
-        return "mistral"
-    if "xai" in url_lower:
-        return "xai"
-    if "openrouter" in url_lower:
-        return "openrouter"
-    if "together" in url_lower:
-        return "togetherai"
-    if "fireworks" in url_lower:
-        return "fireworks-ai"
-    if "cerebras" in url_lower:
-        return "cerebras"
-    return "openrouter"
 
 
 if __name__ == "__main__":
