@@ -138,6 +138,7 @@ export function ContextViewer({
                     <h3 className="text-sm font-medium">基础信息</h3>
                     <div className="rounded-lg border bg-muted/20 p-3 text-xs leading-6">
                       <div>模型：{contextData.model}</div>
+                      <div>思考程度：{contextData.reasoningEffort || '默认'}</div>
                       <div>模式：{contextData.mode}</div>
                       <div>工作区：{contextData.workspace}</div>
                       <div>当前文件：{contextData.selectedFilePath || '暂无'}</div>

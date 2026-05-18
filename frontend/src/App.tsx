@@ -84,6 +84,11 @@ function resolveSelectedModelId(
   return null;
 }
 
+function normalizeReasoningEffort(value?: string | null) {
+  const normalized = value?.trim().toLowerCase();
+  return normalized ? normalized : null;
+}
+
 export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
@@ -122,6 +127,7 @@ export default function App() {
   const [isHistoryLoading, setIsHistoryLoading] = useState(false);
   const [recentProjects, setRecentProjects] = useState<RecentProject[]>(() => getRecentProjects());
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
+  const [selectedReasoningEffort, setSelectedReasoningEffort] = useState<string | null>(null);
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
   const [isModelConfigOpen, setIsModelConfigOpen] = useState(false);
   const [visualModelProviders, setVisualModelProviders] = useState<UIModelProvider[]>([]);
@@ -140,6 +146,16 @@ export default function App() {
       if (message.role !== 'assistant') continue;
       if ((message.toolCalls ?? []).some((toolCall) => toolCall.id === toolCallId)) {
         return message.id;
+      }
+    }
+    return null;
+  }, [messages]);
+
+  const findToolCallById = useCallback((toolCallId: string) => {
+    for (const message of messages) {
+      const found = (message.toolCalls ?? []).find((toolCall) => toolCall.id === toolCallId);
+      if (found) {
+        return found;
       }
     }
     return null;
@@ -326,6 +342,7 @@ export default function App() {
     setBackendMode(data.mode);
     setStartupError(data.startupError ?? null);
     setSelectedModelId((prev) => resolveSelectedModelId(data, modelOptions) ?? prev ?? null);
+    setSelectedReasoningEffort(normalizeReasoningEffort(data.reasoningEffort));
     setMessages(hydrateMessages(data.messages ?? [], data.thoughts, data.toolCalls));
     setFileTree(data.fileTree ?? []);
     setTerminalOutput(data.terminalOutput ?? '');
@@ -380,7 +397,11 @@ export default function App() {
       const res = await fetch('http://localhost:8000/api/sessions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workspace, model: selectedModelId }),
+        body: JSON.stringify({
+          workspace,
+          model: selectedModelId,
+          reasoning_effort: selectedReasoningEffort,
+        }),
         signal: controller.signal,
       });
       clearTimeout(timeoutId);
@@ -402,7 +423,7 @@ export default function App() {
     } finally {
       setIsSessionBooting(false);
     }
-  }, [applySessionPayload, loadSessionHistory, selectedModelId]);
+  }, [applySessionPayload, loadSessionHistory, selectedModelId, selectedReasoningEffort]);
 
   const hasRestoredRef = useRef(false);
 
@@ -740,7 +761,10 @@ export default function App() {
         const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/model`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model: modelId }),
+          body: JSON.stringify({
+            model: modelId,
+            reasoning_effort: selectedReasoningEffort,
+          }),
         });
         if (!res.ok) {
           const errText = await res.text();
@@ -748,6 +772,7 @@ export default function App() {
         }
         const data = await res.json();
         setSelectedModelId((prev) => resolveSelectedModelId(data, modelOptions) ?? prev ?? modelId);
+        setSelectedReasoningEffort(normalizeReasoningEffort(data.reasoningEffort));
         setBackendMode(data.mode ?? 'agent');
         setStartupError(null);
         setSessionError(null);
@@ -757,6 +782,7 @@ export default function App() {
             ? {
                 ...prev,
                 model: data.model ?? prev.model,
+                reasoningEffort: data.reasoningEffort ?? prev.reasoningEffort,
                 mode: data.mode ?? prev.mode,
               }
             : prev
@@ -766,7 +792,53 @@ export default function App() {
         setSessionError(error instanceof Error ? error.message : '切换模型失败');
       }
     },
-    [modelOptions, sessionId],
+    [modelOptions, selectedReasoningEffort, sessionId],
+  );
+
+  const handleReasoningEffortChange = useCallback(
+    async (reasoningEffort: string) => {
+      const normalized = normalizeReasoningEffort(reasoningEffort);
+      const previous = selectedReasoningEffort;
+      setSelectedReasoningEffort(normalized);
+      if (!sessionId) {
+        return;
+      }
+      try {
+        const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/model`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: selectedModelId,
+            reasoning_effort: normalized,
+          }),
+        });
+        if (!res.ok) {
+          const errText = await res.text();
+          throw new Error(errText || '切换思考程度失败');
+        }
+        const data = await res.json();
+        setSelectedModelId((prev) => resolveSelectedModelId(data, modelOptions) ?? prev ?? selectedModelId);
+        setSelectedReasoningEffort(normalizeReasoningEffort(data.reasoningEffort));
+        setBackendMode(data.mode ?? 'agent');
+        setStartupError(null);
+        setSessionError(null);
+        setSessionContext((prev) =>
+          prev
+            ? {
+                ...prev,
+                model: data.model ?? prev.model,
+                reasoningEffort: data.reasoningEffort ?? prev.reasoningEffort,
+                mode: data.mode ?? prev.mode,
+              }
+            : prev
+        );
+      } catch (error) {
+        console.error(error);
+        setSelectedReasoningEffort(previous);
+        setSessionError(error instanceof Error ? error.message : '切换思考程度失败');
+      }
+    },
+    [modelOptions, selectedModelId, selectedReasoningEffort, sessionId],
   );
 
   const handleNewSession = useCallback(() => {
@@ -1627,6 +1699,91 @@ export default function App() {
     [continueAfterConfirmation, findAssistantIdByToolCallId, sessionId]
   );
 
+  const resolvePlanQuestionsInput = useCallback(
+    async (
+      toolCallId: string,
+      answers: Record<string, { value: string | string[]; otherText?: string }>,
+    ) => {
+      if (!sessionId) return;
+
+      const toolCall = findToolCallById(toolCallId);
+      const questions = toolCall?.inputRequest?.questions;
+      if (!toolCall || !Array.isArray(questions)) {
+        throw new Error('未找到计划问题定义');
+      }
+
+      const payloadAnswers = questions.map((question) => {
+        const rawAnswer = answers[question.id];
+        if (question.type === 'short_text') {
+          return {
+            questionId: question.id,
+            text: typeof rawAnswer?.value === 'string' ? rawAnswer.value : '',
+          };
+        }
+        return {
+          questionId: question.id,
+          selectedOptionIds: Array.isArray(rawAnswer?.value)
+            ? rawAnswer.value
+            : typeof rawAnswer?.value === 'string' && rawAnswer.value
+              ? [rawAnswer.value]
+              : [],
+          otherText: rawAnswer?.otherText,
+        };
+      });
+
+      const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/tools/${toolCallId}/input`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ answers: payloadAnswers }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(String(data.detail ?? '提交失败'));
+      }
+
+      setMessages((prev) =>
+        prev.map((message) => ({
+          ...message,
+          toolCalls: (message.toolCalls ?? []).map((currentToolCall) =>
+            currentToolCall.id === toolCallId
+              ? {
+                  ...currentToolCall,
+                  output: data.output,
+                  success: data.success ?? currentToolCall.success,
+                  errorMessage: data.error_message ?? currentToolCall.errorMessage,
+                  state: (data.state ?? 'output-available') as ToolCallRecord['state'],
+                }
+              : currentToolCall
+          ),
+          parts: (message.parts ?? []).map((part) =>
+            part.type === 'tool_call' && part.toolCall.id === toolCallId
+              ? {
+                  ...part,
+                  toolCall: {
+                    ...part.toolCall,
+                    output: data.output,
+                    success: data.success ?? part.toolCall.success,
+                    errorMessage: data.error_message ?? part.toolCall.errorMessage,
+                    state: (data.state ?? 'output-available') as ToolCallRecord['state'],
+                  },
+                }
+              : part
+          ),
+        }))
+      );
+
+      if (data.shouldContinue) {
+        const assistantId = typeof data.assistantId === 'string' && data.assistantId
+          ? data.assistantId
+          : findAssistantIdByToolCallId(toolCallId);
+        if (assistantId) {
+          void continueAfterConfirmation(assistantId);
+        }
+      }
+    },
+    [continueAfterConfirmation, findAssistantIdByToolCallId, findToolCallById, sessionId]
+  );
+
   const stopMessage = useCallback(() => {
     if (sessionId) {
       void stopManagedProcesses(sessionId);
@@ -1758,8 +1915,10 @@ export default function App() {
         input={input}
         isLoading={isLoading}
         model={selectedModelId}
+        reasoningEffort={selectedReasoningEffort}
         modelOptions={modelOptions}
         onModelChange={handleModelChange}
+        onReasoningEffortChange={handleReasoningEffortChange}
         onContextOpenChange={handleContextOpenChange}
         onInputChange={setInput}
         onKeyDown={handleKeyDown}
@@ -1768,6 +1927,7 @@ export default function App() {
         onResolveDeleteConfirmation={resolveDeleteConfirmation}
         onResolveGitConfirmation={resolveGitConfirmation}
         onResolveConnectInput={resolveConnectInput}
+        onResolvePlanQuestionsInput={resolvePlanQuestionsInput}
         elementAttachments={elementAttachments}
         onRemoveElementAttachment={(id) => setElementAttachments((prev) => prev.filter((e) => e.id !== id))}
         />

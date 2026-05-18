@@ -18,6 +18,18 @@ export type ToolCallRecord = {
     title: string;
     message: string;
     fields: { name: string; label: string; type: string; required: boolean; default?: string; placeholder?: string }[];
+    questions?: {
+      id: string;
+      type: 'single_choice' | 'multi_choice' | 'short_text' | string;
+      prompt: string;
+      required: boolean;
+      placeholder?: string;
+      options?: {
+        id: string;
+        label: string;
+        description?: string;
+      }[];
+    }[];
   };
   state: 'running' | 'completed' | 'error' | 'approval-requested' | 'input-requested' | 'output-available' | 'output-denied';
 };
@@ -80,6 +92,7 @@ export type SessionContextPayload = {
   workspace: string;
   mode: 'agent' | 'demo' | string;
   model: string;
+  reasoningEffort?: string | null;
   selectedFilePath?: string | null;
   openFiles: string[];
   messageCount: number;
@@ -97,6 +110,7 @@ export type SessionPayload = {
   sessionId: string;
   model?: string;
   modelId?: string | null;
+  reasoningEffort?: string | null;
   mode: 'agent' | 'demo';
   isGenerating?: boolean;
   startupError?: string | null;

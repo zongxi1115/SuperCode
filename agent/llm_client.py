@@ -309,6 +309,8 @@ class OpenAICompatibleClient:
             "messages": messages,
             "stream": stream,
         }
+        if self.config.reasoning_effort:
+            payload["reasoning_effort"] = self.config.reasoning_effort
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = tool_choice or "auto"

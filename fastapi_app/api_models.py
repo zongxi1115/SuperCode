@@ -9,10 +9,12 @@ class CreateSessionResponse(BaseModel):
     sessionId: str
     model: str
     modelId: str | None = None
+    reasoningEffort: str | None = None
     mode: str
     agentType: str = "coding"
     phase: str = "idle"
     deployState: dict[str, Any] = Field(default_factory=dict)
+    planState: dict[str, Any] = Field(default_factory=dict)
     isGenerating: bool
     startupError: str | None
     envFile: str | None
@@ -47,9 +49,11 @@ class SessionContextResponse(BaseModel):
     workspace: str
     mode: str
     model: str
+    reasoningEffort: str | None = None
     agentType: str = "coding"
     phase: str = "idle"
     deployState: dict[str, Any] = Field(default_factory=dict)
+    planState: dict[str, Any] = Field(default_factory=dict)
     selectedFilePath: str | None
     openFiles: list[str]
     messageCount: int
@@ -67,6 +71,7 @@ class CreateSessionRequest(BaseModel):
     workspace: str | None = None
     model: str | None = None
     env_file: str | None = None
+    reasoning_effort: str | None = None
     agent_type: str | None = None
 
 
@@ -125,6 +130,27 @@ class ConnectToolSubmitRequest(BaseModel):
     values: dict[str, Any] = Field(default_factory=dict)
 
 
+class ToolInputAnswer(BaseModel):
+    questionId: str
+    selectedOptionIds: list[str] = Field(default_factory=list)
+    otherText: str | None = None
+    text: str | None = None
+
+
+class ToolInputSubmitRequest(BaseModel):
+    answers: list[ToolInputAnswer] = Field(default_factory=list)
+
+
+class PlanSubmitRequest(BaseModel):
+    title: str | None = None
+    summary: str | None = None
+    markdown: str | None = None
+    assumptions: list[str] = Field(default_factory=list)
+    openQuestions: list[str] = Field(default_factory=list)
+    acceptanceCriteria: list[str] = Field(default_factory=list)
+    researchNotes: list[str] = Field(default_factory=list)
+
+
 class TerminalSnapshotResponse(BaseModel):
     sessionId: str
     output: str
@@ -162,6 +188,7 @@ class ManagedProcessResponse(BaseModel):
 class SwitchModelRequest(BaseModel):
     model: str | None = None
     env_file: str | None = None
+    reasoning_effort: str | None = None
 
 
 class GitCommitRequest(BaseModel):

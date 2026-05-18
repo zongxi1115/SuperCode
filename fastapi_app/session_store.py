@@ -21,6 +21,7 @@ class PersistedSessionState:
     tool_call_count: int
     created_at: int
     updated_at: int
+    reasoning_effort: str | None = None
     agent_type: str = "coding"
     phase: str = "idle"
     is_generating: bool = False
@@ -34,9 +35,11 @@ class PersistedSessionState:
     history_tools: list[dict[str, Any]] = field(default_factory=list)
     thoughts: list[str] = field(default_factory=list)
     plan_steps: list[dict[str, str]] = field(default_factory=list)
+    plan_state: dict[str, Any] = field(default_factory=dict)
     pending_delete_confirmations: dict[str, dict[str, Any]] = field(default_factory=dict)
     pending_commit_confirmations: dict[str, dict[str, Any]] = field(default_factory=dict)
     pending_tag_confirmations: dict[str, dict[str, Any]] = field(default_factory=dict)
+    pending_user_input_requests: dict[str, dict[str, Any]] = field(default_factory=dict)
     pending_connect_requests: dict[str, dict[str, Any]] = field(default_factory=dict)
     deploy_connections: dict[str, dict[str, Any]] = field(default_factory=dict)
     deploy_state: dict[str, Any] = field(default_factory=dict)
@@ -82,28 +85,31 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                 """
                 INSERT INTO sessions (
                     session_id, workspace, mode, model, agent_type, phase, title, preview,
+                    reasoning_effort,
                     message_count, tool_call_count, created_at, updated_at,
                     is_generating,
                     startup_error, env_file, selected_file_path, open_files,
                     terminal_output, preview_url, history_messages,
-                    history_tools, thoughts, plan_steps, pending_delete_confirmations,
+                    history_tools, thoughts, plan_steps, plan_state, pending_delete_confirmations,
                     pending_commit_confirmations, pending_tag_confirmations,
-                    pending_connect_requests, deploy_connections, deploy_state
+                    pending_user_input_requests, pending_connect_requests, deploy_connections, deploy_state
                 )
                 VALUES (
                     :session_id, :workspace, :mode, :model, :agent_type, :phase, :title, :preview,
+                    :reasoning_effort,
                     :message_count, :tool_call_count, :created_at, :updated_at,
                     :is_generating,
                     :startup_error, :env_file, :selected_file_path, :open_files,
                     :terminal_output, :preview_url, :history_messages,
-                    :history_tools, :thoughts, :plan_steps, :pending_delete_confirmations,
+                    :history_tools, :thoughts, :plan_steps, :plan_state, :pending_delete_confirmations,
                     :pending_commit_confirmations, :pending_tag_confirmations,
-                    :pending_connect_requests, :deploy_connections, :deploy_state
+                    :pending_user_input_requests, :pending_connect_requests, :deploy_connections, :deploy_state
                 )
                 ON CONFLICT(session_id) DO UPDATE SET
                     workspace = excluded.workspace,
                     mode = excluded.mode,
                     model = excluded.model,
+                    reasoning_effort = excluded.reasoning_effort,
                     agent_type = excluded.agent_type,
                     phase = excluded.phase,
                     title = excluded.title,
@@ -123,9 +129,11 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                     history_tools = excluded.history_tools,
                     thoughts = excluded.thoughts,
                     plan_steps = excluded.plan_steps,
+                    plan_state = excluded.plan_state,
                     pending_delete_confirmations = excluded.pending_delete_confirmations,
                     pending_commit_confirmations = excluded.pending_commit_confirmations,
                     pending_tag_confirmations = excluded.pending_tag_confirmations,
+                    pending_user_input_requests = excluded.pending_user_input_requests,
                     pending_connect_requests = excluded.pending_connect_requests,
                     deploy_connections = excluded.deploy_connections,
                     deploy_state = excluded.deploy_state
@@ -166,6 +174,7 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                     workspace TEXT NOT NULL,
                     mode TEXT NOT NULL,
                     model TEXT NOT NULL,
+                    reasoning_effort TEXT,
                     agent_type TEXT NOT NULL DEFAULT 'coding',
                     phase TEXT NOT NULL DEFAULT 'idle',
                     title TEXT NOT NULL,
@@ -185,9 +194,11 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                     history_tools TEXT NOT NULL,
                     thoughts TEXT NOT NULL,
                     plan_steps TEXT NOT NULL,
+                    plan_state TEXT NOT NULL DEFAULT '{}',
                     pending_delete_confirmations TEXT NOT NULL,
                     pending_commit_confirmations TEXT NOT NULL DEFAULT '{}',
                     pending_tag_confirmations TEXT NOT NULL DEFAULT '{}',
+                    pending_user_input_requests TEXT NOT NULL DEFAULT '{}',
                     pending_connect_requests TEXT NOT NULL DEFAULT '{}',
                     deploy_connections TEXT NOT NULL DEFAULT '{}',
                     deploy_state TEXT NOT NULL DEFAULT '{}'
@@ -214,6 +225,10 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                 connection.execute(
                     "ALTER TABLE sessions ADD COLUMN agent_type TEXT NOT NULL DEFAULT 'coding'"
                 )
+            if "reasoning_effort" not in existing_columns:
+                connection.execute(
+                    "ALTER TABLE sessions ADD COLUMN reasoning_effort TEXT"
+                )
             if "phase" not in existing_columns:
                 connection.execute(
                     "ALTER TABLE sessions ADD COLUMN phase TEXT NOT NULL DEFAULT 'idle'"
@@ -221,6 +236,14 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
             if "pending_connect_requests" not in existing_columns:
                 connection.execute(
                     "ALTER TABLE sessions ADD COLUMN pending_connect_requests TEXT NOT NULL DEFAULT '{}'"
+                )
+            if "plan_state" not in existing_columns:
+                connection.execute(
+                    "ALTER TABLE sessions ADD COLUMN plan_state TEXT NOT NULL DEFAULT '{}'"
+                )
+            if "pending_user_input_requests" not in existing_columns:
+                connection.execute(
+                    "ALTER TABLE sessions ADD COLUMN pending_user_input_requests TEXT NOT NULL DEFAULT '{}'"
                 )
             if "deploy_connections" not in existing_columns:
                 connection.execute(
@@ -240,6 +263,7 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
             "workspace": state.workspace,
             "mode": state.mode,
             "model": state.model,
+            "reasoning_effort": state.reasoning_effort,
             "agent_type": state.agent_type,
             "phase": state.phase,
             "title": state.title,
@@ -259,9 +283,11 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
             "history_tools": self._to_json(state.history_tools),
             "thoughts": self._to_json(state.thoughts),
             "plan_steps": self._to_json(state.plan_steps),
+            "plan_state": self._to_json(state.plan_state),
             "pending_delete_confirmations": self._to_json(state.pending_delete_confirmations),
             "pending_commit_confirmations": self._to_json(state.pending_commit_confirmations),
             "pending_tag_confirmations": self._to_json(state.pending_tag_confirmations),
+            "pending_user_input_requests": self._to_json(state.pending_user_input_requests),
             "pending_connect_requests": self._to_json(state.pending_connect_requests),
             "deploy_connections": self._to_json(state.deploy_connections),
             "deploy_state": self._to_json(state.deploy_state),
@@ -273,6 +299,7 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
             workspace=str(row["workspace"]),
             mode=str(row["mode"]),
             model=str(row["model"]),
+            reasoning_effort=row["reasoning_effort"] if "reasoning_effort" in row.keys() else None,
             agent_type=str(row["agent_type"] if "agent_type" in row.keys() else "coding"),
             phase=str(row["phase"] if "phase" in row.keys() else "idle"),
             title=str(row["title"]),
@@ -292,9 +319,11 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
             history_tools=self._from_json(row["history_tools"], []),
             thoughts=self._from_json(row["thoughts"], []),
             plan_steps=self._from_json(row["plan_steps"], []),
+            plan_state=self._from_json(row["plan_state"] if "plan_state" in row.keys() else "{}", {}),
             pending_delete_confirmations=self._from_json(row["pending_delete_confirmations"], {}),
             pending_commit_confirmations=self._from_json(row["pending_commit_confirmations"] if "pending_commit_confirmations" in row.keys() else "{}", {}),
             pending_tag_confirmations=self._from_json(row["pending_tag_confirmations"] if "pending_tag_confirmations" in row.keys() else "{}", {}),
+            pending_user_input_requests=self._from_json(row["pending_user_input_requests"] if "pending_user_input_requests" in row.keys() else "{}", {}),
             pending_connect_requests=self._from_json(row["pending_connect_requests"] if "pending_connect_requests" in row.keys() else "{}", {}),
             deploy_connections=self._from_json(row["deploy_connections"] if "deploy_connections" in row.keys() else "{}", {}),
             deploy_state=self._from_json(row["deploy_state"] if "deploy_state" in row.keys() else "{}", {}),

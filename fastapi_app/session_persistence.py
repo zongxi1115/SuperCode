@@ -13,6 +13,12 @@ def session_has_persistable_history(session: Any) -> bool:
         return True
     if session.thoughts:
         return True
+    plan_state = getattr(session, "plan_state", {})
+    if isinstance(plan_state, dict) and (plan_state.get("draft") or plan_state.get("last_submitted_plan")):
+        return True
+    pending_user_inputs = getattr(session, "pending_user_input_requests", {})
+    if isinstance(pending_user_inputs, dict) and pending_user_inputs:
+        return True
     return False
 
 
@@ -43,6 +49,7 @@ def session_to_persisted_state(session: Any) -> PersistedSessionState:
         workspace=session.workspace,
         mode=session.mode,
         model=session.model,
+        reasoning_effort=session.reasoning_effort,
         agent_type=session.agent_type,
         phase=session.phase,
         title=session.summary_title(),
@@ -62,9 +69,11 @@ def session_to_persisted_state(session: Any) -> PersistedSessionState:
         history_tools=session.history_tools,
         thoughts=session.thoughts,
         plan_steps=session.plan_steps,
+        plan_state=session.plan_state,
         pending_delete_confirmations=session.pending_delete_confirmations,
         pending_commit_confirmations=session.pending_commit_confirmations,
         pending_tag_confirmations=session.pending_tag_confirmations,
+        pending_user_input_requests=session.pending_user_input_requests,
         pending_connect_requests=session.pending_connect_requests,
         deploy_connections=session.deploy_connection_manager.export_state(),
         deploy_state=session.deploy_state,

@@ -160,7 +160,7 @@ export function DeployConnectForm({
           return (
             <div key={field.name} className="flex items-center justify-between gap-4 px-4 py-3">
               <div className="flex items-center gap-2 shrink-0">
-                <span className="font-mono text-sm">{field.label}</span>
+                <span className="font-mono text-sm text-foreground">{field.label}</span>
                 {field.required && <Badge variant="secondary" className="text-xs">必填</Badge>}
               </div>
               <div className="flex items-center gap-1 flex-1 min-w-0">

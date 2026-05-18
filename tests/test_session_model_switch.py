@@ -29,6 +29,7 @@ class SwitchSessionModelTests(unittest.IsolatedAsyncioTestCase):
             (),
             {
                 "model": "gpt-test",
+                "reasoning_effort": "high",
                 "include_thoughts_in_context": False,
             },
         )()
@@ -41,7 +42,7 @@ class SwitchSessionModelTests(unittest.IsolatedAsyncioTestCase):
         ):
             await api_main.switch_session_model(
                 self.session.session_id,
-                api_main.SwitchModelRequest(model="gpt-test"),
+                api_main.SwitchModelRequest(model="gpt-test", reasoning_effort="high"),
             )
 
         self.assertIsNotNone(self.session.chat_session)
@@ -49,6 +50,7 @@ class SwitchSessionModelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metadata["session_id"], self.session.session_id)
         self.assertEqual(metadata["backend_base_url"], api_main.BACKEND_BASE_URL)
         self.assertIs(metadata["interactive_command_session"], self.interactive_session)
+        self.assertEqual(self.session.reasoning_effort, "high")
 
 
 if __name__ == "__main__":

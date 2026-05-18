@@ -45,7 +45,13 @@ import {
   CommitTimestamp,
 } from "@/components/ai-elements/commit";
 import { Terminal } from "@/components/ai-elements/terminal";
+import { Sources, SourceTag } from "@/components/ai-elements/sources";
 import { DeployConnectForm } from "@/components/ai-elements/deploy-connect-form";
+import {
+  PlanQuestionsQuiz,
+  type Question as PlanQuizQuestion,
+  type QuizSubmission,
+} from "@/components/ai-elements/plan-questions-quiz";
 import {
   Message,
   MessageContent,
@@ -87,6 +93,13 @@ import {
   ModelSelectorLogo,
 } from "@/components/ai-elements/model-selector";
 import { Button } from "@/components/ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { getFileLanguage } from "@/lib/app-utils";
 import { getFileIcon } from "@/lib/file-icons";
@@ -115,9 +128,13 @@ import {
   PlusIcon,
   PaperclipIcon,
   Square,
+  SearchIcon,
   TerminalIcon,
   Trash2Icon,
   XIcon,
+  LightbulbIcon,
+  Code2Icon,
+  RocketIcon,
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import type React from "react";
@@ -139,6 +156,7 @@ type ChatPanelProps = {
   input: string;
   isLoading: boolean;
   model: string | null;
+  reasoningEffort: string | null;
   modelOptions: ModelOption[];
   onContextOpenChange: (open: boolean) => void;
   onInputChange: (value: string) => void;
@@ -152,13 +170,20 @@ type ChatPanelProps = {
     approved: boolean,
   ) => void;
   onResolveConnectInput?: (toolCallId: string, values: Record<string, string>) => void;
+  onResolvePlanQuestionsInput?: (
+    toolCallId: string,
+    answers: QuizSubmission,
+  ) => void | Promise<void>;
   onModelChange: (modelId: string) => void;
+  onReasoningEffortChange: (reasoningEffort: string) => void;
   elementAttachments?: ElementAttachment[];
   onRemoveElementAttachment?: (id: string) => void;
 };
 
 const TOOL_ICONS: Record<string, React.ReactNode> = {
   connect: <GlobeIcon className="size-4" />,
+  search_web: <SearchIcon className="size-4" />,
+  fetch_url_content: <GlobeIcon className="size-4" />,
   list_file: <FolderOpenIcon className="size-4" />,
   read_file: <FileSearchIcon className="size-4" />,
   write_file: <PlusIcon className="size-4" />,
@@ -176,7 +201,19 @@ const TOOL_ICONS: Record<string, React.ReactNode> = {
 
 const TOOL_TITLES: Record<string, (args: Record<string, unknown>) => string> = {
   connect: () => "连接部署目标",
-  list_file: () => "正在列出文件",
+  search_web: (args) => {
+    const q = (args.query as string)?.trim();
+    return q ? `搜索: ${q}` : "网络搜索";
+  },
+  fetch_url_content: (args) => {
+    const urls = args.urls as string[] | undefined;
+    if (urls?.length) return `抓取网页 (${urls.length})`;
+    return "抓取网页内容";
+  },
+  list_file: (args) => {
+    const f = ((args.filename || args.path || args.file_path) as string)?.split(/[\\/]/).pop();
+    return f ? `正在搜索项目列表 ${f}` : "正在搜索项目列表";
+  },
   read_file: (args) => {
     const f = ((args.filename || args.path || args.file_path) as string)?.split(/[\\/]/).pop();
     return f ? `正在阅读 ${f}` : "正在阅读文件";
@@ -423,6 +460,7 @@ function ToolBody({
   onResolveDeleteConfirmation,
   onResolveGitConfirmation,
   onResolveConnectInput,
+  onResolvePlanQuestionsInput,
 }: {
   toolCall: ToolCallRecord;
   sessionId: string | null;
@@ -433,6 +471,10 @@ function ToolBody({
     approved: boolean,
   ) => void;
   onResolveConnectInput?: (toolCallId: string, values: Record<string, string>) => void;
+  onResolvePlanQuestionsInput?: (
+    toolCallId: string,
+    answers: QuizSubmission,
+  ) => void | Promise<void>;
 }) {
   const args = toolCall.arguments || {};
   const output =
@@ -526,6 +568,45 @@ function ToolBody({
           </div>
         )}
       </div>
+    );
+  }
+
+  if (
+    toolCall.inputRequest?.kind === "plan_questions" &&
+    Array.isArray(toolCall.inputRequest.questions)
+  ) {
+    const questions: PlanQuizQuestion[] = toolCall.inputRequest.questions.map(
+      (question) => ({
+        id: question.id,
+        type:
+          question.type === "single_choice"
+            ? "single"
+            : question.type === "multi_choice"
+              ? "multiple"
+              : "text",
+        title: question.prompt,
+        description: undefined,
+        placeholder: question.placeholder,
+        required: question.required,
+        includeOtherOption: true,
+        options: Array.isArray(question.options)
+          ? question.options.map((option) => ({
+              id: option.id,
+              label: option.label,
+            }))
+          : undefined,
+      }),
+    );
+
+    return (
+      <PlanQuestionsQuiz
+        questions={questions}
+        embedded
+        title={toolCall.inputRequest.title}
+        description={toolCall.inputRequest.message}
+        submitted={toolCall.state !== "input-requested"}
+        onSubmit={(answers) => onResolvePlanQuestionsInput?.(toolCall.id, answers)}
+      />
     );
   }
 
@@ -854,7 +935,7 @@ function ToolBody({
     );
   }
 
-  if (toolCall.name === "list_file" && typeof output === "string") {
+  if (toolCall.name === "list_file") {
     return (
       <div className="space-y-2">
         {filename && (
@@ -863,9 +944,6 @@ function ToolBody({
             {filename}
           </TaskItemFile>
         )}
-        <pre className="overflow-x-auto rounded-md bg-muted/50 p-2 text-xs font-mono whitespace-pre-wrap">
-          {output}
-        </pre>
       </div>
     );
   }
@@ -894,6 +972,38 @@ function ToolBody({
     const isRunning = toolCall.state === "running";
 
     return <Terminal output={termOutput} isStreaming={isRunning} />;
+  }
+
+  if (toolCall.name === "search_web") {
+    const results = output && typeof output === "object"
+      ? (output as Record<string, unknown>)?.results as Array<{ rank?: number; title?: string; url?: string; snippet?: string; source?: string; publishedAt?: string }> | undefined
+      : undefined;
+    if (results && results.length > 0) {
+      return (
+        <Sources title="搜索的内容">
+          {results.map((r, i) => (
+            <SourceTag key={i} href={r.url ?? "#"} title={r.title || r.source} />
+          ))}
+        </Sources>
+      );
+    }
+    return <p className="text-xs text-muted-foreground">无搜索结果</p>;
+  }
+
+  if (toolCall.name === "fetch_url_content") {
+    const documents = output && typeof output === "object"
+      ? (output as Record<string, unknown>)?.documents as Array<{ url?: string; title?: string; content?: string }> | undefined
+      : undefined;
+    if (documents && documents.length > 0) {
+      return (
+        <Sources title="抓取的内容">
+          {documents.map((d, i) => (
+            <SourceTag key={i} href={d.url ?? "#"} title={d.title} />
+          ))}
+        </Sources>
+      );
+    }
+    return <p className="text-xs text-muted-foreground">无抓取结果</p>;
   }
 
   return (
@@ -996,7 +1106,40 @@ function DataPartView({
 }) {
   const data = part.data;
 
-  if (part.dataType === "data-session-state") return null;
+  if (part.dataType === "data-session-state") {
+    const agentType = data?.agentType as string | undefined;
+    if (!agentType) return null;
+
+    const modeConfig: Record<string, { label: string; icon: React.ReactNode; color: string }> = {
+      plan: {
+        label: "计划",
+        icon: <LightbulbIcon className="size-3.5" />,
+        color: "text-amber-600",
+      },
+      coding: {
+        label: "编码",
+        icon: <Code2Icon className="size-3.5" />,
+        color: "text-blue-600",
+      },
+      deploy: {
+        label: "部署",
+        icon: <RocketIcon className="size-3.5" />,
+        color: "text-emerald-600",
+      },
+    };
+
+    const config = modeConfig[agentType];
+    if (!config) return null;
+
+    return (
+      <div className="flex items-center gap-2 rounded-md bg-muted/30 px-3 py-2 text-xs">
+        <span className={config.color}>{config.icon}</span>
+        <span className="font-medium text-foreground">开始 {config.label} 环节</span>
+      </div>
+    );
+  }
+
+  if (part.dataType === "data-plan-questions") return null;
 
   if (
     part.dataType === "data-chart" &&
@@ -1124,6 +1267,7 @@ const MessageList = memo(function MessageList({
   onResolveDeleteConfirmation,
   onResolveGitConfirmation,
   onResolveConnectInput,
+  onResolvePlanQuestionsInput,
 }: {
   sessionId: string | null;
   isLoading: boolean;
@@ -1135,6 +1279,10 @@ const MessageList = memo(function MessageList({
     approved: boolean,
   ) => void;
   onResolveConnectInput?: (toolCallId: string, values: Record<string, string>) => void;
+  onResolvePlanQuestionsInput?: (
+    toolCallId: string,
+    answers: QuizSubmission,
+  ) => void | Promise<void>;
 }) {
   const statusLabelMap: Record<ToolCallRecord["state"], string> = {
     running: "执行中",
@@ -1165,6 +1313,7 @@ const MessageList = memo(function MessageList({
               onResolveDeleteConfirmation={onResolveDeleteConfirmation}
               onResolveGitConfirmation={onResolveGitConfirmation}
               onResolveConnectInput={onResolveConnectInput}
+              onResolvePlanQuestionsInput={onResolvePlanQuestionsInput}
             />
           </TaskItem>
         </TaskContent>
@@ -1237,6 +1386,7 @@ const MessageList = memo(function MessageList({
       | { type: "data"; block: Extract<ContentBlock, { type: "data" }> }
     )[] = [];
     let cotBuffer: ContentBlock[] = [];
+    let lastAgentType = "";
 
     const flushCot = () => {
       if (cotBuffer.length === 0) return;
@@ -1258,8 +1408,16 @@ const MessageList = memo(function MessageList({
         flushCot();
         groups.push({ type: "text", block: part });
       } else if (part.type === "data") {
-        flushCot();
-        groups.push({ type: "data", block: part });
+        if (part.dataType === "data-session-state") {
+          const agentType = (part.data as Record<string, unknown> | undefined)?.agentType as string | undefined;
+          if (agentType && agentType !== lastAgentType) {
+            lastAgentType = agentType;
+            cotBuffer.push(part);
+          }
+        } else {
+          flushCot();
+          groups.push({ type: "data", block: part });
+        }
       }
     }
     flushCot();
@@ -1357,6 +1515,13 @@ const MessageList = memo(function MessageList({
                     </div>
                   );
                 }
+                if (block.type === "data" && block.dataType === "data-session-state") {
+                  return (
+                    <div key={`session-state-${gi}-${bi}`}>
+                      <DataPartView part={block} />
+                    </div>
+                  );
+                }
                 return null;
               });
             })()}
@@ -1400,6 +1565,7 @@ const ChatStreamBody = memo(function ChatStreamBody({
   onResolveDeleteConfirmation,
   onResolveGitConfirmation,
   onResolveConnectInput,
+  onResolvePlanQuestionsInput,
   personaState,
 }: {
   sessionId: string | null;
@@ -1412,6 +1578,10 @@ const ChatStreamBody = memo(function ChatStreamBody({
     approved: boolean,
   ) => void;
   onResolveConnectInput?: (toolCallId: string, values: Record<string, string>) => void;
+  onResolvePlanQuestionsInput?: (
+    toolCallId: string,
+    answers: QuizSubmission,
+  ) => void | Promise<void>;
   personaState: PersonaState;
 }) {
   if (messages.length === 0) {
@@ -1427,6 +1597,7 @@ const ChatStreamBody = memo(function ChatStreamBody({
         onResolveDeleteConfirmation={onResolveDeleteConfirmation}
         onResolveGitConfirmation={onResolveGitConfirmation}
         onResolveConnectInput={onResolveConnectInput}
+        onResolvePlanQuestionsInput={onResolvePlanQuestionsInput}
       />
       <PersonaRail state={personaState} />
     </>
@@ -1467,6 +1638,7 @@ export function ChatPanel({
   input,
   isLoading,
   model,
+  reasoningEffort,
   modelOptions,
   onContextOpenChange,
   onInputChange,
@@ -1476,7 +1648,9 @@ export function ChatPanel({
   onResolveDeleteConfirmation,
   onResolveGitConfirmation,
   onResolveConnectInput,
+  onResolvePlanQuestionsInput,
   onModelChange,
+  onReasoningEffortChange,
   elementAttachments = [],
   onRemoveElementAttachment,
 }: ChatPanelProps) {
@@ -1520,6 +1694,7 @@ export function ChatPanel({
 
   const selectedModel =
     modelOptions.find((m) => m.id === model) ?? modelOptions[0];
+  const selectedReasoningEffort = reasoningEffort ?? "default";
 
   const lastAssistantMessage = useMemo(() => {
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -1571,6 +1746,7 @@ export function ChatPanel({
             onResolveDeleteConfirmation={onResolveDeleteConfirmation}
             onResolveGitConfirmation={onResolveGitConfirmation}
             onResolveConnectInput={onResolveConnectInput}
+            onResolvePlanQuestionsInput={onResolvePlanQuestionsInput}
             personaState={personaState}
           />
         </ConversationContent>
@@ -1656,8 +1832,8 @@ export function ChatPanel({
                 className="min-h-[80px] resize-none border-0 bg-transparent px-1 py-1.5 shadow-none focus-visible:ring-0"
                 rows={3}
               />
-              <div className="mt-1.5 flex items-center justify-between gap-2 border-t border-border/50 pt-2">
-                <div className="flex items-center gap-1">
+              <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2 border-t border-border/50 pt-2">
+                <div className="flex min-w-0 flex-wrap items-center gap-1">
                   <Button
                     size="icon-sm"
                     variant="ghost"
@@ -1708,6 +1884,29 @@ export function ChatPanel({
                       </ModelSelectorList>
                     </ModelSelectorContent>
                   </ModelSelector>
+
+                  <Select
+                    value={selectedReasoningEffort}
+                    onValueChange={onReasoningEffortChange}
+                  >
+                    <SelectTrigger
+                      size="sm"
+                      className="h-7 min-w-[108px] max-w-full gap-1.5 border-0 px-2 text-xs text-muted-foreground shadow-none"
+                      aria-label="选择思考程度"
+                    >
+                      <LightbulbIcon className="size-3.5" />
+                      <SelectValue placeholder="思考程度" />
+                    </SelectTrigger>
+                    <SelectContent align="start">
+                      <SelectItem value="default">默认</SelectItem>
+                      <SelectItem value="none">不思考</SelectItem>
+                      <SelectItem value="minimal">极低</SelectItem>
+                      <SelectItem value="low">低</SelectItem>
+                      <SelectItem value="medium">中</SelectItem>
+                      <SelectItem value="high">高</SelectItem>
+                      <SelectItem value="xhigh">超高</SelectItem>
+                    </SelectContent>
+                  </Select>
 
                   <ContextViewer
                     contextData={contextData}

@@ -7,6 +7,7 @@ import signal
 import asyncio
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -29,7 +30,14 @@ except ImportError:  # pragma: no cover - optional dependency
 from deploy_agent import DeployConnectionManager, DeployPromptBrain, build_deploy_tools
 from agent import AgentEvent, ChatSession, CodingAgent, OpenAICompatibleClient
 from coding_agent import CodingPromptBrain, InteractiveCommandSession, build_coding_tools
-from coding_agent.tools import delete_file_in_workspace, execute_git_commit, execute_git_tag, init_git_repo
+from coding_agent.tools import (
+    DEFAULT_IGNORED_DIR_NAMES,
+    delete_file_in_workspace,
+    execute_git_commit,
+    execute_git_tag,
+    init_git_repo,
+)
+from plan_agent import PlanPromptBrain, build_plan_tools
 from fastapi_app.api_models import (
     ChatStreamRequest,
     ConnectToolSubmitRequest,
@@ -39,6 +47,7 @@ from fastapi_app.api_models import (
     GitCommitRequest,
     GitTagRequest,
     ModelConfigPayload,
+    PlanSubmitRequest,
     SessionContextMessage,
     SessionContextResponse,
     SessionContextTool,
@@ -48,6 +57,7 @@ from fastapi_app.api_models import (
     TerminalInputRequest,
     TerminalSnapshotResponse,
     ToolConfirmationRequest,
+    ToolInputSubmitRequest,
     UIModelProviderPayload,
 )
 from fastapi_app.model_config_store import (
@@ -139,6 +149,7 @@ class UISession:
     session_id: str
     model: str
     workspace: str
+    reasoning_effort: str | None = None
     mode: str = "demo"
     agent_type: str = "coding"
     phase: str = "idle"
@@ -160,9 +171,11 @@ class UISession:
     pending_delete_confirmations: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
     pending_commit_confirmations: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
     pending_tag_confirmations: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
+    pending_user_input_requests: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
     pending_connect_requests: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
     deploy_connection_manager: DeployConnectionManager | None = field(default=None, repr=False)
     deploy_state: dict[str, Any] = field(default_factory=dict)
+    plan_state: dict[str, Any] = field(default_factory=dict)
     history_messages: list[dict[str, Any]] = field(default_factory=list)
     history_tools: list[dict[str, Any]] = field(default_factory=list)
     thoughts: list[str] = field(default_factory=list)
@@ -179,6 +192,7 @@ class UISession:
             )
         self.phase = normalize_session_phase(self.phase)
         self.deploy_state = normalize_deploy_state(self.deploy_state)
+        self.plan_state = normalize_plan_state(self.plan_state)
         refresh_session_runtime_state(self)
 
     def snapshot(self) -> CreateSessionResponse:
@@ -189,10 +203,12 @@ class UISession:
             sessionId=self.session_id,
             model=self.model,
             modelId=resolve_model_reference_id(self.model, self.env_file),
+            reasoningEffort=self.reasoning_effort,
             mode=self.mode,
             agentType=self.agent_type,
             phase=self.phase,
             deployState=self.deploy_state,
+            planState=self.plan_state,
             isGenerating=self.is_generating,
             startupError=self.startup_error,
             envFile=self.env_file,
@@ -288,9 +304,11 @@ class UISession:
             workspace=self.workspace,
             mode=self.mode,
             model=self.model,
+            reasoningEffort=self.reasoning_effort,
             agentType=self.agent_type,
             phase=self.phase,
             deployState=self.deploy_state,
+            planState=self.plan_state,
             selectedFilePath=self.selected_file_path,
             openFiles=self.open_files[-6:],
             messageCount=len(self.history_messages),
@@ -316,6 +334,18 @@ class UISession:
                 content = compact_text(str(message.get("content", "")), 40)
                 if content:
                     return content
+        plan_state = normalize_plan_state(self.plan_state)
+        plan = (
+            plan_state.get("last_submitted_plan")
+            if isinstance(plan_state.get("last_submitted_plan"), dict)
+            else plan_state.get("draft")
+            if isinstance(plan_state.get("draft"), dict)
+            else None
+        )
+        if isinstance(plan, dict):
+            title = compact_text(str(plan.get("title") or ""), 40)
+            if title:
+                return f"计划：{title}"
         workspace_name = Path(self.workspace).name or self.workspace
         return f"{workspace_name} 新对话"
 
@@ -324,6 +354,18 @@ class UISession:
             content = compact_text(str(message.get("content", "")), 72)
             if content:
                 return content
+        plan_state = normalize_plan_state(self.plan_state)
+        plan = (
+            plan_state.get("last_submitted_plan")
+            if isinstance(plan_state.get("last_submitted_plan"), dict)
+            else plan_state.get("draft")
+            if isinstance(plan_state.get("draft"), dict)
+            else None
+        )
+        if isinstance(plan, dict):
+            summary = compact_text(str(plan.get("summary") or ""), 72)
+            if summary:
+                return summary
         return "还没有消息内容"
 
 
@@ -427,11 +469,80 @@ CODING_ROUTE_KEYWORDS = (
     "脚本",
 )
 
+PLAN_ROUTE_KEYWORDS = (
+    "plan",
+    "planning",
+    "research",
+    "clarify",
+    "scope",
+    "需求澄清",
+    "先别写代码",
+    "先规划",
+    "先计划",
+    "先调研",
+    "先梳理",
+    "出个计划",
+    "列个计划",
+    "做方案",
+    "需求分析",
+    "技术方案",
+)
+
+PLAN_GENERIC_FOLLOWUPS = ROUTER_GENERIC_FOLLOWUPS | {
+    "改下计划",
+    "调整计划",
+    "修改计划",
+    "继续改计划",
+    "再细一点",
+    "再具体一点",
+}
+
+VAGUE_REQUIREMENT_KEYWORDS = (
+    "做一个",
+    "做个",
+    "搞一个",
+    "整一个",
+    "搭一个",
+    "弄一个",
+    "优化一下",
+    "先看看",
+    "想做",
+    "想搞",
+    "需要一个",
+)
+
+CODE_FILE_SUFFIXES = {
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".py",
+    ".go",
+    ".rs",
+    ".java",
+    ".kt",
+    ".swift",
+    ".vue",
+    ".svelte",
+    ".css",
+    ".scss",
+    ".html",
+    ".json",
+    ".yml",
+    ".yaml",
+}
+
 
 def normalize_session_phase(phase: str | None) -> str:
     normalized = str(phase or "idle").strip().lower()
     allowed = {
         "idle",
+        "clarifying",
+        "researching",
+        "planning",
+        "awaiting_user_input",
+        "plan_ready",
+        "submitted",
         "awaiting_connect_input",
         "connected",
         "exploring",
@@ -441,6 +552,25 @@ def normalize_session_phase(phase: str | None) -> str:
         "failed",
     }
     return normalized if normalized in allowed else "idle"
+
+
+ALLOWED_REASONING_EFFORTS = {
+    "none",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+}
+
+
+def normalize_reasoning_effort(value: str | None) -> str | None:
+    normalized = str(value or "").strip().lower()
+    if not normalized or normalized == "default":
+        return None
+    if normalized not in ALLOWED_REASONING_EFFORTS:
+        raise ValueError("reasoning_effort 仅支持 none、minimal、low、medium、high、xhigh 或 default。")
+    return normalized
 
 
 def build_default_deploy_state() -> dict[str, Any]:
@@ -475,14 +605,73 @@ def normalize_deploy_state(value: object) -> dict[str, Any]:
     return state
 
 
+def build_default_plan_state() -> dict[str, Any]:
+    return {
+        "status": "idle",
+        "draft": None,
+        "last_submitted_plan": None,
+        "pending_coding_input": None,
+    }
+
+
+def normalize_plan_state(value: object) -> dict[str, Any]:
+    state = build_default_plan_state()
+    if isinstance(value, dict):
+        for key in state:
+            if key in value:
+                state[key] = value[key]
+    if not isinstance(state.get("draft"), dict):
+        state["draft"] = None
+    if not isinstance(state.get("last_submitted_plan"), dict):
+        state["last_submitted_plan"] = None
+    pending_coding_input = state.get("pending_coding_input")
+    state["pending_coding_input"] = (
+        str(pending_coding_input).strip() if isinstance(pending_coding_input, str) else None
+    )
+    status = str(state.get("status") or "idle").strip().lower()
+    if status not in {"idle", "clarifying", "researching", "planning", "awaiting_user_input", "draft_ready", "submitted"}:
+        state["status"] = "idle"
+    else:
+        state["status"] = status
+    return state
+
+
 def refresh_session_runtime_state(session: UISession) -> None:
+    if session.agent_type == "plan":
+        session.plan_state = normalize_plan_state(session.plan_state)
+        session.deploy_state = normalize_deploy_state(session.deploy_state)
+        if session.pending_user_input_requests:
+            session.phase = "awaiting_user_input"
+            session.plan_state["status"] = "awaiting_user_input"
+            return
+        if session.plan_state.get("status") in {"clarifying", "researching", "planning"}:
+            session.phase = (
+                "planning"
+                if session.plan_state.get("status") == "planning"
+                else str(session.plan_state.get("status"))
+            )
+            return
+        if session.plan_state.get("draft"):
+            session.phase = "plan_ready"
+            if session.plan_state.get("status") != "submitted":
+                session.plan_state["status"] = "draft_ready"
+            return
+        session.phase = normalize_session_phase(session.phase)
+        if session.phase not in {"clarifying", "researching", "planning"}:
+            session.phase = "clarifying"
+        if session.plan_state.get("status") == "idle":
+            session.plan_state["status"] = "clarifying"
+        return
+
     if session.agent_type != "deploy":
         session.phase = "idle"
+        session.plan_state = normalize_plan_state(session.plan_state)
         session.deploy_state = normalize_deploy_state(session.deploy_state)
         return
 
     session.phase = normalize_session_phase(session.phase)
     deploy_state = normalize_deploy_state(session.deploy_state)
+    session.plan_state = normalize_plan_state(session.plan_state)
     manager = session.deploy_connection_manager
     connections = manager.list_connections() if manager is not None else []
     deploy_state["connection_count"] = len(connections)
@@ -535,6 +724,7 @@ def build_agent_runtime_state(session: UISession) -> dict[str, Any]:
         "phase": session.phase,
         "workspace": session.workspace,
         "deploy_state": session.deploy_state if session.agent_type == "deploy" else {},
+        "plan_state": session.plan_state,
     }
 
 
@@ -563,7 +753,29 @@ def update_deploy_state(session: UISession, **updates: Any) -> None:
     refresh_session_runtime_state(session)
 
 
+def update_plan_state(session: UISession, **updates: Any) -> None:
+    plan_state = normalize_plan_state(session.plan_state)
+    for key, value in updates.items():
+        if key in plan_state:
+            plan_state[key] = value
+    session.plan_state = normalize_plan_state(plan_state)
+    refresh_session_runtime_state(session)
+
+
 def reset_phase_for_new_turn(session: UISession) -> None:
+    if session.agent_type == "plan":
+        refresh_session_runtime_state(session)
+        if session.pending_user_input_requests:
+            set_session_phase(session, "awaiting_user_input")
+            update_plan_state(session, status="awaiting_user_input")
+            return
+        if session.plan_state.get("draft"):
+            set_session_phase(session, "plan_ready")
+            update_plan_state(session, status="draft_ready")
+            return
+        set_session_phase(session, "clarifying")
+        update_plan_state(session, status="clarifying")
+        return
     if session.agent_type != "deploy":
         set_session_phase(session, "idle")
         return
@@ -600,6 +812,67 @@ def _contains_any_keyword(text: str, keywords: tuple[str, ...] | set[str]) -> bo
     return any(keyword in text for keyword in keywords)
 
 
+def _message_has_specific_path_hint(text: str) -> bool:
+    return bool(
+        re.search(r"[\w./-]+\.(ts|tsx|js|jsx|py|go|rs|java|kt|swift|vue|svelte|json|yml|yaml|css|scss|html|md)\b", text)
+        or "/" in text
+        or "\\" in text
+        or "第" in text and "行" in text
+    )
+
+
+def _workspace_looks_empty(workspace: str) -> bool:
+    workspace_path = resolve_workspace_path(workspace)
+    relevant_files = 0
+    code_files = 0
+    for current_root, dirnames, filenames in os.walk(workspace_path, topdown=True):
+        dirnames[:] = [name for name in dirnames if name not in DEFAULT_IGNORED_DIR_NAMES]
+        if Path(current_root).name == ".git":
+            continue
+        for filename in filenames:
+            if filename.startswith(".") and filename not in {".env", ".gitignore"}:
+                continue
+            relevant_files += 1
+            if Path(filename).suffix.lower() in CODE_FILE_SUFFIXES:
+                code_files += 1
+            if relevant_files > 10 and code_files > 0:
+                return False
+    return relevant_files <= 3 or code_files == 0
+
+
+def _is_vague_requirement(text: str) -> bool:
+    if _contains_any_keyword(text, VAGUE_REQUIREMENT_KEYWORDS):
+        return True
+    if _message_has_specific_path_hint(text):
+        return False
+    if _contains_any_keyword(text, DEPLOY_ROUTE_KEYWORDS):
+        return False
+    if any(keyword in text for keyword in ("api", "接口", "组件", "函数", "页面", "数据库", "表", "测试")):
+        return False
+    return len(text) <= 16
+
+
+def _is_plan_session_active(session: UISession) -> bool:
+    if session.agent_type != "plan":
+        return False
+    plan_state = normalize_plan_state(session.plan_state)
+    return plan_state.get("status") != "submitted"
+
+
+def _should_force_plan_route(session: UISession, text: str) -> bool:
+    if _contains_any_keyword(text, PLAN_ROUTE_KEYWORDS):
+        return True
+    if _is_plan_session_active(session) and text in PLAN_GENERIC_FOLLOWUPS:
+        return True
+    if _contains_any_keyword(text, DEPLOY_ROUTE_KEYWORDS):
+        return False
+    if _message_has_specific_path_hint(text):
+        return False
+    if _workspace_looks_empty(session.workspace) and not session.history_messages:
+        return True
+    return _is_vague_requirement(text)
+
+
 def route_agent_type_for_message(session: UISession, user_message: str) -> str:
     text = _normalized_message_for_routing(user_message)
     if not text:
@@ -607,8 +880,21 @@ def route_agent_type_for_message(session: UISession, user_message: str) -> str:
 
     if session.pending_connect_requests:
         return "deploy"
+    if session.pending_user_input_requests:
+        return "plan"
+    pending_coding_input = str(normalize_plan_state(session.plan_state).get("pending_coding_input") or "").strip()
+    if pending_coding_input and text == _normalized_message_for_routing(pending_coding_input):
+        return "coding"
 
     active_deploy_session = bool(normalize_deploy_state(session.deploy_state).get("active_session_id"))
+
+    if active_deploy_session and text in ROUTER_GENERIC_FOLLOWUPS:
+        return "deploy"
+    if active_deploy_session and session.agent_type == "deploy":
+        return "deploy"
+
+    if _should_force_plan_route(session, text):
+        return "plan"
 
     if _contains_any_keyword(text, CODING_ROUTE_KEYWORDS):
         return "coding"
@@ -616,20 +902,18 @@ def route_agent_type_for_message(session: UISession, user_message: str) -> str:
     if _contains_any_keyword(text, DEPLOY_ROUTE_KEYWORDS):
         return "deploy"
 
-    if active_deploy_session and text in ROUTER_GENERIC_FOLLOWUPS:
-        return "deploy"
-
-    if active_deploy_session and session.agent_type == "deploy":
-        return "deploy"
+    if _is_plan_session_active(session):
+        return "plan"
 
     return "coding"
 
 
 def rebuild_chat_session_for_agent_type(session: UISession, agent_type: str) -> None:
-    chat_session, model_name, startup_error, env_file_used = build_chat_session(
+    chat_session, model_name, startup_error, env_file_used, reasoning_effort = build_chat_session(
         session.workspace,
         session.env_file,
         agent_type=agent_type,
+        reasoning_effort=session.reasoning_effort,
     )
 
     session.agent_type = agent_type
@@ -637,6 +921,7 @@ def rebuild_chat_session_for_agent_type(session: UISession, agent_type: str) -> 
     session.mode = "agent" if chat_session is not None else "demo"
     session.startup_error = startup_error
     session.env_file = env_file_used or session.env_file
+    session.reasoning_effort = reasoning_effort
     if chat_session is not None:
         session.model = model_name
         seed_chat_session_history(session.chat_session, session.history_messages, session.history_tools)
@@ -659,7 +944,9 @@ def route_session_for_user_message(session: UISession, user_message: str) -> Non
         session.agent_type = next_agent_type
 
     session.plan_steps = build_default_plan_steps(session.agent_type)
-    if session.agent_type != "deploy":
+    if session.agent_type == "plan":
+        reset_phase_for_new_turn(session)
+    elif session.agent_type != "deploy":
         set_session_phase(session, "idle")
     else:
         reset_phase_for_new_turn(session)
@@ -667,6 +954,8 @@ def route_session_for_user_message(session: UISession, user_message: str) -> Non
 
 
 def build_default_plan_steps(agent_type: str) -> list[dict[str, str]]:
+    if agent_type == "plan":
+        return []
     if agent_type == "deploy":
         return [
             {
@@ -759,9 +1048,10 @@ def hydrate_session_from_state(state: PersistedSessionState) -> UISession:
         if isinstance(connection, dict):
             deploy_connection_manager.register_connection(connection)
 
-    chat_session, model_name, startup_error, env_file_used = build_chat_session(
+    chat_session, model_name, startup_error, env_file_used, resolved_reasoning_effort = build_chat_session(
         state.workspace,
         state.env_file,
+        reasoning_effort=state.reasoning_effort,
         agent_type=state.agent_type,
     )
     interactive_command_session = InteractiveCommandSession(
@@ -770,6 +1060,7 @@ def hydrate_session_from_state(state: PersistedSessionState) -> UISession:
     session = UISession(
         session_id=state.session_id,
         model=model_name if chat_session is not None else state.model,
+        reasoning_effort=resolved_reasoning_effort if chat_session is not None else state.reasoning_effort,
         workspace=state.workspace,
         mode="agent" if chat_session is not None else state.mode,
         agent_type=state.agent_type,
@@ -790,9 +1081,11 @@ def hydrate_session_from_state(state: PersistedSessionState) -> UISession:
         created_at=state.created_at,
         updated_at=state.updated_at,
         plan_steps=state.plan_steps,
+        plan_state=state.plan_state,
         pending_delete_confirmations=state.pending_delete_confirmations,
         pending_commit_confirmations=state.pending_commit_confirmations,
         pending_tag_confirmations=state.pending_tag_confirmations,
+        pending_user_input_requests=state.pending_user_input_requests,
         pending_connect_requests=state.pending_connect_requests,
         deploy_connection_manager=deploy_connection_manager,
         deploy_state=state.deploy_state,
@@ -877,9 +1170,19 @@ async def switch_session_model(session_id: str, request: SwitchModelRequest) -> 
     session = require_session(session_id)
     model_option = resolve_model_option(request.model, request.env_file)
     model_ref = model_option["envFile"]
+    provided_fields = set(getattr(request, "model_fields_set", set()))
+    try:
+        reasoning_effort = (
+            normalize_reasoning_effort(request.reasoning_effort)
+            if "reasoning_effort" in provided_fields
+            else session.reasoning_effort
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     try:
         config, normalized_model_ref = build_agent_config(ROOT, model_ref)
+        config.reasoning_effort = reasoning_effort
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -913,6 +1216,7 @@ async def switch_session_model(session_id: str, request: SwitchModelRequest) -> 
         )
         sync_session_runtime_state_for_agent(session)
     session.model = config.model
+    session.reasoning_effort = config.reasoning_effort
     session.env_file = normalized_model_ref
     session.mode = "agent"
     session.startup_error = None
@@ -921,10 +1225,12 @@ async def switch_session_model(session_id: str, request: SwitchModelRequest) -> 
     return JSONResponse({
         "model": session.model,
         "modelId": resolve_model_reference_id(session.model, session.env_file),
+        "reasoningEffort": session.reasoning_effort,
         "mode": session.mode,
         "agentType": session.agent_type,
         "phase": session.phase,
         "deployState": session.deploy_state,
+        "planState": session.plan_state,
         "envFile": session.env_file,
         "previewUrl": session.preview_url,
     })
@@ -942,14 +1248,30 @@ async def create_session(request: CreateSessionRequest) -> JSONResponse:
     workspace = normalize_workspace(request.workspace)
     agent_type = normalize_agent_type(request.agent_type)
     requested_env_file = resolve_requested_env_file(request.model, request.env_file)
+    try:
+        reasoning_effort = normalize_reasoning_effort(request.reasoning_effort)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     try:
-        chat_session, model_name, startup_error, env_file_used = await asyncio.wait_for(
-            asyncio.to_thread(build_chat_session, workspace, requested_env_file, agent_type),
+        chat_session, model_name, startup_error, env_file_used, resolved_reasoning_effort = await asyncio.wait_for(
+            asyncio.to_thread(
+                build_chat_session,
+                workspace,
+                requested_env_file,
+                agent_type,
+                reasoning_effort,
+            ),
             timeout=30,
         )
     except asyncio.TimeoutError:
-        chat_session, model_name, startup_error, env_file_used = None, "Demo", "初始化模型超时", None
+        chat_session, model_name, startup_error, env_file_used, resolved_reasoning_effort = (
+            None,
+            "Demo",
+            "初始化模型超时",
+            None,
+            reasoning_effort,
+        )
 
     interactive_command_session = InteractiveCommandSession(
         workspace=resolve_workspace_path(workspace)
@@ -965,6 +1287,7 @@ async def create_session(request: CreateSessionRequest) -> JSONResponse:
     session = UISession(
         session_id=session_id,
         model=model_name,
+        reasoning_effort=resolved_reasoning_effort,
         workspace=workspace,
         env_file=env_file_used,
         agent_type=agent_type,
@@ -997,10 +1320,12 @@ async def create_session(request: CreateSessionRequest) -> JSONResponse:
         snapshot = CreateSessionResponse(
             sessionId=session.session_id,
             model=session.model,
+            reasoningEffort=session.reasoning_effort,
             mode=session.mode,
             agentType=session.agent_type,
             phase=session.phase,
             deployState=session.deploy_state,
+            planState=session.plan_state,
             isGenerating=session.is_generating,
             startupError=session.startup_error,
             envFile=session.env_file,
@@ -1039,6 +1364,7 @@ async def get_session_snapshot(session_id: str) -> JSONResponse:
             agentType=session.agent_type,
             phase=session.phase,
             deployState=session.deploy_state,
+            planState=session.plan_state,
             isGenerating=session.is_generating,
             startupError=session.startup_error,
             envFile=session.env_file,
@@ -1751,6 +2077,315 @@ async def submit_connect_tool(
     )
 
 
+def _normalize_tool_input_answers(
+    input_request: dict[str, Any],
+    request: ToolInputSubmitRequest,
+) -> list[dict[str, Any]]:
+    raw_questions = input_request.get("questions")
+    if not isinstance(raw_questions, list) or not raw_questions:
+        raise HTTPException(status_code=400, detail="当前输入请求缺少 questions。")
+
+    questions_by_id: dict[str, dict[str, Any]] = {}
+    question_order: list[str] = []
+    for raw_question in raw_questions:
+        if not isinstance(raw_question, dict):
+            continue
+        question_id = str(raw_question.get("id") or "").strip()
+        if not question_id:
+            continue
+        questions_by_id[question_id] = raw_question
+        question_order.append(question_id)
+
+    answers_by_id = {answer.questionId.strip(): answer for answer in request.answers if answer.questionId.strip()}
+    normalized_answers: list[dict[str, Any]] = []
+
+    unknown_answers = sorted(set(answers_by_id) - set(questions_by_id))
+    if unknown_answers:
+        raise HTTPException(status_code=400, detail=f"存在未知问题 ID：{', '.join(unknown_answers)}")
+
+    for question_id in question_order:
+        question = questions_by_id[question_id]
+        answer = answers_by_id.get(question_id)
+        question_type = str(question.get("type") or "").strip()
+        prompt = str(question.get("prompt") or "").strip()
+        required = bool(question.get("required", True))
+        other_text = ""
+        selected_option_ids: list[str] = []
+        free_text = ""
+
+        if answer is not None:
+            other_text = str(answer.otherText or "").strip()
+            selected_option_ids = [option_id.strip() for option_id in answer.selectedOptionIds if option_id.strip()]
+            free_text = str(answer.text or "").strip()
+
+        if question_type == "short_text":
+            if required and not free_text:
+                raise HTTPException(status_code=400, detail=f"问题「{prompt}」尚未回答。")
+            normalized_answers.append(
+                {
+                    "questionId": question_id,
+                    "type": question_type,
+                    "prompt": prompt,
+                    "text": free_text,
+                    "otherText": other_text or None,
+                }
+            )
+            continue
+
+        raw_options = question.get("options")
+        options = raw_options if isinstance(raw_options, list) else []
+        options_by_id = {
+            str(option.get("id") or "").strip(): option
+            for option in options
+            if isinstance(option, dict) and str(option.get("id") or "").strip()
+        }
+
+        invalid_option_ids = [option_id for option_id in selected_option_ids if option_id not in options_by_id]
+        if invalid_option_ids:
+            raise HTTPException(
+                status_code=400,
+                detail=f"问题「{prompt}」包含未知选项：{', '.join(invalid_option_ids)}",
+            )
+        if question_type == "single_choice" and len(selected_option_ids) > 1:
+            raise HTTPException(status_code=400, detail=f"问题「{prompt}」只能选择一个选项。")
+        if required and not selected_option_ids and not other_text:
+            raise HTTPException(status_code=400, detail=f"问题「{prompt}」尚未回答。")
+
+        normalized_answers.append(
+            {
+                "questionId": question_id,
+                "type": question_type,
+                "prompt": prompt,
+                "selectedOptionIds": selected_option_ids,
+                "selectedOptions": [
+                    {
+                        "id": option_id,
+                        "label": str(options_by_id[option_id].get("label") or "").strip(),
+                        "description": str(options_by_id[option_id].get("description") or "").strip(),
+                    }
+                    for option_id in selected_option_ids
+                ],
+                "otherText": other_text or None,
+                "text": free_text or None,
+            }
+        )
+
+    return normalized_answers
+
+
+def _format_tool_input_answers_for_agent(
+    title: str,
+    answers: list[dict[str, Any]],
+) -> str:
+    lines = [f"[用户回答] {title}".strip()]
+    for answer in answers:
+        prompt = str(answer.get("prompt") or answer.get("questionId") or "未命名问题").strip()
+        answer_type = str(answer.get("type") or "").strip()
+        if answer_type == "short_text":
+            value = str(answer.get("text") or answer.get("otherText") or "").strip() or "(未填写)"
+        else:
+            labels = [
+                str(option.get("label") or "").strip()
+                for option in answer.get("selectedOptions", [])
+                if isinstance(option, dict) and str(option.get("label") or "").strip()
+            ]
+            other_text = str(answer.get("otherText") or "").strip()
+            if other_text:
+                labels.append(f"其他：{other_text}")
+            value = "；".join(labels) if labels else "(未填写)"
+        lines.append(f"- {prompt}: {value}")
+    return "\n".join(lines)
+
+
+def _resolve_plan_payload(
+    session: UISession,
+    request: PlanSubmitRequest,
+) -> dict[str, Any]:
+    plan_state = normalize_plan_state(session.plan_state)
+    base_plan = (
+        plan_state.get("draft")
+        if isinstance(plan_state.get("draft"), dict)
+        else plan_state.get("last_submitted_plan")
+        if isinstance(plan_state.get("last_submitted_plan"), dict)
+        else {}
+    )
+    provided_fields = set(getattr(request, "model_fields_set", set()))
+
+    def choose_text(field_name: str, fallback_key: str) -> str:
+        if field_name in provided_fields:
+            return str(getattr(request, field_name) or "").strip()
+        return str(base_plan.get(fallback_key) or "").strip()
+
+    def choose_list(field_name: str, fallback_key: str) -> list[str]:
+        if field_name in provided_fields:
+            return [item.strip() for item in getattr(request, field_name) if isinstance(item, str) and item.strip()]
+        base_value = base_plan.get(fallback_key)
+        return [item.strip() for item in base_value if isinstance(item, str) and item.strip()] if isinstance(base_value, list) else []
+
+    title = choose_text("title", "title")
+    summary = choose_text("summary", "summary")
+    markdown = choose_text("markdown", "markdown")
+    if not title or not summary or not markdown:
+        raise HTTPException(status_code=400, detail="提交计划时必须至少提供 title、summary、markdown，或先生成计划草案。")
+
+    return {
+        "title": title,
+        "summary": summary,
+        "markdown": markdown,
+        "assumptions": choose_list("assumptions", "assumptions"),
+        "openQuestions": choose_list("openQuestions", "openQuestions"),
+        "acceptanceCriteria": choose_list("acceptanceCriteria", "acceptanceCriteria"),
+        "researchNotes": choose_list("researchNotes", "researchNotes"),
+    }
+
+
+def _build_coding_input_from_plan(plan: dict[str, Any]) -> str:
+    lines = [
+        "请根据下面这份已经确认的计划开始进入编码实现阶段。",
+        "除非发现计划与现有代码现实冲突，否则不要重新回到需求澄清模式。",
+        "",
+        f"# {str(plan.get('title') or '').strip()}",
+        str(plan.get("summary") or "").strip(),
+        "",
+        str(plan.get("markdown") or "").strip(),
+    ]
+
+    section_mappings = (
+        ("assumptions", "关键假设"),
+        ("acceptanceCriteria", "验收标准"),
+        ("researchNotes", "调研补充"),
+    )
+    for key, title in section_mappings:
+        values = plan.get(key)
+        if not isinstance(values, list) or not values:
+            continue
+        lines.append("")
+        lines.append(f"## {title}")
+        lines.extend(f"- {str(value).strip()}" for value in values if str(value).strip())
+
+    open_questions = plan.get("openQuestions")
+    if isinstance(open_questions, list) and open_questions:
+        lines.append("")
+        lines.append("## 未决问题")
+        lines.extend(f"- {str(value).strip()}" for value in open_questions if str(value).strip())
+
+    return "\n".join(line for line in lines if line is not None).strip()
+
+
+def activate_plan_for_coding(session: UISession, request: PlanSubmitRequest) -> tuple[dict[str, Any], str]:
+    plan = _resolve_plan_payload(session, request)
+    coding_input = _build_coding_input_from_plan(plan)
+
+    session.history_messages = []
+    session.history_tools = []
+    session.thoughts = []
+    session.pending_user_input_requests.clear()
+    session.pending_connect_requests.clear()
+    session.pending_delete_confirmations.clear()
+    session.pending_commit_confirmations.clear()
+    session.pending_tag_confirmations.clear()
+    update_plan_state(
+        session,
+        status="submitted",
+        draft=plan,
+        last_submitted_plan=plan,
+        pending_coding_input=coding_input,
+    )
+    rebuild_chat_session_for_agent_type(session, "coding")
+    session.plan_steps = build_default_plan_steps("coding")
+    set_session_phase(session, "idle")
+    sync_session_runtime_state_for_agent(session)
+    session.touch()
+    return plan, coding_input
+
+
+@app.post("/api/sessions/{session_id}/tools/{tool_id}/input")
+async def submit_tool_input(
+    session_id: str,
+    tool_id: str,
+    request: ToolInputSubmitRequest,
+) -> JSONResponse:
+    session = require_session(session_id)
+    pending = session.pending_user_input_requests.pop(tool_id, None)
+    if pending is None:
+        raise HTTPException(status_code=404, detail="未找到待填写的输入请求")
+
+    input_request = pending.get("request")
+    if not isinstance(input_request, dict):
+        raise HTTPException(status_code=400, detail="当前输入请求结构无效")
+
+    assistant_id = str(pending.get("assistant_id") or "").strip()
+    tool_name = str(pending.get("tool_name") or "ask_plan_questions")
+    title = str(input_request.get("title") or tool_name).strip()
+    answers = _normalize_tool_input_answers(input_request, request)
+    output = {
+        "message": "已收到用户回答，可以继续完善计划。",
+        "kind": str(input_request.get("kind") or pending.get("kind") or "plan_questions"),
+        "title": title,
+        "answers": answers,
+    }
+    tool_record = {
+        "id": tool_id,
+        "name": tool_name,
+        "output": output,
+        "success": True,
+        "state": "output-available",
+        "inputRequest": input_request,
+    }
+    session.history_tools = upsert_tool(session.history_tools, tool_record)
+    if assistant_id:
+        update_assistant_tool_call(
+            session,
+            assistant_id,
+            tool_id,
+            lambda existing: {
+                **existing,
+                **tool_record,
+            },
+        )
+    record_confirmation_result_for_agent(
+        session,
+        _format_tool_input_answers_for_agent(title, answers),
+    )
+    if session.agent_type == "plan":
+        set_session_phase(session, "clarifying")
+        update_plan_state(session, status="clarifying")
+    session.touch()
+    return JSONResponse(
+        {
+            "id": tool_id,
+            "name": tool_name,
+            "output": output,
+            "success": True,
+            "state": "output-available",
+            "assistantId": assistant_id,
+            "shouldContinue": bool(assistant_id),
+            "phase": session.phase,
+            "planState": session.plan_state,
+        }
+    )
+
+
+@app.post("/api/sessions/{session_id}/plan/submit")
+async def submit_plan(
+    session_id: str,
+    request: PlanSubmitRequest,
+) -> JSONResponse:
+    session = require_session(session_id)
+    plan, coding_input = activate_plan_for_coding(session, request)
+    return JSONResponse(
+        {
+            "ok": True,
+            "agentType": session.agent_type,
+            "phase": session.phase,
+            "planState": session.plan_state,
+            "plan": plan,
+            "codingInput": coding_input,
+            "shouldStartCoding": True,
+        }
+    )
+
+
 @app.get("/api/sessions/{session_id}/deploy/connections")
 async def list_deploy_connections(session_id: str) -> JSONResponse:
     session = require_session(session_id)
@@ -1837,6 +2472,8 @@ async def chat_stream(
     if not user_message:
         raise HTTPException(status_code=400, detail="message 不能为空")
     route_session_for_user_message(session, user_message)
+    if session.agent_type == "coding" and session.plan_state.get("pending_coding_input"):
+        update_plan_state(session, pending_coding_input=None)
 
     async def event_generator():
         queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
@@ -2010,7 +2647,7 @@ def resolve_requested_env_file(model_name: str | None, env_file: str | None = No
 
 def normalize_agent_type(agent_type: str | None) -> str:
     normalized = str(agent_type or "coding").strip().lower()
-    if normalized not in {"coding", "deploy"}:
+    if normalized not in {"coding", "deploy", "plan"}:
         raise HTTPException(status_code=400, detail=f"不支持的 agent_type: {agent_type}")
     return normalized
 
@@ -2025,6 +2662,7 @@ def attach_agent_runtime_metadata(
 ) -> None:
     agent.tool_context_metadata["session_id"] = session_id
     agent.tool_context_metadata["backend_base_url"] = BACKEND_BASE_URL
+    agent.tool_context_metadata["project_root"] = str(ROOT)
     if include_thoughts_in_context is not None:
         agent.tool_context_metadata["include_thoughts_in_context"] = include_thoughts_in_context
     if interactive_command_session is not None:
@@ -2039,14 +2677,20 @@ def build_chat_session(
     workspace: str,
     env_file: str | None = None,
     agent_type: str = "coding",
-) -> tuple[ChatSession | None, str, str | None, str | None]:
+    reasoning_effort: str | None = None,
+) -> tuple[ChatSession | None, str, str | None, str | None, str | None]:
     try:
         config, normalized_model_ref = build_agent_config(ROOT, env_file)
+        if reasoning_effort is not None:
+            config.reasoning_effort = normalize_reasoning_effort(reasoning_effort)
         client = OpenAICompatibleClient(config)
         resolved_workspace = resolve_workspace_path(workspace)
         if agent_type == "deploy":
             brain = DeployPromptBrain(client, workspace=workspace)
             tools = build_deploy_tools()
+        elif agent_type == "plan":
+            brain = PlanPromptBrain(client, workspace=workspace)
+            tools = build_plan_tools()
         else:
             brain = CodingPromptBrain(client, workspace=workspace)
             tools = build_coding_tools()
@@ -2056,11 +2700,12 @@ def build_chat_session(
             workspace=resolved_workspace,
             tool_context_metadata={
                 "include_thoughts_in_context": config.include_thoughts_in_context,
+                "project_root": str(ROOT),
             },
         )
-        return ChatSession(agent=agent), config.model, None, normalized_model_ref
+        return ChatSession(agent=agent), config.model, None, normalized_model_ref, config.reasoning_effort
     except Exception as exc:  # noqa: BLE001 - 需要把启动失败原因回传给前端
-        return None, "Demo", str(exc), None
+        return None, "Demo", str(exc), None, None
 
 
 async def run_agent_stream(
@@ -2098,6 +2743,7 @@ async def run_agent_stream(
                     "agentType": session.agent_type,
                     "phase": session.phase,
                     "deployState": session.deploy_state,
+                    "planState": session.plan_state,
                 },
             },
         }
@@ -2202,6 +2848,17 @@ async def run_agent_stream(
                         last_command=str(event.tool_call.arguments.get("command") or ""),
                         last_command_cwd=str(event.tool_call.arguments.get("cwd") or "."),
                     )
+            elif session.agent_type == "plan":
+                tool_name = event.tool_call.name
+                if tool_name == "ask_plan_questions":
+                    set_session_phase(session, "awaiting_user_input")
+                    update_plan_state(session, status="awaiting_user_input")
+                elif tool_name == "save_plan":
+                    set_session_phase(session, "planning")
+                    update_plan_state(session, status="planning")
+                else:
+                    set_session_phase(session, "researching")
+                    update_plan_state(session, status="researching")
             append_assistant_tool_call(
                 session,
                 assistant_id,
@@ -2331,12 +2988,17 @@ async def run_agent_stream(
                     "title": str(output.get("title") or ""),
                     "message": str(output.get("message") or ""),
                     "fields": output.get("fields") if isinstance(output.get("fields"), list) else [],
+                    "questions": output.get("questions") if isinstance(output.get("questions"), list) else [],
                 }
-                session.pending_connect_requests[tool_id] = {
+                pending_payload = {
                     "assistant_id": assistant_id,
                     "tool_name": event.tool_result.name,
                     "request": input_request,
                 }
+                if session.agent_type == "plan":
+                    session.pending_user_input_requests[tool_id] = pending_payload
+                else:
+                    session.pending_connect_requests[tool_id] = pending_payload
             if session.agent_type == "deploy":
                 tool_name = event.tool_result.name
                 exit_code = extract_command_exit_code(output)
@@ -2385,6 +3047,27 @@ async def run_agent_stream(
                     elif tool_name == "connect":
                         set_session_phase(session, "connected")
                 update_deploy_state(session, **deploy_updates)
+            elif session.agent_type == "plan":
+                tool_name = event.tool_result.name
+                if requires_user_input:
+                    set_session_phase(session, "awaiting_user_input")
+                    update_plan_state(session, status="awaiting_user_input")
+                elif not event.tool_result.success:
+                    set_session_phase(session, "planning")
+                    update_plan_state(session, status="clarifying")
+                elif tool_name == "save_plan" and isinstance(output, dict) and isinstance(output.get("plan"), dict):
+                    set_session_phase(session, "plan_ready")
+                    update_plan_state(
+                        session,
+                        draft=output.get("plan"),
+                        status="draft_ready",
+                    )
+                elif tool_name in {"search_web", "fetch_url_content", "list_file", "grep_file", "read_file"}:
+                    set_session_phase(session, "researching")
+                    update_plan_state(session, status="researching")
+                else:
+                    set_session_phase(session, "planning")
+                    update_plan_state(session, status="clarifying")
             tool_record = {
                 "id": tool_id,
                 "stepIndex": event.step_index,
@@ -2440,6 +3123,9 @@ async def run_agent_stream(
                     pending_tool_name=None,
                     pending_input_kind=None,
                 )
+            if session.agent_type == "plan" and not session.pending_user_input_requests and session.plan_state.get("draft"):
+                set_session_phase(session, "plan_ready")
+                update_plan_state(session, status="draft_ready")
             finalize_plan_steps(session)
             loop.call_soon_threadsafe(
                 queue.put_nowait,
@@ -2478,6 +3164,9 @@ async def run_agent_stream(
                 last_error=str(exc),
                 last_message=str(exc),
             )
+        elif session.agent_type == "plan":
+            set_session_phase(session, "planning")
+            update_plan_state(session, status="clarifying")
         await queue.put(_session_state_event())
         finalize_plan_steps(session)
         await queue.put(
@@ -2531,6 +3220,8 @@ async def run_agent_stream(
                 pending_input_kind=None,
                 last_message="用户已停止当前任务。",
             )
+        elif session.agent_type == "plan":
+            reset_phase_for_new_turn(session)
         set_session_generating(session, False)
         await queue.put(_session_state_event())
         await queue.put(None)
@@ -2544,6 +3235,9 @@ async def run_agent_stream(
             pending_tool_name=None,
             pending_input_kind=None,
         )
+    if session.agent_type == "plan" and not session.pending_user_input_requests and session.plan_state.get("draft"):
+        set_session_phase(session, "plan_ready")
+        update_plan_state(session, status="draft_ready")
     await queue.put(_session_state_event())
     replace_assistant_text_part(session, assistant_id, response.final_output)
     remaining_output = response.final_output
@@ -2602,6 +3296,7 @@ async def run_demo_stream(
                     "agentType": session.agent_type,
                     "phase": session.phase,
                     "deployState": session.deploy_state,
+                    "planState": session.plan_state,
                 },
             },
         }

@@ -99,6 +99,25 @@ class ClientParsingTests(unittest.TestCase):
 
         self.assertEqual(reasoning, "Need to inspect the file first.")
 
+    def test_build_request_includes_reasoning_effort_when_configured(self) -> None:
+        client = OpenAICompatibleClient(
+            AgentLLMConfig(
+                api_key="key",
+                base_url="https://example.com/v1",
+                model="demo-model",
+                reasoning_effort="high",
+            )
+        )
+
+        request = client._build_request(
+            messages=[{"role": "user", "content": "hi"}],
+            stream=False,
+            api_url="https://example.com/v1/chat/completions",
+        )
+
+        payload = request.data.decode("utf-8")
+        self.assertIn('"reasoning_effort": "high"', payload)
+
     def test_retries_empty_non_stream_completion(self) -> None:
         class RetryClient(OpenAICompatibleClient):
             def __init__(self, config):  # noqa: ANN001
@@ -201,6 +220,24 @@ class ConfigParsingTests(unittest.TestCase):
         config = AgentLLMConfig.from_env(env_path)
 
         self.assertTrue(config.include_thoughts_in_context)
+
+    def test_reasoning_effort_can_be_loaded_from_env(self) -> None:
+        env_path = Path(tempfile.mkdtemp(prefix="supercode-config-")) / ".env"
+        env_path.write_text(
+            "\n".join(
+                [
+                    "SC_AGENT_API_KEY=key",
+                    "SC_AGENT_BASE_URL=https://example.com/v1",
+                    "SC_AGENT_MODEL=demo-model",
+                    "SC_AGENT_REASONING_EFFORT=high",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        config = AgentLLMConfig.from_env(env_path)
+
+        self.assertEqual(config.reasoning_effort, "high")
 
 
 if __name__ == "__main__":

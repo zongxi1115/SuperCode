@@ -91,6 +91,38 @@ class MessageRoutingTests(unittest.TestCase):
         self.assertEqual(session.plan_steps[0]["title"], "连接部署目标")
         mock_build.assert_called_once()
 
+    def test_route_agent_type_uses_plan_for_vague_request_on_empty_workspace(self) -> None:
+        session = api_main.UISession(
+            session_id="routing-5",
+            model="Demo",
+            workspace=str(self.workspace),
+            agent_type="coding",
+        )
+
+        routed = api_main.route_agent_type_for_message(session, "做一个后台")
+
+        self.assertEqual(routed, "plan")
+
+    def test_route_agent_type_keeps_plan_for_follow_up_when_plan_not_submitted(self) -> None:
+        session = api_main.UISession(
+            session_id="routing-6",
+            model="Demo",
+            workspace=str(self.workspace),
+            agent_type="plan",
+            plan_state={
+                "status": "draft_ready",
+                "draft": {
+                    "title": "管理后台",
+                    "summary": "先做一个可登录的管理后台",
+                    "markdown": "## steps\n- login\n- dashboard",
+                },
+            },
+        )
+
+        routed = api_main.route_agent_type_for_message(session, "把计划再细一点")
+
+        self.assertEqual(routed, "plan")
+
 
 if __name__ == "__main__":
     unittest.main()

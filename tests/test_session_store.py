@@ -19,6 +19,7 @@ class SessionStoreTests(unittest.TestCase):
             workspace="D:/demo",
             mode="agent",
             model="demo-model",
+            reasoning_effort="high",
             agent_type="deploy",
             phase="connected",
             title="hello",
@@ -34,6 +35,20 @@ class SessionStoreTests(unittest.TestCase):
             history_tools=[{"id": "t1", "name": "read_file", "state": "completed"}],
             thoughts=["先看文件"],
             plan_steps=[{"id": "1", "title": "done", "status": "completed"}],
+            plan_state={
+                "status": "draft_ready",
+                "draft": {
+                    "title": "后台计划",
+                    "summary": "做一个后台",
+                    "markdown": "## todo\n- login",
+                },
+            },
+            pending_user_input_requests={
+                "tool-plan-1": {
+                    "assistant_id": "a1",
+                    "tool_name": "ask_plan_questions",
+                }
+            },
             pending_connect_requests={"tool-1": {"assistant_id": "a1"}},
             deploy_connections={
                 "deploy-1": {
@@ -69,9 +84,12 @@ class SessionStoreTests(unittest.TestCase):
         self.assertIsNotNone(loaded)
         assert loaded is not None
         self.assertEqual(loaded.agent_type, "deploy")
+        self.assertEqual(loaded.reasoning_effort, "high")
         self.assertEqual(loaded.phase, "connected")
         self.assertEqual(loaded.history_messages[1]["content"], "收到")
         self.assertEqual(loaded.history_tools[0]["name"], "read_file")
+        self.assertEqual(loaded.plan_state["draft"]["title"], "后台计划")
+        self.assertEqual(loaded.pending_user_input_requests["tool-plan-1"]["tool_name"], "ask_plan_questions")
         self.assertEqual(loaded.deploy_connections["deploy-1"]["display_name"], "prod")
         self.assertEqual(loaded.deploy_state["active_session_id"], "deploy-1")
         self.assertEqual(adapter.list()[0].session_id, "session-1")

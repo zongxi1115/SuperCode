@@ -16,6 +16,7 @@ class AgentLLMConfig:
     api_key: str
     base_url: str
     model: str
+    reasoning_effort: str | None = None
     timeout: int = 60
     max_retries: int = 2
     include_thoughts_in_context: bool = False
@@ -34,6 +35,10 @@ class AgentLLMConfig:
         api_key = env_values.get("SC_AGENT_API_KEY", os.getenv("SC_AGENT_API_KEY", "")).strip()
         base_url = env_values.get("SC_AGENT_BASE_URL", os.getenv("SC_AGENT_BASE_URL", "")).strip()
         model = env_values.get("SC_AGENT_MODEL", os.getenv("SC_AGENT_MODEL", "")).strip()
+        reasoning_effort = env_values.get(
+            "SC_AGENT_REASONING_EFFORT",
+            os.getenv("SC_AGENT_REASONING_EFFORT", ""),
+        ).strip()
         timeout = int(env_values.get("SC_AGENT_TIMEOUT", os.getenv("SC_AGENT_TIMEOUT", "60")).strip())
         max_retries = int(env_values.get("SC_AGENT_MAX_RETRIES", os.getenv("SC_AGENT_MAX_RETRIES", "2")).strip())
         include_thoughts_in_context = _parse_bool(
@@ -69,6 +74,7 @@ class AgentLLMConfig:
             api_key=api_key,
             base_url=base_url.rstrip("/"),
             model=model,
+            reasoning_effort=reasoning_effort or None,
             timeout=timeout,
             max_retries=max(0, max_retries),
             include_thoughts_in_context=include_thoughts_in_context,
