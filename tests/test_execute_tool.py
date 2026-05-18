@@ -1,11 +1,13 @@
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from agent.tools import ToolContext
 from coding_agent.tools import (
+    CompletedCommandResult,
     ExcecuteTool,
     ExecuteTool,
     InteractiveCommandSession,
@@ -166,11 +168,69 @@ class ExecuteToolTests(unittest.TestCase):
         self.assertEqual(second_result["status"], "completed")
         self.assertIn("Done", str(second_result["full_output"]))
 
+    def test_terminal_wait_returns_cached_result_after_command_finishes_early(self) -> None:
+        self.interactive_session = InteractiveCommandSession(workspace=self.workspace)
+        interactive_context = ToolContext(
+            workspace=self.workspace,
+            metadata={"interactive_command_session": self.interactive_session},
+        )
+        execute_tool = ExecuteTool()
+        wait_tool = TerminalWaitTool()
+
+        first_result = execute_tool.run(
+            {
+                "content": "Write-Output 'Installing'; Start-Sleep -Seconds 2; Write-Output 'Done'",
+                "timeout": 1,
+            },
+            interactive_context,
+        )
+
+        self.assertEqual(first_result["status"], "running")
+        terminal_id = str(first_result["terminal_id"])
+
+        time.sleep(2.5)
+
+        second_result = wait_tool.run(
+            {"timeout": 1, "terminal_id": terminal_id},
+            interactive_context,
+        )
+
+        self.assertEqual(second_result["status"], "completed")
+        self.assertEqual(second_result["terminal_id"], terminal_id)
+        self.assertIn("Done", str(second_result["delta"]))
+        self.assertIn("Done", str(second_result["full_output"]))
+
     def test_prompt_detection_uses_last_visible_line(self) -> None:
         self.interactive_session = InteractiveCommandSession(workspace=self.workspace)
 
         self.assertTrue(self.interactive_session._looks_like_prompt("Question?\n"))
         self.assertFalse(self.interactive_session._looks_like_prompt("Question?\nInstalling dependencies...\n"))
+
+    def test_terminal_input_rejects_completed_terminal_id(self) -> None:
+        self.interactive_session = InteractiveCommandSession(workspace=self.workspace)
+        self.interactive_session.completed_commands["terminal-1"] = CompletedCommandResult(
+            result={
+                "terminal_id": "terminal-1",
+                "status": "completed",
+                "command": "Get-Date",
+                "delta": "done\n",
+                "full_output": "done\n",
+                "return_code": 0,
+                "awaiting_input": False,
+            },
+            delivered=False,
+        )
+        interactive_context = ToolContext(
+            workspace=self.workspace,
+            metadata={"interactive_command_session": self.interactive_session},
+        )
+        terminal_input_tool = TerminalInputTool()
+
+        with self.assertRaisesRegex(RuntimeError, "已完成，无法继续输入"):
+            terminal_input_tool.run(
+                {"content": "y", "timeout": 1, "terminal_id": "terminal-1"},
+                interactive_context,
+            )
 
     def test_list_managed_processes_marks_orphaned_processes(self) -> None:
         self.interactive_session = InteractiveCommandSession(workspace=self.workspace)

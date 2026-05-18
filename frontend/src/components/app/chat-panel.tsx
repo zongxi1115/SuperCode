@@ -1187,7 +1187,7 @@ const MessageList = memo(function MessageList({
               </ChainOfThoughtHeader>
               <ChainOfThoughtContent>
                 <ChainOfThoughtStep
-                  label={thoughtText}
+                  label={<MessageResponse>{thoughtText}</MessageResponse>}
                   status={isLoading ? "active" : "complete"}
                 />
                 {hasToolCalls ? (
@@ -1345,7 +1345,7 @@ const MessageList = memo(function MessageList({
                   return block.text.trim() ? (
                     <ChainOfThoughtStep
                       key={`thinking-${gi}-${bi}`}
-                      label={block.text}
+                      label={<MessageResponse>{block.text}</MessageResponse>}
                       status={bi === lastRunningIdx && isActive ? "active" : "complete"}
                     />
                   ) : null;

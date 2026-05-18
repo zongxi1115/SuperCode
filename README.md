@@ -101,6 +101,7 @@ response = session.ask("先看看项目结构", on_event=on_event)
 
 - `list_file(..., include_ignored?)` 和 `grep_file(..., include_ignored?)` 默认都会跳过 `node_modules`、`.git`、`dist`、`build`、`__pycache__` 等生成目录。
 - 只有在你明确想查看或搜索这些目录时，才需要传 `include_ignored=true`。
+- `terminal_wait(...)` 如果遇到命令已在下一次等待前完成，会返回缓存的最终结果，而不是因为终端已释放直接报错。
 
 ### 配置项说明
 

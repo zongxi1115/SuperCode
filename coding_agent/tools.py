@@ -340,12 +340,21 @@ class InteractiveCommand:
 
 
 @dataclass
+class CompletedCommandResult:
+    """缓存已完成终端的最终结果，避免活动句柄释放后无法回读。"""
+
+    result: dict[str, object]
+    delivered: bool = False
+
+
+@dataclass
 class InteractiveCommandSession:
     """管理当前会话里多个可继续输入的命令。"""
 
     workspace: Path
     idle_timeout: float = INTERACTIVE_IDLE_SECONDS
     active_commands: dict[str, InteractiveCommand] = field(default_factory=dict, init=False, repr=False)
+    completed_commands: dict[str, CompletedCommandResult] = field(default_factory=dict, init=False, repr=False)
     managed_processes: dict[str, ManagedCommandProcess] = field(default_factory=dict, init=False, repr=False)
     next_terminal_index: int = field(default=1, init=False, repr=False)
     lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
@@ -365,6 +374,7 @@ class InteractiveCommandSession:
                     f"终端 {resolved_terminal_id} 已在运行，请改用新的 terminal_id，"
                     "或使用 terminal_input / terminal_wait 继续交互。"
                 )
+            self.completed_commands.pop(resolved_terminal_id, None)
 
             process = self._spawn_process(command)
             active_command = InteractiveCommand(
@@ -389,6 +399,10 @@ class InteractiveCommandSession:
     ) -> dict[str, object]:
         with self.lock:
             self._clear_finished_locked()
+            if terminal_id:
+                completed_result = self._get_completed_result_locked(terminal_id)
+                if completed_result is not None:
+                    raise RuntimeError(f"终端 {terminal_id} 已完成，无法继续输入。")
             active_command = self._resolve_active_command_locked(terminal_id)
 
         active_command.write_input(content)
@@ -401,6 +415,9 @@ class InteractiveCommandSession:
     ) -> dict[str, object]:
         with self.lock:
             self._clear_finished_locked()
+            completed_result = self._resolve_completed_result_for_wait_locked(terminal_id)
+            if completed_result is not None:
+                return completed_result
             active_command = self._resolve_active_command_locked(terminal_id)
 
         active_command.mark_activity()
@@ -410,6 +427,7 @@ class InteractiveCommandSession:
         with self.lock:
             active_commands = list(self.active_commands.values())
             self.active_commands = {}
+            self.completed_commands = {}
 
         for active_command in active_commands:
             managed_process = self.managed_processes.get(active_command.terminal_id)
@@ -499,12 +517,20 @@ class InteractiveCommandSession:
         while True:
             if not active_command.is_alive():
                 active_command.wait_for_readers()
-                result = self._build_result(active_command, status="completed")
-                active_command.close_streams()
                 with self.lock:
                     current = self.active_commands.get(active_command.terminal_id)
                     if current is active_command:
                         self.active_commands.pop(active_command.terminal_id, None)
+                        result = self._cache_completed_result_locked(
+                            active_command,
+                            delivered=True,
+                        )
+                    else:
+                        result = self._get_completed_result_locked(
+                            active_command.terminal_id,
+                            mark_delivered=False,
+                        ) or self._build_result(active_command, status="completed")
+                active_command.close_streams()
                 return result
 
             if return_on_idle and active_command.idle_for() >= self.idle_timeout:
@@ -545,7 +571,10 @@ class InteractiveCommandSession:
             finished_command = self.active_commands.pop(terminal_id, None)
             managed_process = self.managed_processes.get(terminal_id)
             if finished_command is not None and managed_process is not None:
+                finished_command.wait_for_readers()
                 managed_process.last_return_code = finished_command.process.returncode
+                self._cache_completed_result_locked(finished_command, delivered=False)
+                finished_command.close_streams()
 
     def _allocate_terminal_id_locked(self) -> str:
         while True:
@@ -553,6 +582,72 @@ class InteractiveCommandSession:
             self.next_terminal_index += 1
             if terminal_id not in self.active_commands:
                 return terminal_id
+
+    def _cache_completed_result_locked(
+        self,
+        active_command: InteractiveCommand,
+        *,
+        delivered: bool,
+    ) -> dict[str, object]:
+        result = self._build_result(active_command, status="completed")
+        self.completed_commands[active_command.terminal_id] = CompletedCommandResult(
+            result=dict(result),
+            delivered=delivered,
+        )
+        return dict(result)
+
+    def _get_completed_result_locked(
+        self,
+        terminal_id: str,
+        *,
+        mark_delivered: bool = False,
+    ) -> dict[str, object] | None:
+        completed_result = self.completed_commands.get(terminal_id)
+        if completed_result is None:
+            return None
+
+        result = dict(completed_result.result)
+        if completed_result.delivered:
+            result["delta"] = ""
+            return result
+
+        if mark_delivered:
+            completed_result.delivered = True
+        return result
+
+    def _resolve_completed_result_for_wait_locked(
+        self,
+        terminal_id: str | None,
+    ) -> dict[str, object] | None:
+        if terminal_id:
+            return self._get_completed_result_locked(terminal_id, mark_delivered=True)
+
+        active_commands = [
+            active_command
+            for active_command in self.active_commands.values()
+            if active_command.is_alive()
+        ]
+        if active_commands:
+            return None
+
+        pending_completed_ids = [
+            completed_terminal_id
+            for completed_terminal_id, completed_result in self.completed_commands.items()
+            if not completed_result.delivered
+        ]
+        if not pending_completed_ids:
+            return None
+        if len(pending_completed_ids) == 1:
+            return self._get_completed_result_locked(
+                pending_completed_ids[0],
+                mark_delivered=True,
+            )
+
+        terminal_ids = ", ".join(sorted(pending_completed_ids))
+        raise RuntimeError(
+            "当前没有活动终端，但有多个已完成结果待领取，请显式传入 terminal_id。"
+            f"可用 terminal_id: {terminal_ids}"
+        )
 
     def _resolve_active_command_locked(self, terminal_id: str | None) -> InteractiveCommand:
         if terminal_id:
@@ -1342,6 +1437,7 @@ class TerminalWaitTool(CodingBaseTool):
     name = "terminal_wait"
     description = (
         "继续等待当前正在运行的终端命令，参数：timeout（必填，单位秒）、terminal_id（可选）。"
+        "如果终端已在本次等待前完成，会返回缓存的最终结果。"
         "如果同时存在多个活动终端，terminal_id 为必填。用于后台安装、构建或下载仍在继续时收集后续输出。"
     )
     parameters_schema = {

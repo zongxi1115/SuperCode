@@ -318,6 +318,8 @@ class OpenAICompatibleClient:
         headers = {
             "Authorization": f"Bearer {self.config.api_key}",
             "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "User-Agent": "curl/8.4.0",
         }
         return request.Request(api_url, data=body, headers=headers, method="POST")
 
