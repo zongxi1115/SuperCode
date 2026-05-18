@@ -45,6 +45,7 @@ import {
   CommitTimestamp,
 } from "@/components/ai-elements/commit";
 import { Terminal } from "@/components/ai-elements/terminal";
+import { DeployConnectForm } from "@/components/ai-elements/deploy-connect-form";
 import {
   Message,
   MessageContent,
@@ -107,6 +108,7 @@ import {
   FolderOpenIcon,
   GitBranch,
   GitCommitHorizontal,
+  GlobeIcon,
   Tag,
   ListChecks,
   PencilIcon,
@@ -149,12 +151,14 @@ type ChatPanelProps = {
     type: "commit" | "tag",
     approved: boolean,
   ) => void;
+  onResolveConnectInput?: (toolCallId: string, values: Record<string, string>) => void;
   onModelChange: (modelId: string) => void;
   elementAttachments?: ElementAttachment[];
   onRemoveElementAttachment?: (id: string) => void;
 };
 
 const TOOL_ICONS: Record<string, React.ReactNode> = {
+  connect: <GlobeIcon className="size-4" />,
   list_file: <FolderOpenIcon className="size-4" />,
   read_file: <FileSearchIcon className="size-4" />,
   write_file: <PlusIcon className="size-4" />,
@@ -171,6 +175,7 @@ const TOOL_ICONS: Record<string, React.ReactNode> = {
 };
 
 const TOOL_TITLES: Record<string, (args: Record<string, unknown>) => string> = {
+  connect: () => "连接部署目标",
   list_file: () => "正在列出文件",
   read_file: (args) => {
     const f = ((args.filename || args.path || args.file_path) as string)?.split(/[\\/]/).pop();
@@ -417,6 +422,7 @@ function ToolBody({
   sessionId,
   onResolveDeleteConfirmation,
   onResolveGitConfirmation,
+  onResolveConnectInput,
 }: {
   toolCall: ToolCallRecord;
   sessionId: string | null;
@@ -426,6 +432,7 @@ function ToolBody({
     type: "commit" | "tag",
     approved: boolean,
   ) => void;
+  onResolveConnectInput?: (toolCallId: string, values: Record<string, string>) => void;
 }) {
   const args = toolCall.arguments || {};
   const output =
@@ -480,6 +487,47 @@ function ToolBody({
       : typeof output === "string"
         ? output
         : undefined;
+
+  if (toolCall.name === "connect") {
+    if (toolCall.inputRequest && toolCall.state === "input-requested") {
+      return (
+        <DeployConnectForm
+          inputRequest={toolCall.inputRequest}
+          sessionId={sessionId}
+          onSubmit={(values) => onResolveConnectInput?.(toolCall.id, values)}
+          disabled={toolCall.state !== "input-requested"}
+        />
+      );
+    }
+    const connectOutput =
+      output && typeof output === "object" && !Array.isArray(output)
+        ? (output as Record<string, unknown>)
+        : undefined;
+    const message = typeof connectOutput?.message === "string" ? connectOutput.message : undefined;
+    const sessionIdOut = typeof connectOutput?.session_id === "string" ? connectOutput.session_id : undefined;
+    const rootPath = typeof connectOutput?.root_path === "string" ? connectOutput.root_path : undefined;
+    const displayName = typeof connectOutput?.display_name === "string" ? connectOutput.display_name : undefined;
+    const hostOut = typeof connectOutput?.host === "string" ? connectOutput.host : undefined;
+    const usernameOut = typeof connectOutput?.username === "string" ? connectOutput.username : undefined;
+    return (
+      <div className="space-y-2">
+        {message && (
+          <div className="rounded-md bg-muted/50 p-2 text-xs">
+            <p className="font-medium text-muted-foreground mb-1">结果</p>
+            <p>{message}</p>
+          </div>
+        )}
+        {sessionIdOut && (
+          <div className="flex items-center gap-2 rounded-md bg-emerald-500/10 px-3 py-2 text-xs">
+            <span className="text-emerald-600 font-medium">已连接</span>
+            <span className="text-muted-foreground">
+              {hostOut ? `${usernameOut ? `${usernameOut}@` : ''}${hostOut}` : (displayName || rootPath || sessionIdOut)}
+            </span>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   if (toolCall.name === "write_file" && content) {
     return (
@@ -948,6 +996,8 @@ function DataPartView({
 }) {
   const data = part.data;
 
+  if (part.dataType === "data-session-state") return null;
+
   if (
     part.dataType === "data-chart" &&
     data &&
@@ -1073,6 +1123,7 @@ const MessageList = memo(function MessageList({
   messages,
   onResolveDeleteConfirmation,
   onResolveGitConfirmation,
+  onResolveConnectInput,
 }: {
   sessionId: string | null;
   isLoading: boolean;
@@ -1083,6 +1134,7 @@ const MessageList = memo(function MessageList({
     type: "commit" | "tag",
     approved: boolean,
   ) => void;
+  onResolveConnectInput?: (toolCallId: string, values: Record<string, string>) => void;
 }) {
   const statusLabelMap: Record<ToolCallRecord["state"], string> = {
     running: "执行中",
@@ -1091,11 +1143,12 @@ const MessageList = memo(function MessageList({
     "approval-requested": "待确认",
     "output-available": "已完成",
     "output-denied": "已拒绝",
+    "input-requested": "待填写",
   };
 
   const renderToolCall = (tc: ToolCallRecord, isLastRunning: boolean) => {
     const statusLabel = statusLabelMap[tc.state] ?? "执行中";
-    const shouldOpen = isLastRunning || tc.name.startsWith("git_");
+    const shouldOpen = isLastRunning || tc.name.startsWith("git_") || tc.name === "connect";
     const toolTitle = `${getToolTitle(tc.name, tc.arguments ?? {})} · ${statusLabel}`;
 
     return (
@@ -1111,6 +1164,7 @@ const MessageList = memo(function MessageList({
               toolCall={tc}
               onResolveDeleteConfirmation={onResolveDeleteConfirmation}
               onResolveGitConfirmation={onResolveGitConfirmation}
+              onResolveConnectInput={onResolveConnectInput}
             />
           </TaskItem>
         </TaskContent>
@@ -1345,6 +1399,7 @@ const ChatStreamBody = memo(function ChatStreamBody({
   messages,
   onResolveDeleteConfirmation,
   onResolveGitConfirmation,
+  onResolveConnectInput,
   personaState,
 }: {
   sessionId: string | null;
@@ -1356,6 +1411,7 @@ const ChatStreamBody = memo(function ChatStreamBody({
     type: "commit" | "tag",
     approved: boolean,
   ) => void;
+  onResolveConnectInput?: (toolCallId: string, values: Record<string, string>) => void;
   personaState: PersonaState;
 }) {
   if (messages.length === 0) {
@@ -1370,6 +1426,7 @@ const ChatStreamBody = memo(function ChatStreamBody({
         messages={messages}
         onResolveDeleteConfirmation={onResolveDeleteConfirmation}
         onResolveGitConfirmation={onResolveGitConfirmation}
+        onResolveConnectInput={onResolveConnectInput}
       />
       <PersonaRail state={personaState} />
     </>
@@ -1418,6 +1475,7 @@ export function ChatPanel({
   onStopMessage,
   onResolveDeleteConfirmation,
   onResolveGitConfirmation,
+  onResolveConnectInput,
   onModelChange,
   elementAttachments = [],
   onRemoveElementAttachment,
@@ -1512,6 +1570,7 @@ export function ChatPanel({
             messages={messages}
             onResolveDeleteConfirmation={onResolveDeleteConfirmation}
             onResolveGitConfirmation={onResolveGitConfirmation}
+            onResolveConnectInput={onResolveConnectInput}
             personaState={personaState}
           />
         </ConversationContent>

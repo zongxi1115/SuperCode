@@ -10,6 +10,9 @@ class CreateSessionResponse(BaseModel):
     model: str
     modelId: str | None = None
     mode: str
+    agentType: str = "coding"
+    phase: str = "idle"
+    deployState: dict[str, Any] = Field(default_factory=dict)
     isGenerating: bool
     startupError: str | None
     envFile: str | None
@@ -44,6 +47,9 @@ class SessionContextResponse(BaseModel):
     workspace: str
     mode: str
     model: str
+    agentType: str = "coding"
+    phase: str = "idle"
+    deployState: dict[str, Any] = Field(default_factory=dict)
     selectedFilePath: str | None
     openFiles: list[str]
     messageCount: int
@@ -61,6 +67,7 @@ class CreateSessionRequest(BaseModel):
     workspace: str | None = None
     model: str | None = None
     env_file: str | None = None
+    agent_type: str | None = None
 
 
 class UIModelProviderPayload(BaseModel):
@@ -81,6 +88,8 @@ class SessionHistoryItem(BaseModel):
     workspace: str
     mode: str
     model: str
+    agentType: str = "coding"
+    phase: str = "idle"
     title: str
     preview: str
     messageCount: int
@@ -110,6 +119,10 @@ class TerminalControlRequest(BaseModel):
 
 class ToolConfirmationRequest(BaseModel):
     approved: bool
+
+
+class ConnectToolSubmitRequest(BaseModel):
+    values: dict[str, Any] = Field(default_factory=dict)
 
 
 class TerminalSnapshotResponse(BaseModel):

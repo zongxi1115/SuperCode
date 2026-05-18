@@ -201,6 +201,7 @@ export function mapToolState(state: ToolCallRecord['state']) {
   if (state === 'completed') return 'output-available';
   if (state === 'error') return 'output-error';
   if (state === 'running') return 'input-available';
+  if (state === 'input-requested') return 'input-requested';
   return 'input-streaming';
 }
 

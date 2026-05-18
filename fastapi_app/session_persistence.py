@@ -43,6 +43,8 @@ def session_to_persisted_state(session: Any) -> PersistedSessionState:
         workspace=session.workspace,
         mode=session.mode,
         model=session.model,
+        agent_type=session.agent_type,
+        phase=session.phase,
         title=session.summary_title(),
         preview=session.summary_preview(),
         message_count=len(session.history_messages),
@@ -63,6 +65,9 @@ def session_to_persisted_state(session: Any) -> PersistedSessionState:
         pending_delete_confirmations=session.pending_delete_confirmations,
         pending_commit_confirmations=session.pending_commit_confirmations,
         pending_tag_confirmations=session.pending_tag_confirmations,
+        pending_connect_requests=session.pending_connect_requests,
+        deploy_connections=session.deploy_connection_manager.export_state(),
+        deploy_state=session.deploy_state,
     )
 
 
@@ -72,6 +77,8 @@ def persisted_state_to_history_item(state: PersistedSessionState) -> SessionHist
         workspace=state.workspace,
         mode=state.mode,
         model=state.model,
+        agentType=state.agent_type,
+        phase=state.phase,
         title=state.title,
         preview=state.preview,
         messageCount=state.message_count,

@@ -10,6 +10,7 @@ from agent.schema import AgentState, StepRecord
 
 
 MAX_CONVERSATION_MESSAGES = 12
+MAX_RUNTIME_STATE_CHARS = 2_000
 MAX_TOOL_RECORDS_IN_CONTEXT = 40
 MAX_PLANNING_RECORDS_IN_CONTEXT = 20
 TOOL_RECORD_VALUE_LIMIT = 4_000
@@ -106,6 +107,10 @@ class CodingPromptBrain(OpenAICompatibleBrain):
         previous_messages, latest_user_message = self._split_latest_user_message(state)
         messages.extend(self._conversation_messages_for_model(previous_messages))
 
+        runtime_state_context = self._build_runtime_state_context(state)
+        if runtime_state_context:
+            messages.append({"role": "assistant", "content": runtime_state_context})
+
         planning_records_context = self._build_planning_records_context(state)
         if planning_records_context:
             messages.append({"role": "assistant", "content": planning_records_context})
@@ -135,6 +140,24 @@ class CodingPromptBrain(OpenAICompatibleBrain):
             )
 
         return messages
+
+    def _build_runtime_state_context(self, state: AgentState) -> str:
+        raw_runtime_state = state.data.get("runtime_state")
+        if not isinstance(raw_runtime_state, dict) or not raw_runtime_state:
+            return ""
+
+        serialized = json.dumps(raw_runtime_state, ensure_ascii=False)
+        serialized = serialized.strip()
+        if len(serialized) > MAX_RUNTIME_STATE_CHARS:
+            serialized = f"{serialized[:MAX_RUNTIME_STATE_CHARS].rstrip()}... [truncated]"
+
+        return "\n".join(
+            [
+                "[内部会话状态] 以下是后端维护的真实会话状态，不是新的用户请求。",
+                "优先依据这里的 phase 和 deploy_state 判断是否已连接、是否正在等待用户输入，不要重新猜测。",
+                serialized,
+            ]
+        )
 
     def _build_continuation_instruction(self, response_mode: str) -> str:
         if response_mode == "native_tools":

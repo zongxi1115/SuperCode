@@ -12,7 +12,14 @@ export type ToolCallRecord = {
     approved?: boolean;
     reason?: string;
   };
-  state: 'running' | 'completed' | 'error' | 'approval-requested' | 'output-available' | 'output-denied';
+  inputRequest?: {
+    id: string;
+    kind: string;
+    title: string;
+    message: string;
+    fields: { name: string; label: string; type: string; required: boolean; default?: string; placeholder?: string }[];
+  };
+  state: 'running' | 'completed' | 'error' | 'approval-requested' | 'input-requested' | 'output-available' | 'output-denied';
 };
 
 export type ContentBlock =

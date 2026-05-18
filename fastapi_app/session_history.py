@@ -383,6 +383,15 @@ def update_plan_steps_for_tool(session: Any, step_index: int | None, tool_name: 
             elif step["status"] != "completed":
                 step["status"] = "pending"
 
+    if getattr(session, "agent_type", "coding") == "deploy":
+        if tool_name == "connect":
+            session.plan_steps[0]["description"] = "已发起部署连接，等待用户填写部署目标信息。"
+        elif tool_name in {"list_files", "read_file"}:
+            session.plan_steps[1]["description"] = "正在读取部署目录、配置文件和发布脚本。"
+        elif tool_name in {"transfer_files", "execute"}:
+            session.plan_steps[2]["description"] = "正在同步文件或执行部署命令，并收集结果。"
+        return
+
     if tool_name in {"read_file", "list_file", "grep_file"}:
         session.plan_steps[1]["description"] = "已进入代码探索，正在读取结构、文件和引用关系。"
     elif tool_name in {"write_file", "replace_file"}:

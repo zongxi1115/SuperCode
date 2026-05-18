@@ -7,6 +7,10 @@ from fastapi_app.session_store import PersistedSessionState, SQLiteSessionStateA
 
 
 class SessionStoreTests(unittest.TestCase):
+    def test_api_main_uses_pytest_specific_state_db_path_under_test(self) -> None:
+        self.assertIn("pytest", str(api_main.STATE_DB_PATH).lower())
+        self.assertNotIn("D:\\vibe_projs\\SuperCode\\.supercode\\state.sqlite3".lower(), str(api_main.STATE_DB_PATH).lower())
+
     def test_sqlite_adapter_round_trips_session_state(self) -> None:
         db_path = Path(tempfile.mkdtemp(prefix="supercode-session-store-")) / "state.sqlite3"
         adapter = SQLiteSessionStateAdapter(db_path)
@@ -15,6 +19,8 @@ class SessionStoreTests(unittest.TestCase):
             workspace="D:/demo",
             mode="agent",
             model="demo-model",
+            agent_type="deploy",
+            phase="connected",
             title="hello",
             preview="world",
             message_count=2,
@@ -28,6 +34,33 @@ class SessionStoreTests(unittest.TestCase):
             history_tools=[{"id": "t1", "name": "read_file", "state": "completed"}],
             thoughts=["先看文件"],
             plan_steps=[{"id": "1", "title": "done", "status": "completed"}],
+            pending_connect_requests={"tool-1": {"assistant_id": "a1"}},
+            deploy_connections={
+                "deploy-1": {
+                    "session_id": "deploy-1",
+                    "root_path": "D:/demo/app",
+                    "display_name": "prod",
+                    "description": "test",
+                    "created_at": 123,
+                }
+            },
+            deploy_state={
+                "active_session_id": "deploy-1",
+                "active_root_path": "D:/demo/app",
+                "active_display_name": "prod",
+                "pending_tool_id": None,
+                "pending_tool_name": None,
+                "pending_input_kind": None,
+                "last_tool_name": "connect",
+                "last_tool_state": "completed",
+                "last_command": None,
+                "last_command_cwd": None,
+                "last_exit_code": None,
+                "last_error": None,
+                "last_message": "connected",
+                "connection_count": 1,
+                "known_session_ids": ["deploy-1"],
+            },
         )
 
         adapter.save(state)
@@ -35,8 +68,12 @@ class SessionStoreTests(unittest.TestCase):
 
         self.assertIsNotNone(loaded)
         assert loaded is not None
+        self.assertEqual(loaded.agent_type, "deploy")
+        self.assertEqual(loaded.phase, "connected")
         self.assertEqual(loaded.history_messages[1]["content"], "收到")
         self.assertEqual(loaded.history_tools[0]["name"], "read_file")
+        self.assertEqual(loaded.deploy_connections["deploy-1"]["display_name"], "prod")
+        self.assertEqual(loaded.deploy_state["active_session_id"], "deploy-1")
         self.assertEqual(adapter.list()[0].session_id, "session-1")
 
         adapter.delete("session-1")

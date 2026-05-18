@@ -6,7 +6,10 @@ import signal
 
 import asyncio
 import json
+import os
 import subprocess
+import sys
+import tempfile
 import time
 import threading
 import uuid
@@ -23,11 +26,13 @@ try:
 except ImportError:  # pragma: no cover - optional dependency
     PtyProcess = None
 
+from deploy_agent import DeployConnectionManager, DeployPromptBrain, build_deploy_tools
 from agent import AgentEvent, ChatSession, CodingAgent, OpenAICompatibleClient
 from coding_agent import CodingPromptBrain, InteractiveCommandSession, build_coding_tools
 from coding_agent.tools import delete_file_in_workspace, execute_git_commit, execute_git_tag, init_git_repo
 from fastapi_app.api_models import (
     ChatStreamRequest,
+    ConnectToolSubmitRequest,
     ContinueChatStreamRequest,
     CreateSessionRequest,
     CreateSessionResponse,
@@ -112,7 +117,16 @@ DEFAULT_OPEN_FILES = [
     "ToolPanel.tsx",
     "FilePreview.tsx",
 ]
-STATE_DB_PATH = ROOT / ".supercode" / "state.sqlite3"
+def _resolve_state_db_path() -> Path:
+    explicit = os.environ.get("SUPERCODE_STATE_DB_PATH", "").strip()
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    if "pytest" in sys.modules:
+        return Path(tempfile.gettempdir()) / f"supercode-state-pytest-{os.getpid()}.sqlite3"
+    return ROOT / ".supercode" / "state.sqlite3"
+
+
+STATE_DB_PATH = _resolve_state_db_path()
 _session_store = SQLiteSessionStateAdapter(STATE_DB_PATH)
 
 class TerminalRuntime(TerminalRuntimeBase):
@@ -126,6 +140,8 @@ class UISession:
     model: str
     workspace: str
     mode: str = "demo"
+    agent_type: str = "coding"
+    phase: str = "idle"
     startup_error: str | None = None
     env_file: str | None = None
     selected_file_path: str | None = DEFAULT_SELECTED_FILE
@@ -144,54 +160,39 @@ class UISession:
     pending_delete_confirmations: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
     pending_commit_confirmations: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
     pending_tag_confirmations: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
+    pending_connect_requests: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
+    deploy_connection_manager: DeployConnectionManager | None = field(default=None, repr=False)
+    deploy_state: dict[str, Any] = field(default_factory=dict)
     history_messages: list[dict[str, Any]] = field(default_factory=list)
     history_tools: list[dict[str, Any]] = field(default_factory=list)
     thoughts: list[str] = field(default_factory=list)
     created_at: int = field(default_factory=lambda: int(time.time() * 1000))
     updated_at: int = field(default_factory=lambda: int(time.time() * 1000))
-    plan_steps: list[dict[str, str]] = field(
-        default_factory=lambda: [
-            {
-                "id": "1",
-                "title": "分析需求，确认界面结构与布局",
-                "description": "聊天区、代码区、文件树、终端与工具链同时在线。",
-                "status": "completed",
-            },
-            {
-                "id": "2",
-                "title": "设计组件层级和数据流",
-                "description": "消息流、工具流、文件流和终端流分层管理。",
-                "status": "in_progress",
-            },
-            {
-                "id": "3",
-                "title": "实现聊天面板与消息流式输出",
-                "description": "普通文本尽量实时推送，工具链单独展示。",
-                "status": "pending",
-            },
-            {
-                "id": "4",
-                "title": "集成文件预览与终端执行能力",
-                "description": "文件树联动代码预览，命令输出持续滚动。",
-                "status": "pending",
-            },
-            {
-                "id": "5",
-                "title": "完善工具面板与状态管理",
-                "description": "沉淀调用历史、错误状态和执行结果。",
-                "status": "pending",
-            },
-        ]
-    )
+    plan_steps: list[dict[str, str]] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.plan_steps:
+            self.plan_steps = build_default_plan_steps(self.agent_type)
+        if self.deploy_connection_manager is None:
+            self.deploy_connection_manager = DeployConnectionManager(
+                workspace=resolve_workspace_path(self.workspace)
+            )
+        self.phase = normalize_session_phase(self.phase)
+        self.deploy_state = normalize_deploy_state(self.deploy_state)
+        refresh_session_runtime_state(self)
 
     def snapshot(self) -> CreateSessionResponse:
         if self.terminal_runtime is not None:
             self.terminal_output = self.terminal_runtime.snapshot(self.session_id).output
+        refresh_session_runtime_state(self)
         return CreateSessionResponse(
             sessionId=self.session_id,
             model=self.model,
             modelId=resolve_model_reference_id(self.model, self.env_file),
             mode=self.mode,
+            agentType=self.agent_type,
+            phase=self.phase,
+            deployState=self.deploy_state,
             isGenerating=self.is_generating,
             startupError=self.startup_error,
             envFile=self.env_file,
@@ -255,6 +256,7 @@ class UISession:
             workspace=self.workspace,
             mode=self.mode,
             model=self.model,
+            agentType=self.agent_type,
             title=self.summary_title(),
             preview=self.summary_preview(),
             messageCount=len(self.history_messages),
@@ -264,6 +266,7 @@ class UISession:
         )
 
     def context_snapshot(self) -> SessionContextResponse:
+        refresh_session_runtime_state(self)
         recent_messages = [
             SessionContextMessage(
                 role=str(message.get("role", "")),
@@ -285,6 +288,9 @@ class UISession:
             workspace=self.workspace,
             mode=self.mode,
             model=self.model,
+            agentType=self.agent_type,
+            phase=self.phase,
+            deployState=self.deploy_state,
             selectedFilePath=self.selected_file_path,
             openFiles=self.open_files[-6:],
             messageCount=len(self.history_messages),
@@ -300,6 +306,8 @@ class UISession:
 
     def touch(self) -> None:
         self.updated_at = int(time.time() * 1000)
+        refresh_session_runtime_state(self)
+        sync_session_runtime_state_for_agent(self)
         persist_session_state(self)
 
     def summary_title(self) -> str:
@@ -344,6 +352,388 @@ app.add_middleware(
 
 _sessions: dict[str, UISession] = {}
 
+ROUTER_GENERIC_FOLLOWUPS = {
+    "continue",
+    "go on",
+    "next",
+    "继续",
+    "继续吧",
+    "然后呢",
+    "然后",
+    "再继续",
+    "接着来",
+    "再来",
+    "看下",
+    "看看",
+    "再看看",
+}
+
+DEPLOY_ROUTE_KEYWORDS = (
+    "deploy",
+    "deployment",
+    "release",
+    "upload",
+    "transfer",
+    "vercel",
+    "netlify",
+    "docker",
+    "compose",
+    "staging",
+    "production",
+    "rollback",
+    "上线",
+    "部署",
+    "发布",
+    "上传",
+    "传输",
+    "同步文件",
+    "传文件",
+    "回滚",
+    "预发",
+    "生产环境",
+    "预览环境",
+    "服务器",
+    "日志",
+    "环境变量",
+)
+
+CODING_ROUTE_KEYWORDS = (
+    "implement",
+    "refactor",
+    "fix",
+    "bug",
+    "test",
+    "frontend",
+    "backend",
+    "component",
+    "api",
+    "function",
+    "class",
+    "write code",
+    "修改代码",
+    "写代码",
+    "实现",
+    "重构",
+    "修复",
+    "测试",
+    "前端",
+    "后端",
+    "组件",
+    "接口",
+    "函数",
+    "类",
+    "页面",
+    "样式",
+    "脚本",
+)
+
+
+def normalize_session_phase(phase: str | None) -> str:
+    normalized = str(phase or "idle").strip().lower()
+    allowed = {
+        "idle",
+        "awaiting_connect_input",
+        "connected",
+        "exploring",
+        "executing",
+        "verifying",
+        "completed",
+        "failed",
+    }
+    return normalized if normalized in allowed else "idle"
+
+
+def build_default_deploy_state() -> dict[str, Any]:
+    return {
+        "active_session_id": None,
+        "active_root_path": None,
+        "active_display_name": None,
+        "active_host": None,
+        "active_username": None,
+        "active_extra_info": None,
+        "pending_tool_id": None,
+        "pending_tool_name": None,
+        "pending_input_kind": None,
+        "last_tool_name": None,
+        "last_tool_state": None,
+        "last_command": None,
+        "last_command_cwd": None,
+        "last_exit_code": None,
+        "last_error": None,
+        "last_message": None,
+        "connection_count": 0,
+        "known_session_ids": [],
+    }
+
+
+def normalize_deploy_state(value: object) -> dict[str, Any]:
+    state = build_default_deploy_state()
+    if isinstance(value, dict):
+        for key in state:
+            if key in value:
+                state[key] = value[key]
+    return state
+
+
+def refresh_session_runtime_state(session: UISession) -> None:
+    if session.agent_type != "deploy":
+        session.phase = "idle"
+        session.deploy_state = normalize_deploy_state(session.deploy_state)
+        return
+
+    session.phase = normalize_session_phase(session.phase)
+    deploy_state = normalize_deploy_state(session.deploy_state)
+    manager = session.deploy_connection_manager
+    connections = manager.list_connections() if manager is not None else []
+    deploy_state["connection_count"] = len(connections)
+    deploy_state["known_session_ids"] = [
+        str(connection.get("session_id") or "")
+        for connection in connections[:10]
+        if str(connection.get("session_id") or "").strip()
+    ]
+
+    active_session_id = str(deploy_state.get("active_session_id") or "").strip()
+    if active_session_id and manager is not None:
+        try:
+            active_connection = manager.get_connection(active_session_id)
+        except KeyError:
+            deploy_state["active_session_id"] = None
+            deploy_state["active_root_path"] = None
+            deploy_state["active_display_name"] = None
+            deploy_state["active_host"] = None
+            deploy_state["active_username"] = None
+            deploy_state["active_extra_info"] = None
+        else:
+            if active_connection.host and not manager.has_password(active_session_id):
+                deploy_state["active_session_id"] = None
+                deploy_state["active_root_path"] = None
+                deploy_state["active_display_name"] = None
+                deploy_state["active_host"] = None
+                deploy_state["active_username"] = None
+                deploy_state["active_extra_info"] = None
+            else:
+                deploy_state["active_root_path"] = str(active_connection.root_path)
+                deploy_state["active_display_name"] = active_connection.display_name
+                deploy_state["active_host"] = active_connection.host or None
+                deploy_state["active_username"] = active_connection.username or None
+                deploy_state["active_extra_info"] = active_connection.extra_info or None
+
+    pending_tool_id = str(deploy_state.get("pending_tool_id") or "").strip()
+    pending_input_kind = str(deploy_state.get("pending_input_kind") or "").strip()
+    if pending_tool_id and pending_input_kind and pending_tool_id not in session.pending_connect_requests:
+        deploy_state["pending_tool_id"] = None
+        deploy_state["pending_tool_name"] = None
+        deploy_state["pending_input_kind"] = None
+
+    session.deploy_state = deploy_state
+
+
+def build_agent_runtime_state(session: UISession) -> dict[str, Any]:
+    refresh_session_runtime_state(session)
+    return {
+        "agent_type": session.agent_type,
+        "phase": session.phase,
+        "workspace": session.workspace,
+        "deploy_state": session.deploy_state if session.agent_type == "deploy" else {},
+    }
+
+
+def sync_session_runtime_state_for_agent(session: UISession) -> None:
+    if session.chat_session is None:
+        return
+    state = getattr(session.chat_session, "state", None)
+    data = getattr(state, "data", None)
+    if not isinstance(data, dict):
+        return
+    data["runtime_state"] = build_agent_runtime_state(session)
+
+
+def set_session_phase(session: UISession, phase: str) -> None:
+    session.phase = normalize_session_phase(phase)
+
+
+def update_deploy_state(session: UISession, **updates: Any) -> None:
+    if session.agent_type != "deploy":
+        return
+    deploy_state = normalize_deploy_state(session.deploy_state)
+    for key, value in updates.items():
+        if key in deploy_state:
+            deploy_state[key] = value
+    session.deploy_state = deploy_state
+    refresh_session_runtime_state(session)
+
+
+def reset_phase_for_new_turn(session: UISession) -> None:
+    if session.agent_type != "deploy":
+        set_session_phase(session, "idle")
+        return
+    refresh_session_runtime_state(session)
+    if session.pending_connect_requests:
+        set_session_phase(session, "awaiting_connect_input")
+        return
+    if session.deploy_state.get("active_session_id"):
+        set_session_phase(session, "connected")
+        return
+    set_session_phase(session, "idle")
+
+
+def extract_command_exit_code(output: object) -> int | None:
+    if not isinstance(output, str):
+        return None
+    for line in output.splitlines():
+        normalized = line.strip().lower()
+        if not normalized.startswith("exit_code:"):
+            continue
+        raw_value = line.split(":", 1)[1].strip()
+        try:
+            return int(raw_value)
+        except ValueError:
+            return None
+    return None
+
+
+def _normalized_message_for_routing(user_message: str) -> str:
+    return " ".join(user_message.strip().lower().split())
+
+
+def _contains_any_keyword(text: str, keywords: tuple[str, ...] | set[str]) -> bool:
+    return any(keyword in text for keyword in keywords)
+
+
+def route_agent_type_for_message(session: UISession, user_message: str) -> str:
+    text = _normalized_message_for_routing(user_message)
+    if not text:
+        return session.agent_type
+
+    if session.pending_connect_requests:
+        return "deploy"
+
+    active_deploy_session = bool(normalize_deploy_state(session.deploy_state).get("active_session_id"))
+
+    if _contains_any_keyword(text, CODING_ROUTE_KEYWORDS):
+        return "coding"
+
+    if _contains_any_keyword(text, DEPLOY_ROUTE_KEYWORDS):
+        return "deploy"
+
+    if active_deploy_session and text in ROUTER_GENERIC_FOLLOWUPS:
+        return "deploy"
+
+    if active_deploy_session and session.agent_type == "deploy":
+        return "deploy"
+
+    return "coding"
+
+
+def rebuild_chat_session_for_agent_type(session: UISession, agent_type: str) -> None:
+    chat_session, model_name, startup_error, env_file_used = build_chat_session(
+        session.workspace,
+        session.env_file,
+        agent_type=agent_type,
+    )
+
+    session.agent_type = agent_type
+    session.chat_session = chat_session
+    session.mode = "agent" if chat_session is not None else "demo"
+    session.startup_error = startup_error
+    session.env_file = env_file_used or session.env_file
+    if chat_session is not None:
+        session.model = model_name
+        seed_chat_session_history(session.chat_session, session.history_messages, session.history_tools)
+        if isinstance(session.chat_session.agent, CodingAgent):
+            attach_agent_runtime_metadata(
+                session.chat_session.agent,
+                session_id=session.session_id,
+                interactive_command_session=session.interactive_command_session,
+                cancel_event=session.cancel_event,
+                deploy_connection_manager=session.deploy_connection_manager,
+            )
+            sync_session_runtime_state_for_agent(session)
+
+
+def route_session_for_user_message(session: UISession, user_message: str) -> None:
+    next_agent_type = route_agent_type_for_message(session, user_message)
+    if next_agent_type != session.agent_type or session.chat_session is None:
+        rebuild_chat_session_for_agent_type(session, next_agent_type)
+    else:
+        session.agent_type = next_agent_type
+
+    session.plan_steps = build_default_plan_steps(session.agent_type)
+    if session.agent_type != "deploy":
+        set_session_phase(session, "idle")
+    else:
+        reset_phase_for_new_turn(session)
+    sync_session_runtime_state_for_agent(session)
+
+
+def build_default_plan_steps(agent_type: str) -> list[dict[str, str]]:
+    if agent_type == "deploy":
+        return [
+            {
+                "id": "1",
+                "title": "连接部署目标",
+                "description": "向用户收集部署目录或目标环境信息，建立 deploy session。",
+                "status": "in_progress",
+            },
+            {
+                "id": "2",
+                "title": "探索配置与脚本",
+                "description": "读取部署目录、配置文件、发布脚本和工作流。",
+                "status": "pending",
+            },
+            {
+                "id": "3",
+                "title": "执行发布动作",
+                "description": "在明确工作目录和命令后执行部署或验证命令。",
+                "status": "pending",
+            },
+            {
+                "id": "4",
+                "title": "校验发布结果",
+                "description": "检查命令输出、部署结果和关键验证点。",
+                "status": "pending",
+            },
+            {
+                "id": "5",
+                "title": "沉淀结论",
+                "description": "总结当前部署状态、风险和后续建议。",
+                "status": "pending",
+            },
+        ]
+
+    return [
+        {
+            "id": "1",
+            "title": "分析需求，确认界面结构与布局",
+            "description": "聊天区、代码区、文件树、终端与工具链同时在线。",
+            "status": "completed",
+        },
+        {
+            "id": "2",
+            "title": "设计组件层级和数据流",
+            "description": "消息流、工具流、文件流和终端流分层管理。",
+            "status": "in_progress",
+        },
+        {
+            "id": "3",
+            "title": "实现聊天面板与消息流式输出",
+            "description": "普通文本尽量实时推送，工具链单独展示。",
+            "status": "pending",
+        },
+        {
+            "id": "4",
+            "title": "集成文件预览与终端执行能力",
+            "description": "文件树联动代码预览，命令输出持续滚动。",
+            "status": "pending",
+        },
+        {
+            "id": "5",
+            "title": "完善工具面板与状态管理",
+            "description": "沉淀调用历史、错误状态和执行结果。",
+            "status": "pending",
+        },
+    ]
+
 
 def session_has_persistable_history(session: UISession) -> bool:
     return session_has_persistable_history_impl(session)
@@ -362,9 +752,17 @@ def persisted_state_to_history_item(state: PersistedSessionState) -> SessionHist
 
 
 def hydrate_session_from_state(state: PersistedSessionState) -> UISession:
+    deploy_connection_manager = DeployConnectionManager(
+        workspace=resolve_workspace_path(state.workspace)
+    )
+    for connection in state.deploy_connections.values():
+        if isinstance(connection, dict):
+            deploy_connection_manager.register_connection(connection)
+
     chat_session, model_name, startup_error, env_file_used = build_chat_session(
         state.workspace,
         state.env_file,
+        agent_type=state.agent_type,
     )
     interactive_command_session = InteractiveCommandSession(
         workspace=resolve_workspace_path(state.workspace)
@@ -374,6 +772,8 @@ def hydrate_session_from_state(state: PersistedSessionState) -> UISession:
         model=model_name if chat_session is not None else state.model,
         workspace=state.workspace,
         mode="agent" if chat_session is not None else state.mode,
+        agent_type=state.agent_type,
+        phase=state.phase,
         is_generating=state.is_generating,
         startup_error=startup_error if chat_session is None else state.startup_error,
         env_file=env_file_used or state.env_file,
@@ -393,6 +793,9 @@ def hydrate_session_from_state(state: PersistedSessionState) -> UISession:
         pending_delete_confirmations=state.pending_delete_confirmations,
         pending_commit_confirmations=state.pending_commit_confirmations,
         pending_tag_confirmations=state.pending_tag_confirmations,
+        pending_connect_requests=state.pending_connect_requests,
+        deploy_connection_manager=deploy_connection_manager,
+        deploy_state=state.deploy_state,
     )
     if session.chat_session is not None:
         seed_chat_session_history(session.chat_session, state.history_messages, state.history_tools)
@@ -402,7 +805,9 @@ def hydrate_session_from_state(state: PersistedSessionState) -> UISession:
             session_id=session.session_id,
             interactive_command_session=interactive_command_session,
             cancel_event=session.cancel_event,
+            deploy_connection_manager=deploy_connection_manager,
         )
+        sync_session_runtime_state_for_agent(session)
     return session
 
 
@@ -479,9 +884,15 @@ async def switch_session_model(session_id: str, request: SwitchModelRequest) -> 
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     client = OpenAICompatibleClient(config)
+    if session.agent_type == "deploy":
+        brain = DeployPromptBrain(client, workspace=session.workspace)
+        tools = build_deploy_tools()
+    else:
+        brain = CodingPromptBrain(client, workspace=session.workspace)
+        tools = build_coding_tools()
     agent = CodingAgent(
-        brain=CodingPromptBrain(client, workspace=session.workspace),
-        tools=build_coding_tools(),
+        brain=brain,
+        tools=tools,
         workspace=resolve_workspace_path(session.workspace),
         tool_context_metadata={
             "include_thoughts_in_context": config.include_thoughts_in_context,
@@ -498,7 +909,9 @@ async def switch_session_model(session_id: str, request: SwitchModelRequest) -> 
             interactive_command_session=interactive_command_session,
             cancel_event=session.cancel_event,
             include_thoughts_in_context=config.include_thoughts_in_context,
+            deploy_connection_manager=session.deploy_connection_manager,
         )
+        sync_session_runtime_state_for_agent(session)
     session.model = config.model
     session.env_file = normalized_model_ref
     session.mode = "agent"
@@ -509,6 +922,9 @@ async def switch_session_model(session_id: str, request: SwitchModelRequest) -> 
         "model": session.model,
         "modelId": resolve_model_reference_id(session.model, session.env_file),
         "mode": session.mode,
+        "agentType": session.agent_type,
+        "phase": session.phase,
+        "deployState": session.deploy_state,
         "envFile": session.env_file,
         "previewUrl": session.preview_url,
     })
@@ -524,11 +940,12 @@ async def get_directories(path: str = Query(...)) -> JSONResponse:
 async def create_session(request: CreateSessionRequest) -> JSONResponse:
     session_id = uuid.uuid4().hex
     workspace = normalize_workspace(request.workspace)
+    agent_type = normalize_agent_type(request.agent_type)
     requested_env_file = resolve_requested_env_file(request.model, request.env_file)
 
     try:
         chat_session, model_name, startup_error, env_file_used = await asyncio.wait_for(
-            asyncio.to_thread(build_chat_session, workspace, requested_env_file),
+            asyncio.to_thread(build_chat_session, workspace, requested_env_file, agent_type),
             timeout=30,
         )
     except asyncio.TimeoutError:
@@ -550,6 +967,7 @@ async def create_session(request: CreateSessionRequest) -> JSONResponse:
         model=model_name,
         workspace=workspace,
         env_file=env_file_used,
+        agent_type=agent_type,
         terminal_runtime=TerminalRuntime(workspace=workspace),
         interactive_command_session=interactive_command_session,
         chat_session=chat_session,
@@ -564,7 +982,9 @@ async def create_session(request: CreateSessionRequest) -> JSONResponse:
             session_id=session.session_id,
             interactive_command_session=interactive_command_session,
             cancel_event=session.cancel_event,
+            deploy_connection_manager=session.deploy_connection_manager,
         )
+        sync_session_runtime_state_for_agent(session)
     _sessions[session_id] = session
     persist_session_state(session)
 
@@ -578,6 +998,9 @@ async def create_session(request: CreateSessionRequest) -> JSONResponse:
             sessionId=session.session_id,
             model=session.model,
             mode=session.mode,
+            agentType=session.agent_type,
+            phase=session.phase,
+            deployState=session.deploy_state,
             isGenerating=session.is_generating,
             startupError=session.startup_error,
             envFile=session.env_file,
@@ -613,6 +1036,9 @@ async def get_session_snapshot(session_id: str) -> JSONResponse:
             sessionId=session.session_id,
             model=session.model,
             mode=session.mode,
+            agentType=session.agent_type,
+            phase=session.phase,
+            deployState=session.deploy_state,
             isGenerating=session.is_generating,
             startupError=session.startup_error,
             envFile=session.env_file,
@@ -1214,6 +1640,126 @@ async def confirm_tag_tool(
         }, status_code=500)
 
 
+@app.post("/api/sessions/{session_id}/tools/{tool_id}/connect")
+async def submit_connect_tool(
+    session_id: str,
+    tool_id: str,
+    request: ConnectToolSubmitRequest,
+) -> JSONResponse:
+    session = require_session(session_id)
+    pending = session.pending_connect_requests.get(tool_id)
+    if pending is None:
+        raise HTTPException(status_code=404, detail="未找到待填写的 connect 请求")
+
+    deploy_manager = session.deploy_connection_manager
+    if deploy_manager is None:
+        raise HTTPException(status_code=500, detail="当前会话缺少 deploy connection manager")
+
+    values = request.values if isinstance(request.values, dict) else {}
+    host = str(values.get("host") or "").strip()
+    username = str(values.get("username") or "").strip()
+    password = str(values.get("password") or "")
+    root_path = str(values.get("root_path") or "").strip()
+    display_name = str(values.get("display_name") or "").strip()
+    description = str(values.get("description") or "").strip()
+    extra_info = str(values.get("extra_info") or "").strip()
+    if not root_path:
+        raise HTTPException(status_code=400, detail="root_path 为必填项")
+    if host and (not username or not password):
+        raise HTTPException(status_code=400, detail="远程连接必须提供 username 和 password")
+
+    try:
+        connection = deploy_manager.create_connection(
+            root_path=root_path,
+            display_name=display_name,
+            description=description,
+            extra_info=extra_info,
+            host=host,
+            username=username,
+            password=password,
+        )
+    except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    session.pending_connect_requests.pop(tool_id, None)
+    assistant_id = str(pending.get("assistant_id") or "").strip()
+    can_continue = bool(assistant_id and session.chat_session is not None)
+    input_request = pending.get("request") if isinstance(pending.get("request"), dict) else None
+    output = {
+        **connection,
+        "message": (
+            f"已建立 deploy session {connection['session_id']}，"
+            + (f"服务器：{connection['host']}" if connection.get("host") else f"根目录：{connection['root_path']}")
+        ),
+    }
+    tool_record = {
+        "id": tool_id,
+        "name": str(pending.get("tool_name") or "connect"),
+        "output": output,
+        "success": True,
+        "state": "output-available",
+        "inputRequest": input_request,
+    }
+    session.history_tools = upsert_tool(session.history_tools, tool_record)
+    if assistant_id:
+        update_assistant_tool_call(
+            session,
+            assistant_id,
+            tool_id,
+            lambda existing: {
+                **existing,
+                **tool_record,
+            },
+        )
+    record_confirmation_result_for_agent(
+        session,
+        (
+            "[内部连接结果] connect 已建立 deploy session："
+            f"{connection['session_id']} -> {connection['root_path']}"
+        ),
+    )
+    set_session_phase(session, "connected")
+    update_deploy_state(
+        session,
+        active_session_id=connection["session_id"],
+        active_root_path=connection["root_path"],
+        active_display_name=connection["display_name"],
+        active_host=connection.get("host") or None,
+        active_username=connection.get("username") or None,
+        active_extra_info=connection.get("extra_info") or None,
+        pending_tool_id=None,
+        pending_tool_name=None,
+        pending_input_kind=None,
+        last_tool_name=str(pending.get("tool_name") or "connect"),
+        last_tool_state="completed",
+        last_error=None,
+        last_message=str(output.get("message") or ""),
+    )
+    session.touch()
+    return JSONResponse(
+        {
+            "id": tool_id,
+            "name": str(pending.get("tool_name") or "connect"),
+            "output": output,
+            "success": True,
+            "state": "output-available",
+            "assistantId": assistant_id,
+            "shouldContinue": can_continue,
+            "phase": session.phase,
+            "deployState": session.deploy_state,
+        }
+    )
+
+
+@app.get("/api/sessions/{session_id}/deploy/connections")
+async def list_deploy_connections(session_id: str) -> JSONResponse:
+    session = require_session(session_id)
+    manager = session.deploy_connection_manager
+    if manager is None:
+        return JSONResponse({"connections": []})
+    return JSONResponse({"connections": manager.list_connections()})
+
+
 @app.get("/api/sessions/{session_id}/context")
 async def get_session_context(session_id: str) -> JSONResponse:
     session = require_session(session_id)
@@ -1290,6 +1836,7 @@ async def chat_stream(
     user_message = request.message.strip()
     if not user_message:
         raise HTTPException(status_code=400, detail="message 不能为空")
+    route_session_for_user_message(session, user_message)
 
     async def event_generator():
         queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
@@ -1367,6 +1914,8 @@ async def chat_continue(
     protocol: str = Query("ui-message"),
 ) -> StreamingResponse:
     session = require_session(request.session_id)
+    if session.chat_session is None:
+        raise HTTPException(status_code=409, detail="当前会话不支持 continue")
     session.cancel_event.clear()
     assistant_id = request.assistant_id.strip()
     if not assistant_id:
@@ -1459,12 +2008,20 @@ def resolve_requested_env_file(model_name: str | None, env_file: str | None = No
     return None
 
 
+def normalize_agent_type(agent_type: str | None) -> str:
+    normalized = str(agent_type or "coding").strip().lower()
+    if normalized not in {"coding", "deploy"}:
+        raise HTTPException(status_code=400, detail=f"不支持的 agent_type: {agent_type}")
+    return normalized
+
+
 def attach_agent_runtime_metadata(
     agent: CodingAgent,
     session_id: str,
     interactive_command_session: InteractiveCommandSession | None,
     cancel_event: threading.Event | None = None,
     include_thoughts_in_context: bool | None = None,
+    deploy_connection_manager: DeployConnectionManager | None = None,
 ) -> None:
     agent.tool_context_metadata["session_id"] = session_id
     agent.tool_context_metadata["backend_base_url"] = BACKEND_BASE_URL
@@ -1474,16 +2031,29 @@ def attach_agent_runtime_metadata(
         agent.tool_context_metadata["interactive_command_session"] = interactive_command_session
     if cancel_event is not None:
         agent.tool_context_metadata["cancel_event"] = cancel_event
+    if deploy_connection_manager is not None:
+        agent.tool_context_metadata["deploy_connection_manager"] = deploy_connection_manager
 
 
-def build_chat_session(workspace: str, env_file: str | None = None) -> tuple[ChatSession | None, str, str | None, str | None]:
+def build_chat_session(
+    workspace: str,
+    env_file: str | None = None,
+    agent_type: str = "coding",
+) -> tuple[ChatSession | None, str, str | None, str | None]:
     try:
         config, normalized_model_ref = build_agent_config(ROOT, env_file)
         client = OpenAICompatibleClient(config)
+        resolved_workspace = resolve_workspace_path(workspace)
+        if agent_type == "deploy":
+            brain = DeployPromptBrain(client, workspace=workspace)
+            tools = build_deploy_tools()
+        else:
+            brain = CodingPromptBrain(client, workspace=workspace)
+            tools = build_coding_tools()
         agent = CodingAgent(
-            brain=CodingPromptBrain(client, workspace=workspace),
-            tools=build_coding_tools(),
-            workspace=resolve_workspace_path(workspace),
+            brain=brain,
+            tools=tools,
+            workspace=resolved_workspace,
             tool_context_metadata={
                 "include_thoughts_in_context": config.include_thoughts_in_context,
             },
@@ -1504,6 +2074,8 @@ async def run_agent_stream(
     assistant_id = assistant_id or uuid.uuid4().hex
     streamed_assistant_text = ""
     assistant_stream_started = False
+    reset_phase_for_new_turn(session)
+    sync_session_runtime_state_for_agent(session)
     if user_message is not None:
         ensure_user_message_recorded(session, user_message)
     set_session_generating(session, True)
@@ -1516,6 +2088,21 @@ async def run_agent_stream(
             },
         }
     )
+
+    def _session_state_event() -> dict[str, Any]:
+        return {
+            "type": "data-session-state",
+            "payload": {
+                "assistant_id": assistant_id,
+                "data": {
+                    "agentType": session.agent_type,
+                    "phase": session.phase,
+                    "deployState": session.deploy_state,
+                },
+            },
+        }
+
+    await queue.put(_session_state_event())
     update_assistant_history_message(session, assistant_id, lambda message: sync_assistant_message_fields(message))
 
     def on_event(event: AgentEvent) -> None:
@@ -1583,8 +2170,38 @@ async def run_agent_stream(
             update_plan_steps_for_tool(session, event.step_index, event.tool_call.name)
             if event.tool_call.name == "read_file":
                 maybe_filename = event.tool_call.arguments.get("filename")
-                if isinstance(maybe_filename, str):
-                    session.selected_file_path = normalize_relative_path(maybe_filename, session.workspace)
+                maybe_path = maybe_filename if isinstance(maybe_filename, str) else event.tool_call.arguments.get("path")
+                if isinstance(maybe_path, str):
+                    session.selected_file_path = normalize_relative_path(maybe_path, session.workspace)
+            if session.agent_type == "deploy":
+                tool_name = event.tool_call.name
+                update_deploy_state(
+                    session,
+                    pending_tool_id=tool_id,
+                    pending_tool_name=tool_name,
+                    last_tool_name=tool_name,
+                    last_tool_state="running",
+                    last_error=None,
+                )
+                if tool_name == "connect":
+                    set_session_phase(session, "awaiting_connect_input")
+                elif tool_name in {"list_files", "read_file"}:
+                    set_session_phase(session, "exploring")
+                elif tool_name in {"transfer_files", "execute"}:
+                    set_session_phase(session, "executing")
+                if tool_name == "transfer_files":
+                    update_deploy_state(
+                        session,
+                        last_command=None,
+                        last_command_cwd=str(event.tool_call.arguments.get("target_dir") or "."),
+                        last_exit_code=None,
+                    )
+                elif tool_name == "execute":
+                    update_deploy_state(
+                        session,
+                        last_command=str(event.tool_call.arguments.get("command") or ""),
+                        last_command_cwd=str(event.tool_call.arguments.get("cwd") or "."),
+                    )
             append_assistant_tool_call(
                 session,
                 assistant_id,
@@ -1610,6 +2227,7 @@ async def run_agent_stream(
                     },
                 },
             )
+            loop.call_soon_threadsafe(queue.put_nowait, _session_state_event())
             loop.call_soon_threadsafe(
                 queue.put_nowait,
                 {
@@ -1667,6 +2285,10 @@ async def run_agent_stream(
                 and isinstance(output, dict)
                 and output.get("requires_confirmation") is True
             )
+            requires_user_input = bool(
+                isinstance(output, dict)
+                and output.get("requires_user_input") is True
+            )
             if event.tool_result.name in {"execute", "excecute", "terminal_input", "terminal_wait"} and terminal_output is not None:
                 session.terminal_output = terminal_output
             if event.tool_result.name in {"write_file", "replace_file", "apply_patch"} or (
@@ -1675,9 +2297,16 @@ async def run_agent_stream(
                 session.mark_file_tree_dirty()
             if event.tool_result.name == "open_browser" and preview_url is not None:
                 session.preview_url = preview_url
-            tool_state = "approval-requested" if requires_confirmation else ("completed" if event.tool_result.success else "error")
-            tool_success: bool | None = None if requires_confirmation else event.tool_result.success
+            tool_state = (
+                "approval-requested"
+                if requires_confirmation
+                else "input-requested"
+                if requires_user_input
+                else ("completed" if event.tool_result.success else "error")
+            )
+            tool_success: bool | None = None if (requires_confirmation or requires_user_input) else event.tool_result.success
             approval = {"id": tool_id} if requires_confirmation else None
+            input_request = None
             if requires_confirmation and isinstance(output, dict):
                 if event.tool_result.name == "delete_file":
                     session.pending_delete_confirmations[tool_id] = {
@@ -1695,6 +2324,67 @@ async def run_agent_stream(
                         "tag_message": str(output.get("tag_message") or ""),
                         "assistant_id": assistant_id,
                     }
+            elif requires_user_input and isinstance(output, dict):
+                input_request = {
+                    "id": tool_id,
+                    "kind": str(output.get("input_kind") or event.tool_result.name),
+                    "title": str(output.get("title") or ""),
+                    "message": str(output.get("message") or ""),
+                    "fields": output.get("fields") if isinstance(output.get("fields"), list) else [],
+                }
+                session.pending_connect_requests[tool_id] = {
+                    "assistant_id": assistant_id,
+                    "tool_name": event.tool_result.name,
+                    "request": input_request,
+                }
+            if session.agent_type == "deploy":
+                tool_name = event.tool_result.name
+                exit_code = extract_command_exit_code(output)
+                deploy_updates: dict[str, Any] = {
+                    "last_tool_name": tool_name,
+                    "last_tool_state": tool_state,
+                    "last_message": (
+                        str(output.get("message") or "").strip()
+                        if isinstance(output, dict)
+                        else compact_text(str(output), 200)
+                    )
+                    or None,
+                }
+                if tool_name == "execute":
+                    deploy_updates["last_exit_code"] = exit_code
+                    if exit_code is not None and exit_code != 0:
+                        deploy_updates["last_error"] = f"命令退出码为 {exit_code}"
+                elif tool_name == "transfer_files":
+                    deploy_updates["last_exit_code"] = None
+                if requires_user_input:
+                    set_session_phase(session, "awaiting_connect_input")
+                    deploy_updates.update(
+                        {
+                            "pending_tool_id": tool_id,
+                            "pending_tool_name": tool_name,
+                            "pending_input_kind": str(input_request.get("kind") if input_request else ""),
+                        }
+                    )
+                else:
+                    deploy_updates.update(
+                        {
+                            "pending_tool_id": None,
+                            "pending_tool_name": None,
+                            "pending_input_kind": None,
+                        }
+                    )
+                    if not event.tool_result.success:
+                        set_session_phase(session, "failed")
+                        deploy_updates["last_error"] = event.tool_result.error_message
+                    elif tool_name in {"list_files", "read_file"}:
+                        set_session_phase(session, "exploring")
+                    elif tool_name == "transfer_files":
+                        set_session_phase(session, "connected")
+                    elif tool_name == "execute":
+                        set_session_phase(session, "failed" if exit_code not in (None, 0) else "verifying")
+                    elif tool_name == "connect":
+                        set_session_phase(session, "connected")
+                update_deploy_state(session, **deploy_updates)
             tool_record = {
                 "id": tool_id,
                 "stepIndex": event.step_index,
@@ -1705,6 +2395,7 @@ async def run_agent_stream(
                 "errorMessage": event.tool_result.error_message,
                 "state": tool_state,
                 "approval": approval,
+                "inputRequest": input_request,
             }
             session.history_tools = upsert_tool(session.history_tools, tool_record)
             update_assistant_tool_call(
@@ -1733,12 +2424,22 @@ async def run_agent_stream(
                         "preview_url": preview_url,
                         "state": tool_state,
                         "approval": approval,
+                        "input_request": input_request,
                     },
                 },
             )
+            loop.call_soon_threadsafe(queue.put_nowait, _session_state_event())
             return
 
         if event.type in {"final", "turn_finished", "limit_reached"}:
+            if session.agent_type == "deploy" and not session.pending_connect_requests and session.phase != "failed":
+                set_session_phase(session, "completed")
+                update_deploy_state(
+                    session,
+                    pending_tool_id=None,
+                    pending_tool_name=None,
+                    pending_input_kind=None,
+                )
             finalize_plan_steps(session)
             loop.call_soon_threadsafe(
                 queue.put_nowait,
@@ -1749,6 +2450,7 @@ async def run_agent_stream(
                     },
                 },
             )
+            loop.call_soon_threadsafe(queue.put_nowait, _session_state_event())
 
     try:
         if resume_existing_turn:
@@ -1765,6 +2467,18 @@ async def run_agent_stream(
                 on_event,
             )
     except Exception as exc:  # noqa: BLE001 - 流式接口需要兜底，避免 SSE 半路中断
+        if session.agent_type == "deploy":
+            set_session_phase(session, "failed")
+            update_deploy_state(
+                session,
+                pending_tool_id=None,
+                pending_tool_name=None,
+                pending_input_kind=None,
+                last_tool_state="error",
+                last_error=str(exc),
+                last_message=str(exc),
+            )
+        await queue.put(_session_state_event())
         finalize_plan_steps(session)
         await queue.put(
             {
@@ -1808,10 +2522,29 @@ async def run_agent_stream(
         return
 
     if session.cancel_event.is_set():
+        if session.agent_type == "deploy":
+            reset_phase_for_new_turn(session)
+            update_deploy_state(
+                session,
+                pending_tool_id=None,
+                pending_tool_name=None,
+                pending_input_kind=None,
+                last_message="用户已停止当前任务。",
+            )
         set_session_generating(session, False)
+        await queue.put(_session_state_event())
         await queue.put(None)
         return
 
+    if session.agent_type == "deploy" and not session.pending_connect_requests and session.phase != "failed":
+        set_session_phase(session, "completed")
+        update_deploy_state(
+            session,
+            pending_tool_id=None,
+            pending_tool_name=None,
+            pending_input_kind=None,
+        )
+    await queue.put(_session_state_event())
     replace_assistant_text_part(session, assistant_id, response.final_output)
     remaining_output = response.final_output
     should_reset_before_replay = not assistant_stream_started
@@ -1857,6 +2590,19 @@ async def run_demo_stream(
             "type": "assistant_started",
             "payload": {
                 "id": assistant_id,
+            },
+        }
+    )
+    await queue.put(
+        {
+            "type": "data-session-state",
+            "payload": {
+                "assistant_id": assistant_id,
+                "data": {
+                    "agentType": session.agent_type,
+                    "phase": session.phase,
+                    "deployState": session.deploy_state,
+                },
             },
         }
     )

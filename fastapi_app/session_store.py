@@ -21,6 +21,8 @@ class PersistedSessionState:
     tool_call_count: int
     created_at: int
     updated_at: int
+    agent_type: str = "coding"
+    phase: str = "idle"
     is_generating: bool = False
     startup_error: str | None = None
     env_file: str | None = None
@@ -35,6 +37,9 @@ class PersistedSessionState:
     pending_delete_confirmations: dict[str, dict[str, Any]] = field(default_factory=dict)
     pending_commit_confirmations: dict[str, dict[str, Any]] = field(default_factory=dict)
     pending_tag_confirmations: dict[str, dict[str, Any]] = field(default_factory=dict)
+    pending_connect_requests: dict[str, dict[str, Any]] = field(default_factory=dict)
+    deploy_connections: dict[str, dict[str, Any]] = field(default_factory=dict)
+    deploy_state: dict[str, Any] = field(default_factory=dict)
 
 
 class SessionStateAdapter(ABC):
@@ -76,27 +81,31 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
             connection.execute(
                 """
                 INSERT INTO sessions (
-                    session_id, workspace, mode, model, title, preview,
+                    session_id, workspace, mode, model, agent_type, phase, title, preview,
                     message_count, tool_call_count, created_at, updated_at,
                     is_generating,
                     startup_error, env_file, selected_file_path, open_files,
                     terminal_output, preview_url, history_messages,
                     history_tools, thoughts, plan_steps, pending_delete_confirmations,
-                    pending_commit_confirmations, pending_tag_confirmations
+                    pending_commit_confirmations, pending_tag_confirmations,
+                    pending_connect_requests, deploy_connections, deploy_state
                 )
                 VALUES (
-                    :session_id, :workspace, :mode, :model, :title, :preview,
+                    :session_id, :workspace, :mode, :model, :agent_type, :phase, :title, :preview,
                     :message_count, :tool_call_count, :created_at, :updated_at,
                     :is_generating,
                     :startup_error, :env_file, :selected_file_path, :open_files,
                     :terminal_output, :preview_url, :history_messages,
                     :history_tools, :thoughts, :plan_steps, :pending_delete_confirmations,
-                    :pending_commit_confirmations, :pending_tag_confirmations
+                    :pending_commit_confirmations, :pending_tag_confirmations,
+                    :pending_connect_requests, :deploy_connections, :deploy_state
                 )
                 ON CONFLICT(session_id) DO UPDATE SET
                     workspace = excluded.workspace,
                     mode = excluded.mode,
                     model = excluded.model,
+                    agent_type = excluded.agent_type,
+                    phase = excluded.phase,
                     title = excluded.title,
                     preview = excluded.preview,
                     message_count = excluded.message_count,
@@ -116,7 +125,10 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                     plan_steps = excluded.plan_steps,
                     pending_delete_confirmations = excluded.pending_delete_confirmations,
                     pending_commit_confirmations = excluded.pending_commit_confirmations,
-                    pending_tag_confirmations = excluded.pending_tag_confirmations
+                    pending_tag_confirmations = excluded.pending_tag_confirmations,
+                    pending_connect_requests = excluded.pending_connect_requests,
+                    deploy_connections = excluded.deploy_connections,
+                    deploy_state = excluded.deploy_state
                 """,
                 payload,
             )
@@ -154,6 +166,8 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                     workspace TEXT NOT NULL,
                     mode TEXT NOT NULL,
                     model TEXT NOT NULL,
+                    agent_type TEXT NOT NULL DEFAULT 'coding',
+                    phase TEXT NOT NULL DEFAULT 'idle',
                     title TEXT NOT NULL,
                     preview TEXT NOT NULL,
                     message_count INTEGER NOT NULL,
@@ -173,7 +187,10 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                     plan_steps TEXT NOT NULL,
                     pending_delete_confirmations TEXT NOT NULL,
                     pending_commit_confirmations TEXT NOT NULL DEFAULT '{}',
-                    pending_tag_confirmations TEXT NOT NULL DEFAULT '{}'
+                    pending_tag_confirmations TEXT NOT NULL DEFAULT '{}',
+                    pending_connect_requests TEXT NOT NULL DEFAULT '{}',
+                    deploy_connections TEXT NOT NULL DEFAULT '{}',
+                    deploy_state TEXT NOT NULL DEFAULT '{}'
                 )
                 """
             )
@@ -193,6 +210,26 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                 connection.execute(
                     "ALTER TABLE sessions ADD COLUMN pending_tag_confirmations TEXT NOT NULL DEFAULT '{}'"
                 )
+            if "agent_type" not in existing_columns:
+                connection.execute(
+                    "ALTER TABLE sessions ADD COLUMN agent_type TEXT NOT NULL DEFAULT 'coding'"
+                )
+            if "phase" not in existing_columns:
+                connection.execute(
+                    "ALTER TABLE sessions ADD COLUMN phase TEXT NOT NULL DEFAULT 'idle'"
+                )
+            if "pending_connect_requests" not in existing_columns:
+                connection.execute(
+                    "ALTER TABLE sessions ADD COLUMN pending_connect_requests TEXT NOT NULL DEFAULT '{}'"
+                )
+            if "deploy_connections" not in existing_columns:
+                connection.execute(
+                    "ALTER TABLE sessions ADD COLUMN deploy_connections TEXT NOT NULL DEFAULT '{}'"
+                )
+            if "deploy_state" not in existing_columns:
+                connection.execute(
+                    "ALTER TABLE sessions ADD COLUMN deploy_state TEXT NOT NULL DEFAULT '{}'"
+                )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_sessions_updated_at ON sessions(updated_at DESC)"
             )
@@ -203,6 +240,8 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
             "workspace": state.workspace,
             "mode": state.mode,
             "model": state.model,
+            "agent_type": state.agent_type,
+            "phase": state.phase,
             "title": state.title,
             "preview": state.preview,
             "message_count": state.message_count,
@@ -223,6 +262,9 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
             "pending_delete_confirmations": self._to_json(state.pending_delete_confirmations),
             "pending_commit_confirmations": self._to_json(state.pending_commit_confirmations),
             "pending_tag_confirmations": self._to_json(state.pending_tag_confirmations),
+            "pending_connect_requests": self._to_json(state.pending_connect_requests),
+            "deploy_connections": self._to_json(state.deploy_connections),
+            "deploy_state": self._to_json(state.deploy_state),
         }
 
     def _row_to_state(self, row: sqlite3.Row) -> PersistedSessionState:
@@ -231,6 +273,8 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
             workspace=str(row["workspace"]),
             mode=str(row["mode"]),
             model=str(row["model"]),
+            agent_type=str(row["agent_type"] if "agent_type" in row.keys() else "coding"),
+            phase=str(row["phase"] if "phase" in row.keys() else "idle"),
             title=str(row["title"]),
             preview=str(row["preview"]),
             message_count=int(row["message_count"]),
@@ -251,6 +295,9 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
             pending_delete_confirmations=self._from_json(row["pending_delete_confirmations"], {}),
             pending_commit_confirmations=self._from_json(row["pending_commit_confirmations"] if "pending_commit_confirmations" in row.keys() else "{}", {}),
             pending_tag_confirmations=self._from_json(row["pending_tag_confirmations"] if "pending_tag_confirmations" in row.keys() else "{}", {}),
+            pending_connect_requests=self._from_json(row["pending_connect_requests"] if "pending_connect_requests" in row.keys() else "{}", {}),
+            deploy_connections=self._from_json(row["deploy_connections"] if "deploy_connections" in row.keys() else "{}", {}),
+            deploy_state=self._from_json(row["deploy_state"] if "deploy_state" in row.keys() else "{}", {}),
         )
 
     def _to_json(self, value: object) -> str:

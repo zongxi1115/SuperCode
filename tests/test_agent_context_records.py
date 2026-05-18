@@ -160,6 +160,35 @@ class AgentContextRecordTests(unittest.TestCase):
         self.assertIn("[内部规划记录]", planning_record_message)
         self.assertIn("方案已经确定", planning_record_message)
 
+    def test_coding_brain_includes_runtime_state_context_when_present(self) -> None:
+        brain = CodingPromptBrain(client=object())
+        state = AgentState(task="task", current_input="继续")
+        state.conversation_messages = [
+            ConversationMessage(role="user", content="检查部署"),
+            ConversationMessage(role="assistant", content="好的"),
+            ConversationMessage(role="user", content="继续"),
+        ]
+        state.data["runtime_state"] = {
+            "agent_type": "deploy",
+            "phase": "connected",
+            "deploy_state": {
+                "active_session_id": "deploy-1",
+                "active_root_path": "D:/demo/app",
+            },
+        }
+
+        messages = brain._build_messages(
+            state,
+            tool_definitions={},
+            response_mode="native_tools",
+        )
+
+        self.assertEqual(messages[-1]["content"], "继续")
+        runtime_state_message = messages[-2]["content"]
+        self.assertIn("[内部会话状态]", runtime_state_message)
+        self.assertIn("\"phase\": \"connected\"", runtime_state_message)
+        self.assertIn("deploy-1", runtime_state_message)
+
 
 if __name__ == "__main__":
     unittest.main()

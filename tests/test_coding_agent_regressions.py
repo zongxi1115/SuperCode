@@ -138,6 +138,18 @@ class _NoopTool(BaseTool):
         }
 
 
+class _UserInputTool(BaseTool):
+    name = "connect"
+    description = "需要用户填写信息的测试工具"
+
+    def run(self, arguments, context):  # noqa: ANN001
+        return {
+            "requires_user_input": True,
+            "input_kind": "deploy_connect",
+            "fields": [{"name": "root_path", "required": True}],
+        }
+
+
 class _StopAfterConfirmationBrain:
     def __init__(self) -> None:
         self.calls = 0
@@ -175,6 +187,24 @@ class _DelayedFinishBrain:
         )
 
 
+class _StopAfterUserInputBrain:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def decide(self, state, tool_definitions, on_stream=None):  # noqa: ANN001
+        self.calls += 1
+        if self.calls == 1:
+            return BrainDecision.call_tool(
+                thought="先发起 connect",
+                tool_name="connect",
+                tool_arguments={},
+            )
+        return BrainDecision.finish(
+            thought="如果还能走到这里，说明没有暂停",
+            final_answer="unexpected",
+        )
+
+
 class HumanInLoopPauseTests(unittest.TestCase):
     def test_agent_pauses_turn_when_tool_requires_confirmation(self) -> None:
         workspace = Path(tempfile.mkdtemp(prefix="supercode-confirmation-"))
@@ -190,6 +220,21 @@ class HumanInLoopPauseTests(unittest.TestCase):
         self.assertEqual(len(response.steps), 1)
         self.assertEqual(response.final_output, "")
         self.assertEqual(response.steps[0].tool_results[0].output["requires_confirmation"], True)
+
+    def test_agent_pauses_turn_when_tool_requires_user_input(self) -> None:
+        workspace = Path(tempfile.mkdtemp(prefix="supercode-user-input-"))
+        agent = CodingAgent(
+            brain=_StopAfterUserInputBrain(),
+            tools=[_UserInputTool()],
+            workspace=workspace,
+            max_steps=3,
+        )
+
+        response = agent.run("帮我连接部署目标")
+
+        self.assertEqual(len(response.steps), 1)
+        self.assertEqual(response.final_output, "")
+        self.assertEqual(response.steps[0].tool_results[0].output["requires_user_input"], True)
 
     def test_continue_existing_turn_continues_step_index(self) -> None:
         workspace = Path(tempfile.mkdtemp(prefix="supercode-confirmation-"))

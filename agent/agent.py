@@ -511,7 +511,10 @@ class CodingAgent:
         return bool(
             tool_result.success
             and isinstance(tool_result.output, dict)
-            and tool_result.output.get("requires_confirmation") is True
+            and (
+                tool_result.output.get("requires_confirmation") is True
+                or tool_result.output.get("requires_user_input") is True
+            )
         )
 
     def _emit_event(

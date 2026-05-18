@@ -20,6 +20,7 @@ import type {
   SessionHistoryItem,
   SessionPayload,
   TerminalSnapshotPayload,
+  ToolCallRecord,
   UIModelProvider,
   WorkspaceOption,
 } from '@/lib/app-types';
@@ -1173,12 +1174,18 @@ export default function App() {
             const toolName = String(payload.name ?? toolNamesById.get(toolCallId) ?? 'tool');
             toolNamesById.set(toolCallId, toolName);
             handleToolResultSideEffects(payload);
-            const nextState =
-              typeof payload.state === 'string'
+            const nextState: ToolCallRecord['state'] =
+              typeof payload.state === 'string' && (payload.state === 'input-requested' || payload.state === 'approval-requested')
                 ? payload.state
                 : payload.success === false
                   ? 'error'
                   : 'completed';
+            const inputRequest =
+              payload.input_request &&
+              typeof payload.input_request === 'object' &&
+              !Array.isArray(payload.input_request)
+                ? payload.input_request as ToolCallRecord['inputRequest']
+                : undefined;
             updateToolPart(assistantId, toolCallId, (toolCall) => ({
               ...toolCall,
               ...payload,
@@ -1189,6 +1196,7 @@ export default function App() {
                 typeof payload.approval === 'object' &&
                 !Array.isArray(payload.approval)
               ) ? payload.approval as ToolCallRecord['approval'] : toolCall.approval,
+              inputRequest: inputRequest ?? toolCall.inputRequest,
               errorMessage: typeof payload.error_message === 'string' ? payload.error_message : toolCall.errorMessage,
               state: nextState as ToolCallRecord['state']
             }));
@@ -1294,15 +1302,27 @@ export default function App() {
             const assistantId = data.payload.assistant_id || currentAssistantId;
             if (!assistantId) return;
             currentAssistantId = assistantId;
-            const updatedTool = {
+            const payloadState = typeof data.payload.state === 'string' ? data.payload.state : undefined;
+            const effectiveState: ToolCallRecord['state'] =
+              payloadState === 'input-requested' ? 'input-requested' :
+              payloadState === 'approval-requested' ? 'approval-requested' :
+              data.payload.success ? 'completed' : 'error';
+            const inputRequest =
+              data.payload.input_request &&
+              typeof data.payload.input_request === 'object' &&
+              !Array.isArray(data.payload.input_request)
+                ? data.payload.input_request as ToolCallRecord['inputRequest']
+                : undefined;
+            const updatedTool: Partial<ToolCallRecord> = {
               errorMessage: data.payload.error_message ?? undefined,
-              state: data.payload.success ? 'completed' as const : 'error' as const
+              state: effectiveState,
+              ...(inputRequest ? { inputRequest } : {}),
             };
             updateAssistantMessage(assistantId, (message) => ({
               ...message,
               toolCalls: (message.toolCalls ?? []).map((tc) =>
                 tc.id === data.payload.id
-                  ? { ...tc, ...data.payload, errorMessage: data.payload.error_message ?? tc.errorMessage, state: data.payload.success ? 'completed' : 'error' }
+                  ? { ...tc, ...data.payload, ...updatedTool, errorMessage: data.payload.error_message ?? tc.errorMessage }
                   : tc
               ),
               parts: (message.parts ?? []).map((p) =>
@@ -1544,6 +1564,69 @@ export default function App() {
     [continueAfterConfirmation, findAssistantIdByToolCallId, isTerminalOpen, refreshTerminalState, sessionId]
   );
 
+  const resolveConnectInput = useCallback(
+    async (toolCallId: string, values: Record<string, string>) => {
+      if (!sessionId) return;
+
+      try {
+        const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/tools/${toolCallId}/connect`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ values }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(String(data.detail ?? '连接失败'));
+        }
+
+        setMessages((prev) =>
+          prev.map((message) => ({
+            ...message,
+            toolCalls: (message.toolCalls ?? []).map((toolCall) =>
+              toolCall.id === toolCallId
+                ? {
+                    ...toolCall,
+                    output: data.output,
+                    success: data.success ?? toolCall.success,
+                    errorMessage: data.error_message ?? toolCall.errorMessage,
+                    state: (data.state ?? 'output-available') as ToolCallRecord['state'],
+                    inputRequest: undefined,
+                  }
+                : toolCall
+            ),
+            parts: (message.parts ?? []).map((part) =>
+              part.type === 'tool_call' && part.toolCall.id === toolCallId
+                ? {
+                    ...part,
+                    toolCall: {
+                      ...part.toolCall,
+                      output: data.output,
+                      success: data.success ?? part.toolCall.success,
+                      errorMessage: data.error_message ?? part.toolCall.errorMessage,
+                      state: (data.state ?? 'output-available') as ToolCallRecord['state'],
+                      inputRequest: undefined,
+                    },
+                  }
+                : part
+            ),
+          }))
+        );
+
+        if (data.shouldContinue) {
+          const assistantId = typeof data.assistantId === 'string' && data.assistantId
+            ? data.assistantId
+            : findAssistantIdByToolCallId(toolCallId);
+          if (assistantId) {
+            void continueAfterConfirmation(assistantId);
+          }
+        }
+      } catch (error) {
+        console.error(error);
+      }
+    },
+    [continueAfterConfirmation, findAssistantIdByToolCallId, sessionId]
+  );
+
   const stopMessage = useCallback(() => {
     if (sessionId) {
       void stopManagedProcesses(sessionId);
@@ -1684,6 +1767,7 @@ export default function App() {
         onStopMessage={stopMessage}
         onResolveDeleteConfirmation={resolveDeleteConfirmation}
         onResolveGitConfirmation={resolveGitConfirmation}
+        onResolveConnectInput={resolveConnectInput}
         elementAttachments={elementAttachments}
         onRemoveElementAttachment={(id) => setElementAttachments((prev) => prev.filter((e) => e.id !== id))}
         />

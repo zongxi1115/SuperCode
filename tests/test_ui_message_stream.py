@@ -177,6 +177,30 @@ class UIMessageStreamAdapterTests(unittest.TestCase):
         chart_part = next(part for part in parts if part["type"] == "data-chart")
         self.assertEqual(chart_part["data"]["title"], "销售趋势")
 
+    def test_forwards_session_state_data_parts(self) -> None:
+        adapter = UIMessageStreamAdapter()
+
+        parts = adapter.convert(
+            {
+                "type": "data-session-state",
+                "payload": {
+                    "assistant_id": "m_1",
+                    "data": {
+                        "agentType": "deploy",
+                        "phase": "connected",
+                        "deployState": {"active_session_id": "deploy-1"},
+                    },
+                },
+            }
+        )
+
+        session_state_part = next(part for part in parts if part["type"] == "data-session-state")
+        self.assertEqual(session_state_part["data"]["phase"], "connected")
+        self.assertEqual(
+            session_state_part["data"]["deployState"]["active_session_id"],
+            "deploy-1",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
