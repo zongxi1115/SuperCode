@@ -13,6 +13,9 @@ def session_has_persistable_history(session: Any) -> bool:
         return True
     if session.thoughts:
         return True
+    code_changes = getattr(session, "code_changes", [])
+    if isinstance(code_changes, list) and code_changes:
+        return True
     plan_state = getattr(session, "plan_state", {})
     if isinstance(plan_state, dict) and (plan_state.get("draft") or plan_state.get("last_submitted_plan")):
         return True
@@ -70,6 +73,7 @@ def session_to_persisted_state(session: Any) -> PersistedSessionState:
         thoughts=session.thoughts,
         plan_steps=session.plan_steps,
         plan_state=session.plan_state,
+        code_changes=session.code_changes,
         pending_delete_confirmations=session.pending_delete_confirmations,
         pending_commit_confirmations=session.pending_commit_confirmations,
         pending_tag_confirmations=session.pending_tag_confirmations,

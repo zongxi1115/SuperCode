@@ -8,12 +8,15 @@ import {
 } from '@/components/ai-elements/web-preview';
 import { Button } from '@/components/ui/button';
 import { AnimatePresence, motion } from 'motion/react';
-import { PanelRightOpen, PanelRightClose, RefreshCw, ExternalLink, MousePointerClick, X } from 'lucide-react';
+import { ExternalLink, FolderTree, Globe, MousePointerClick, PanelRightClose, RefreshCw, X } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-type WebPreviewPanelProps = {
+type EditorSidebarProps = {
   isOpen: boolean;
+  isFileTreeVisible: boolean;
+  isFullscreen?: boolean;
   onToggle: () => void;
+  onToggleFileTree: () => void;
   url: string;
   onUrlChange: (url: string) => void;
   onSelectElement?: (html: string, selector: string) => void;
@@ -60,7 +63,16 @@ function getElementSelector(el: HTMLElement): string {
   return parts.slice(0, 4).join(' > ');
 }
 
-export function WebPreviewPanel({ isOpen, onToggle, url, onUrlChange, onSelectElement }: WebPreviewPanelProps) {
+export function EditorSidebar({
+  isOpen,
+  isFileTreeVisible,
+  isFullscreen = false,
+  onToggle,
+  onToggleFileTree,
+  url,
+  onUrlChange,
+  onSelectElement,
+}: EditorSidebarProps) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [isSelectMode, setIsSelectMode] = useState(false);
   const cleanupRef = useRef<(() => void) | null>(null);
@@ -211,6 +223,11 @@ export function WebPreviewPanel({ isOpen, onToggle, url, onUrlChange, onSelectEl
     };
   }, []);
 
+  useEffect(() => {
+    if (isOpen) return;
+    cancelSelectMode();
+  }, [cancelSelectMode, isOpen]);
+
   const handleSelectElement = useCallback(() => {
     if (!iframeRef.current?.contentDocument) return;
     const doc = iframeRef.current.contentDocument;
@@ -280,26 +297,36 @@ export function WebPreviewPanel({ isOpen, onToggle, url, onUrlChange, onSelectEl
 
   return (
     <>
-      <AnimatePresence>
-        {isOpen && (
+      <AnimatePresence initial={false}>
+        {isOpen ? (
           <motion.div
-            initial={{ width: 0, opacity: 0 }}
-            animate={{ width: '40%', opacity: 1 }}
-            exit={{ width: 0, opacity: 0 }}
+            initial={isFullscreen ? { opacity: 0 } : { width: 0, opacity: 0, x: 18 }}
+            animate={isFullscreen ? { opacity: 1 } : { width: 420, opacity: 1, x: 0 }}
+            exit={isFullscreen ? { opacity: 0 } : { width: 0, opacity: 0, x: 18 }}
             transition={{ duration: 0.25, ease: [0.25, 0.1, 0.25, 1] }}
-            className="border-l bg-background flex flex-col min-w-0 overflow-hidden"
-            style={{ maxWidth: '50%', minWidth: 320 }}
+            className={`bg-background flex flex-col min-w-0 overflow-hidden ${isFullscreen ? 'h-full w-full' : 'border-l'}`}
           >
             <WebPreview url={url} onUrlChange={onUrlChange} className="rounded-none border-0">
               <WebPreviewNavigation>
-                <WebPreviewNavigationButton tooltip="关闭侧栏" onClick={onToggle}>
+                <WebPreviewNavigationButton
+                  tooltip={isFileTreeVisible ? '收起文件树' : '展开文件树'}
+                  onClick={onToggleFileTree}
+                  className={isFileTreeVisible ? 'bg-primary/15 text-primary' : ''}
+                >
+                  <FolderTree className="w-4 h-4" />
+                </WebPreviewNavigationButton>
+                <WebPreviewNavigationButton tooltip="收起预览" onClick={onToggle}>
                   <PanelRightClose className="w-4 h-4" />
                 </WebPreviewNavigationButton>
                 <WebPreviewNavigationButton tooltip="刷新" onClick={handleRefresh}>
                   <RefreshCw className="w-4 h-4" />
                 </WebPreviewNavigationButton>
                 <WebPreviewUrl />
-                <WebPreviewNavigationButton tooltip={isSelectMode ? '取消选择' : '选择元素'} onClick={isSelectMode ? cancelSelectMode : handleSelectElement} className={isSelectMode ? 'bg-primary/15 text-primary' : ''}>
+                <WebPreviewNavigationButton
+                  tooltip={isSelectMode ? '取消选择' : '选择元素'}
+                  onClick={isSelectMode ? cancelSelectMode : handleSelectElement}
+                  className={isSelectMode ? 'bg-primary/15 text-primary' : ''}
+                >
                   <MousePointerClick className="w-4 h-4" />
                 </WebPreviewNavigationButton>
                 <WebPreviewNavigationButton tooltip="在新标签页打开" onClick={handleOpenInNewTab}>
@@ -313,17 +340,34 @@ export function WebPreviewPanel({ isOpen, onToggle, url, onUrlChange, onSelectEl
               <WebPreviewConsole logs={consoleLogs} />
             </WebPreview>
           </motion.div>
-        )}
+        ) : null}
       </AnimatePresence>
 
-      {!isOpen && (
-        <div className="flex flex-col items-center pt-2 gap-1 border-l bg-muted/20 w-10 flex-shrink-0">
-          <Button variant="ghost" size="icon" onClick={onToggle} className="h-8 w-8" title="打开浏览器预览">
-            <PanelRightOpen className="w-4 h-4" />
+      {!isOpen ? (
+        <div className="flex w-12 shrink-0 flex-col items-center gap-2 border-l bg-muted/20 py-3">
+          <Button
+            variant={isFileTreeVisible ? 'secondary' : 'ghost'}
+            size="icon"
+            onClick={onToggleFileTree}
+            className="h-8 w-8 rounded-lg"
+            title={isFileTreeVisible ? '收起文件树' : '展开文件树'}
+          >
+            <FolderTree className="h-4 w-4" />
           </Button>
-          <div className="[writing-mode:vertical-lr] text-[10px] text-muted-foreground/60 rotate-180">预览</div>
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={onToggle}
+            className="h-8 w-8 rounded-lg"
+            title="打开浏览器预览"
+          >
+            <Globe className="h-4 w-4" />
+          </Button>
+          <div className="[writing-mode:vertical-lr] rotate-180 text-[10px] text-muted-foreground/70">
+            工具
+          </div>
         </div>
-      )}
+      ) : null}
     </>
   );
 }

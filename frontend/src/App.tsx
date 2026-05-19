@@ -3,12 +3,14 @@ import { ChatPanel } from '@/components/app/chat-panel';
 import { EditorPanel } from '@/components/app/editor-panel';
 import { ResizableHandle } from '@/components/app/resizable-handle';
 import { Sidebar } from '@/components/app/sidebar';
-import { WebPreviewPanel } from '@/components/app/web-preview-panel';
 import { TerminalPanel } from '@/components/app/terminal-panel';
-import { ModelConfigDialog } from '@/components/app/model-config-dialog';
+import { SettingsDialog } from '@/components/app/settings-dialog';
 import { WorkspacePicker } from '@/components/app/workspace-picker';
 import type {
+  AgentMode,
+  AppSettings,
   ChatMessage,
+  CodeChangeRecord,
   ContentBlock,
   DirectoryNode,
   FileTreeNode,
@@ -89,8 +91,25 @@ function normalizeReasoningEffort(value?: string | null) {
   return normalized ? normalized : null;
 }
 
+function mergeCodeChanges(
+  current: CodeChangeRecord[],
+  incoming: CodeChangeRecord[],
+) {
+  if (!incoming.length) {
+    return current;
+  }
+
+  const recordsById = new Map(current.map((record) => [record.id, record]));
+  for (const record of incoming) {
+    if (!record?.id) continue;
+    recordsById.set(record.id, record);
+  }
+  return Array.from(recordsById.values()).sort((a, b) => a.timestamp - b.timestamp);
+}
+
 export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [codeChanges, setCodeChanges] = useState<CodeChangeRecord[]>([]);
   const [input, setInput] = useState('');
   const [fileTree, setFileTree] = useState<FileTreeNode[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -128,8 +147,10 @@ export default function App() {
   const [recentProjects, setRecentProjects] = useState<RecentProject[]>(() => getRecentProjects());
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
   const [selectedReasoningEffort, setSelectedReasoningEffort] = useState<string | null>(null);
+  const [selectedAgentMode, setSelectedAgentMode] = useState<AgentMode>('auto');
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
   const [isModelConfigOpen, setIsModelConfigOpen] = useState(false);
+  const [appSettings, setAppSettings] = useState<AppSettings>({ autoApprove: false });
   const [visualModelProviders, setVisualModelProviders] = useState<UIModelProvider[]>([]);
   const [envModelConfigs, setEnvModelConfigs] = useState<ModelOption[]>([]);
   const [modelConfigPath, setModelConfigPath] = useState<string | null>(null);
@@ -166,6 +187,22 @@ export default function App() {
     setTerminalCwd((prev) => data.cwd ?? prev);
     setTerminalBackend((prev) => data.backend ?? prev);
     setTerminalSupportsInterrupt((prev) => data.supportsInterrupt ?? prev);
+  }, []);
+
+  const appendCodeChanges = useCallback((incoming: CodeChangeRecord[]) => {
+    setCodeChanges((prev) => {
+      const merged = mergeCodeChanges(prev, incoming);
+      setSessionContext((current) =>
+        current
+          ? {
+              ...current,
+              codeChangeCount: merged.length,
+              recentCodeChanges: merged.slice(-8),
+            }
+          : current
+      );
+      return merged;
+    });
   }, []);
 
   const refreshTerminalState = useCallback(
@@ -293,14 +330,35 @@ export default function App() {
     return nextOptions;
   }, []);
 
+  const loadAppSettings = useCallback(async () => {
+    const res = await fetch('http://localhost:8000/api/settings');
+    const data = await res.json();
+    setAppSettings(data);
+    return data;
+  }, []);
+
+  const saveAppSettings = useCallback(async (settings: AppSettings) => {
+    const res = await fetch('http://localhost:8000/api/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(settings),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(String(data.detail ?? '保存设置失败'));
+    }
+    setAppSettings(data);
+  }, []);
+
   const loadModelConfigs = useCallback(async () => {
     const res = await fetch('http://localhost:8000/api/model-configs');
     const data: ModelConfigPayload = await res.json();
     setVisualModelProviders(data.providers ?? []);
     setEnvModelConfigs(data.envConfigs ?? []);
     setModelConfigPath(data.configPath ?? null);
+    await loadAppSettings();
     return data;
-  }, []);
+  }, [loadAppSettings]);
 
   useEffect(() => {
     fetch('http://localhost:8000/api/workspaces')
@@ -344,6 +402,7 @@ export default function App() {
     setSelectedModelId((prev) => resolveSelectedModelId(data, modelOptions) ?? prev ?? null);
     setSelectedReasoningEffort(normalizeReasoningEffort(data.reasoningEffort));
     setMessages(hydrateMessages(data.messages ?? [], data.thoughts, data.toolCalls));
+    setCodeChanges(data.codeChanges ?? []);
     setFileTree(data.fileTree ?? []);
     setTerminalOutput(data.terminalOutput ?? '');
     setWebPreviewUrl(data.previewUrl ?? DEFAULT_WEB_PREVIEW_URL);
@@ -401,6 +460,7 @@ export default function App() {
           workspace,
           model: selectedModelId,
           reasoning_effort: selectedReasoningEffort,
+          agent_type: selectedAgentMode === 'auto' ? undefined : selectedAgentMode,
         }),
         signal: controller.signal,
       });
@@ -423,7 +483,7 @@ export default function App() {
     } finally {
       setIsSessionBooting(false);
     }
-  }, [applySessionPayload, loadSessionHistory, selectedModelId, selectedReasoningEffort]);
+  }, [applySessionPayload, loadSessionHistory, selectedAgentMode, selectedModelId, selectedReasoningEffort]);
 
   const hasRestoredRef = useRef(false);
 
@@ -531,6 +591,36 @@ export default function App() {
       console.error(error);
     }
   };
+
+  const saveFile = useCallback(
+    async (path: string, content: string) => {
+      if (!sessionId) return;
+
+      const query = new URLSearchParams({ session_id: sessionId, path });
+      const res = await fetch(`http://localhost:8000/api/files?${query.toString()}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(String(data.error ?? '保存失败'));
+      }
+
+      if (data.codeChange && typeof data.codeChange === 'object') {
+        appendCodeChanges([data.codeChange as CodeChangeRecord]);
+      }
+
+      setSelectedFileContent(content);
+      void refreshTerminalState({
+        targetSessionId: sessionId,
+        includeFileTree: true,
+        includeProcesses: isTerminalOpen,
+        silent: true,
+      });
+    },
+    [appendCodeChanges, isTerminalOpen, refreshTerminalState, sessionId],
+  );
 
   useEffect(() => {
     if (!sessionId) return;
@@ -902,6 +992,7 @@ export default function App() {
 
         setSessionId(null);
         setMessages([]);
+        setCodeChanges([]);
         setFileTree([]);
         setTerminalOutput('');
         setTerminalCwd('');
@@ -1278,6 +1369,34 @@ export default function App() {
           } else if (data.type === 'data-plan-steps') {
             const steps = data.data?.steps;
             void steps;
+          } else if (data.type === 'data-session-state') {
+            const payload = (
+              data.data &&
+              typeof data.data === 'object' &&
+              !Array.isArray(data.data)
+            ) ? data.data as Partial<SessionContextPayload> : {};
+            setSessionContext((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    agentType: payload.agentType ?? prev.agentType,
+                    phase: payload.phase ?? prev.phase,
+                    deployState: payload.deployState ?? prev.deployState,
+                    planState: payload.planState ?? prev.planState,
+                    codeChangeCount: payload.codeChangeCount ?? prev.codeChangeCount,
+                    recentCodeChanges: payload.recentCodeChanges ?? prev.recentCodeChanges,
+                  }
+                : prev
+            );
+          } else if (data.type === 'data-code-change') {
+            const payload = (
+              data.data &&
+              typeof data.data === 'object' &&
+              !Array.isArray(data.data)
+            ) ? data.data as CodeChangeRecord : null;
+            if (payload) {
+              appendCodeChanges([payload]);
+            }
           } else if (data.type === 'data-terminal-output') {
             if (typeof data.data?.output === 'string' && isVisibleStreamSession()) {
               applyTerminalSnapshot({ output: data.data.output });
@@ -1450,7 +1569,7 @@ export default function App() {
       }
       void loadSessionHistory();
     }
-  }, [applyTerminalSnapshot, isContextOpen, isLoading, isTerminalOpen, loadFile, loadSessionContext, loadSessionHistory, refreshFileTreeAfterTerminalActivity, refreshTerminalState]);
+  }, [appendCodeChanges, applyTerminalSnapshot, isContextOpen, isLoading, isTerminalOpen, loadFile, loadSessionContext, loadSessionHistory, refreshFileTreeAfterTerminalActivity, refreshTerminalState]);
 
   const sendMessage = async (msg: string, elements?: { selector: string; html: string; sourceUrl?: string }[]) => {
     if ((!msg.trim() && (!elements || elements.length === 0)) || !sessionId || isLoading) return;
@@ -1466,7 +1585,7 @@ export default function App() {
 
     await streamAssistantResponse({
       url: 'http://localhost:8000/api/chat/stream',
-      body: { session_id: sessionId, message: finalMsg },
+      body: { session_id: sessionId, message: finalMsg, agent_mode: selectedAgentMode },
       streamSessionId: sessionId,
       userVisibleMessage: finalMsg,
       clearComposer: true,
@@ -1505,6 +1624,10 @@ export default function App() {
         const data = await res.json();
         if (!res.ok) {
           throw new Error(String(data.detail ?? data.error_message ?? '确认删除失败'));
+        }
+
+        if (data.codeChange && typeof data.codeChange === 'object') {
+          appendCodeChanges([data.codeChange as CodeChangeRecord]);
         }
 
         setMessages((prev) =>
@@ -1563,7 +1686,7 @@ export default function App() {
         console.error(error);
       }
     },
-    [continueAfterConfirmation, findAssistantIdByToolCallId, isTerminalOpen, refreshTerminalState, sessionId]
+    [appendCodeChanges, continueAfterConfirmation, findAssistantIdByToolCallId, isTerminalOpen, refreshTerminalState, sessionId]
   );
 
   const resolveGitConfirmation = useCallback(
@@ -1806,6 +1929,7 @@ export default function App() {
     setShouldRestoreSession(false);
     setSessionId(null);
     setMessages([]);
+    setCodeChanges([]);
     setFileTree([]);
     setTerminalOutput('');
     setTerminalCwd('');
@@ -1909,6 +2033,7 @@ export default function App() {
         <ChatPanel
         sessionId={sessionId}
         contextData={sessionContext}
+        codeChanges={codeChanges}
         isContextLoading={isContextLoading}
         isContextOpen={isContextOpen}
         messages={messages}
@@ -1928,6 +2053,8 @@ export default function App() {
         onResolveGitConfirmation={resolveGitConfirmation}
         onResolveConnectInput={resolveConnectInput}
         onResolvePlanQuestionsInput={resolvePlanQuestionsInput}
+        agentMode={selectedAgentMode}
+        onAgentModeChange={setSelectedAgentMode}
         elementAttachments={elementAttachments}
         onRemoveElementAttachment={(id) => setElementAttachments((prev) => prev.filter((e) => e.id !== id))}
         />
@@ -1946,14 +2073,17 @@ export default function App() {
           selectedFilePath={selectedFilePath}
           selectedFileContent={selectedFileContent}
           onLoadFile={loadFile}
+          onSaveFile={saveFile}
           sessionId={sessionId}
           isWebPreviewOpen={isWebPreviewOpen}
           onToggleWebPreview={() => setIsWebPreviewOpen((prev) => !prev)}
-          onPreviewHtml={(content) => {
-            const blob = new Blob([content], { type: 'text/html' });
-            const blobUrl = URL.createObjectURL(blob);
-            setWebPreviewUrl(blobUrl);
-            setIsWebPreviewOpen(true);
+          webPreviewUrl={webPreviewUrl}
+          onWebPreviewUrlChange={setWebPreviewUrl}
+          onSelectPreviewElement={(html, selector) => {
+            setElementAttachments((prev) => [
+              ...prev,
+              { id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, selector, html, sourceUrl: webPreviewUrl },
+            ]);
           }}
         />
         <TerminalPanel
@@ -1976,30 +2106,20 @@ export default function App() {
           onTerminateProcess={(terminalId) => void terminateManagedProcess(terminalId)}
         />
       </div>
-      <WebPreviewPanel
-        isOpen={isWebPreviewOpen}
-        onToggle={() => setIsWebPreviewOpen((prev) => !prev)}
-        url={webPreviewUrl}
-        onUrlChange={setWebPreviewUrl}
-        onSelectElement={(html, selector) => {
-          setElementAttachments((prev) => [
-            ...prev,
-            { id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, selector, html, sourceUrl: webPreviewUrl },
-          ]);
-        }}
-      />
       </>
       )}
       </div>
       {isModelConfigOpen ? (
-        <ModelConfigDialog
+        <SettingsDialog
           open={isModelConfigOpen}
           onOpenChange={setIsModelConfigOpen}
           providers={visualModelProviders}
           envConfigs={envModelConfigs}
           configPath={modelConfigPath}
+          settings={appSettings}
           onSaveProviders={saveModelProviders}
           onDiscoverModels={discoverProviderModels}
+          onSaveSettings={saveAppSettings}
         />
       ) : null}
     </div>

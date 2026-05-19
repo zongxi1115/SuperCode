@@ -1,4 +1,5 @@
 import { ContextViewer } from "@/components/app/context-viewer";
+import { CodeChangePanel } from "@/components/app/code-change-panel";
 import {
   Conversation,
   ConversationContent,
@@ -46,7 +47,31 @@ import {
 } from "@/components/ai-elements/commit";
 import { Terminal } from "@/components/ai-elements/terminal";
 import { Sources, SourceTag } from "@/components/ai-elements/sources";
+import {
+  InlineCitation,
+  InlineCitationCard,
+  InlineCitationCardBody,
+  InlineCitationCardTrigger,
+  InlineCitationCarousel,
+  InlineCitationCarouselContent,
+  InlineCitationCarouselHeader,
+  InlineCitationCarouselIndex,
+  InlineCitationCarouselItem,
+  InlineCitationCarouselNext,
+  InlineCitationCarouselPrev,
+  InlineCitationSource,
+} from "@/components/ai-elements/inline-citation";
 import { DeployConnectForm } from "@/components/ai-elements/deploy-connect-form";
+import {
+  Plan,
+  PlanAction,
+  PlanContent,
+  PlanDescription,
+  PlanFooter,
+  PlanHeader,
+  PlanTitle,
+  PlanTrigger,
+} from "@/components/ai-elements/plan";
 import {
   PlanQuestionsQuiz,
   type Question as PlanQuizQuestion,
@@ -57,6 +82,13 @@ import {
   MessageContent,
   MessageResponse,
 } from "@/components/ai-elements/message";
+import {
+  Sheet,
+  SheetContent as SheetContentRoot,
+  SheetHeader as SheetHeaderRoot,
+  SheetTitle as SheetTitleRoot,
+  SheetDescription as SheetDescriptionRoot,
+} from "@/components/ui/sheet";
 import { Persona, type PersonaState } from "@/components/ai-elements/persona";
 import {
   Queue,
@@ -104,7 +136,9 @@ import { Textarea } from "@/components/ui/textarea";
 import { getFileLanguage } from "@/lib/app-utils";
 import { getFileIcon } from "@/lib/file-icons";
 import type {
+  AgentMode,
   ChatMessage,
+  CodeChangeRecord,
   ContentBlock,
   ModelOption,
   PlanStep,
@@ -118,6 +152,7 @@ import {
   DatabaseIcon,
   FileCodeIcon,
   FileSearchIcon,
+  FileText,
   FolderOpenIcon,
   GitBranch,
   GitCommitHorizontal,
@@ -135,6 +170,7 @@ import {
   LightbulbIcon,
   Code2Icon,
   RocketIcon,
+  Eye,
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import type React from "react";
@@ -150,6 +186,7 @@ type ElementAttachment = {
 type ChatPanelProps = {
   sessionId: string | null;
   contextData: SessionContextPayload | null;
+  codeChanges: CodeChangeRecord[];
   messages: ChatMessage[];
   isContextLoading: boolean;
   isContextOpen: boolean;
@@ -174,6 +211,8 @@ type ChatPanelProps = {
     toolCallId: string,
     answers: QuizSubmission,
   ) => void | Promise<void>;
+  agentMode: AgentMode;
+  onAgentModeChange: (mode: AgentMode) => void;
   onModelChange: (modelId: string) => void;
   onReasoningEffortChange: (reasoningEffort: string) => void;
   elementAttachments?: ElementAttachment[];
@@ -197,6 +236,8 @@ const TOOL_ICONS: Record<string, React.ReactNode> = {
   git_commit: <GitCommitHorizontal className="size-4" />,
   git_log: <GitBranch className="size-4" />,
   git_tag: <Tag className="size-4" />,
+  ask_plan_questions: <FileText className="size-4" />,
+  save_plan: <FileText className="size-4" />,
 };
 
 const TOOL_TITLES: Record<string, (args: Record<string, unknown>) => string> = {
@@ -241,6 +282,8 @@ const TOOL_TITLES: Record<string, (args: Record<string, unknown>) => string> = {
   git_commit: () => "正在提交",
   git_log: () => "正在查看日志",
   git_tag: () => "正在创建标签",
+  ask_plan_questions: () => "正在生成澄清问题",
+  save_plan: () => "正在保存计划草案",
 };
 
 function getToolTitle(name: string, args: Record<string, unknown>): string {
@@ -250,6 +293,341 @@ function getToolTitle(name: string, args: Record<string, unknown>): string {
 
 function getToolIcon(name: string) {
   return TOOL_ICONS[name] ?? <FileCodeIcon className="size-4" />;
+}
+
+type PlanQuestionSource = ToolCallRecord["inputRequest"]["questions"][number];
+
+function extractBalancedQuestionObjects(input: string): string[] {
+  const questionsKeyIndex = input.indexOf('"questions"');
+  if (questionsKeyIndex < 0) return [];
+  const arrayStartIndex = input.indexOf("[", questionsKeyIndex);
+  if (arrayStartIndex < 0) return [];
+
+  const objects: string[] = [];
+  let depth = 0;
+  let objectStart = -1;
+  let inString = false;
+  let escaping = false;
+
+  for (let index = arrayStartIndex + 1; index < input.length; index += 1) {
+    const char = input[index];
+    if (inString) {
+      if (escaping) {
+        escaping = false;
+      } else if (char === "\\") {
+        escaping = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (char === "{") {
+      if (depth === 0) {
+        objectStart = index;
+      }
+      depth += 1;
+      continue;
+    }
+
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0 && objectStart >= 0) {
+        objects.push(input.slice(objectStart, index + 1));
+        objectStart = -1;
+      }
+    }
+  }
+
+  return objects;
+}
+
+function extractJsonStringField(input: string, field: string) {
+  const match = input.match(new RegExp(`"${field}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"`));
+  if (!match) return undefined;
+  try {
+    return JSON.parse(`"${match[1]}"`) as string;
+  } catch {
+    return match[1];
+  }
+}
+
+function normalizePlanQuestions(
+  rawQuestions: unknown,
+): PlanQuizQuestion[] | undefined {
+  if (!Array.isArray(rawQuestions)) return undefined;
+
+  const questions = rawQuestions
+    .map((question, index) => {
+      if (!question || typeof question !== "object") return null;
+      const record = question as Record<string, unknown>;
+      const rawType = String(record.type ?? "");
+      const title = String(record.prompt ?? "").trim();
+      if (!title) return null;
+
+      return {
+        id: String(record.id ?? `question_${index + 1}`),
+        type:
+          rawType === "single_choice"
+            ? "single"
+            : rawType === "multi_choice"
+              ? "multiple"
+              : "text",
+        title,
+        description: undefined,
+        placeholder:
+          typeof record.placeholder === "string" ? record.placeholder : undefined,
+        required:
+          typeof record.required === "boolean" ? record.required : undefined,
+        includeOtherOption: true,
+        options: Array.isArray(record.options)
+          ? record.options
+              .map((option, optionIndex) => {
+                if (!option || typeof option !== "object") return null;
+                const optionRecord = option as Record<string, unknown>;
+                const label = String(optionRecord.label ?? "").trim();
+                if (!label) return null;
+                return {
+                  id: String(optionRecord.id ?? `option_${index + 1}_${optionIndex + 1}`),
+                  label,
+                };
+              })
+              .filter((option): option is NonNullable<typeof option> => option !== null)
+          : undefined,
+      } satisfies PlanQuizQuestion;
+    })
+    .filter((question): question is NonNullable<typeof question> => question !== null);
+
+  return questions.length > 0 ? questions : undefined;
+}
+
+function parseStreamingPlanQuestions(streamedInput?: string) {
+  if (!streamedInput?.trim()) return undefined;
+
+  try {
+    const parsed = JSON.parse(streamedInput) as Record<string, unknown>;
+    return {
+      title:
+        typeof parsed.title === "string" && parsed.title.trim()
+          ? parsed.title
+          : undefined,
+      message:
+        typeof parsed.message === "string" && parsed.message.trim()
+          ? parsed.message
+          : undefined,
+      questions: normalizePlanQuestions(parsed.questions),
+    };
+  } catch {
+    const partialQuestions = normalizePlanQuestions(
+      extractBalancedQuestionObjects(streamedInput).map((item) => {
+        try {
+          return JSON.parse(item) as PlanQuestionSource;
+        } catch {
+          return null;
+        }
+      }).filter((item): item is PlanQuestionSource => item !== null),
+    );
+
+    return {
+      title: extractJsonStringField(streamedInput, "title"),
+      message: extractJsonStringField(streamedInput, "message"),
+      questions: partialQuestions,
+    };
+  }
+}
+
+type CitationInfo = { url: string; title?: string; snippet?: string };
+
+const CITATION_RE = /\[\[(https?:\/\/[^\]]+)\]\]/g;
+const LEADING_CITATION_RE = /^\[\[(https?:\/\/[^\]]+)\]\]/;
+const INLINE_CITATION_SEPARATOR_RE = /^[\t ]+/;
+
+function collectCitations(parts: ContentBlock[]): Map<string, CitationInfo> {
+  const map = new Map<string, CitationInfo>();
+  for (const part of parts) {
+    if (part.type !== "tool_call") continue;
+    const tc = part.toolCall;
+    const output = tc.output;
+    if (!output || typeof output !== "object") continue;
+    if (tc.name === "search_web") {
+      const results = (output as Record<string, unknown>)?.results as Array<{ url?: string; title?: string; snippet?: string }> | undefined;
+      results?.forEach((r) => {
+        if (r.url) map.set(r.url, { url: r.url, title: r.title, snippet: r.snippet });
+      });
+    } else if (tc.name === "fetch_url_content") {
+      const docs = (output as Record<string, unknown>)?.documents as Array<{ url?: string; title?: string; content?: string }> | undefined;
+      docs?.forEach((d) => {
+        if (d.url) map.set(d.url, { url: d.url, title: d.title, snippet: d.content ? d.content.slice(0, 200) : undefined });
+      });
+    }
+  }
+  return map;
+}
+
+function escapeHtmlAttribute(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function getCitationDisplayTitle(url: string, citations: Map<string, CitationInfo>) {
+  const info = citations.get(url);
+  if (info?.title?.trim()) {
+    return info.title.trim();
+  }
+
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return url;
+  }
+}
+
+function serializeCitationMarkdown(
+  text: string,
+  citations: Map<string, CitationInfo>,
+) {
+  let markdown = "";
+  let lastIndex = 0;
+  const re = new RegExp(CITATION_RE.source, "g");
+  let match: RegExpExecArray | null;
+
+  while ((match = re.exec(text)) !== null) {
+    markdown += text.slice(lastIndex, match.index);
+
+    const sources = [match[1]];
+    let groupEnd = re.lastIndex;
+
+    while (groupEnd < text.length) {
+      const separatorMatch = INLINE_CITATION_SEPARATOR_RE.exec(
+        text.slice(groupEnd),
+      );
+      if (!separatorMatch) {
+        break;
+      }
+
+      const nextCitationStart = groupEnd + separatorMatch[0].length;
+      const nextCitationMatch = LEADING_CITATION_RE.exec(
+        text.slice(nextCitationStart),
+      );
+      if (!nextCitationMatch) {
+        break;
+      }
+
+      sources.push(nextCitationMatch[1]);
+      groupEnd = nextCitationStart + nextCitationMatch[0].length;
+    }
+
+    markdown += `<citation urls="${escapeHtmlAttribute(
+      JSON.stringify(sources),
+    )}" title="${escapeHtmlAttribute(
+      getCitationDisplayTitle(sources[0], citations),
+    )}"></citation>`;
+    lastIndex = groupEnd;
+    re.lastIndex = groupEnd;
+  }
+
+  markdown += text.slice(lastIndex);
+  return markdown;
+}
+
+function renderCitationBadge(sources: string[], citations: Map<string, CitationInfo>) {
+  const primaryUrl = sources[0];
+  if (!primaryUrl) {
+    return null;
+  }
+
+  const triggerLabel = getCitationDisplayTitle(primaryUrl, citations);
+  const defaultTitle = (() => {
+    try {
+      return new URL(primaryUrl).hostname;
+    } catch {
+      return primaryUrl;
+    }
+  })();
+
+  return (
+    <InlineCitation>
+      <InlineCitationCard>
+        <InlineCitationCardTrigger
+          extraCount={sources.length - 1}
+          href={primaryUrl}
+          label={triggerLabel}
+          sources={sources}
+        />
+        <InlineCitationCardBody>
+          <InlineCitationCarousel>
+            <InlineCitationCarouselHeader>
+              <InlineCitationCarouselPrev />
+              <InlineCitationCarouselIndex />
+              <InlineCitationCarouselNext />
+            </InlineCitationCarouselHeader>
+            <InlineCitationCarouselContent>
+              {sources.map((url) => {
+                const info = citations.get(url);
+                return (
+                  <InlineCitationCarouselItem key={url}>
+                    <InlineCitationSource
+                      title={info?.title || defaultTitle}
+                      url={url}
+                      description={info?.snippet}
+                    />
+                  </InlineCitationCarouselItem>
+                );
+              })}
+            </InlineCitationCarouselContent>
+          </InlineCitationCarousel>
+        </InlineCitationCardBody>
+      </InlineCitationCard>
+    </InlineCitation>
+  );
+}
+
+function renderCitationMessage(
+  text: string,
+  citations: Map<string, CitationInfo>,
+  options?: {
+    className?: string;
+    isAnimating?: boolean;
+    key?: string;
+  },
+) {
+  const markdown = serializeCitationMarkdown(text, citations);
+
+  return (
+    <MessageResponse
+      allowedTags={{ citation: ["title", "urls"] }}
+      className={options?.className}
+      components={{
+        citation: ({ urls }) => {
+          if (typeof urls !== "string") {
+            return null;
+          }
+          try {
+            const parsed = JSON.parse(urls);
+            return Array.isArray(parsed) &&
+              parsed.every((item) => typeof item === "string")
+              ? renderCitationBadge(parsed, citations)
+              : null;
+          } catch {
+            return null;
+          }
+        },
+      }}
+      isAnimating={options?.isAnimating}
+      key={options?.key}
+      literalTagContent={["citation"]}
+    >
+      {markdown}
+    </MessageResponse>
+  );
 }
 
 function normalizeThoughtText(value?: string | null) {
@@ -571,41 +949,69 @@ function ToolBody({
     );
   }
 
-  if (
-    toolCall.inputRequest?.kind === "plan_questions" &&
-    Array.isArray(toolCall.inputRequest.questions)
-  ) {
-    const questions: PlanQuizQuestion[] = toolCall.inputRequest.questions.map(
-      (question) => ({
-        id: question.id,
-        type:
-          question.type === "single_choice"
-            ? "single"
-            : question.type === "multi_choice"
-              ? "multiple"
-              : "text",
-        title: question.prompt,
-        description: undefined,
-        placeholder: question.placeholder,
-        required: question.required,
-        includeOtherOption: true,
-        options: Array.isArray(question.options)
-          ? question.options.map((option) => ({
-              id: option.id,
-              label: option.label,
-            }))
-          : undefined,
-      }),
-    );
+  const streamingPlanPreview = parseStreamingPlanQuestions(toolCall.streamedInput);
+  const questions =
+    normalizePlanQuestions(toolCall.inputRequest?.questions) ??
+    normalizePlanQuestions(args.questions) ??
+    streamingPlanPreview?.questions;
+  const isPlanQuestionsTool =
+    toolCall.inputRequest?.kind === "plan_questions" ||
+    toolCall.name === "ask_plan_questions" ||
+    Array.isArray(args.questions) ||
+    Boolean(streamingPlanPreview?.title || streamingPlanPreview?.message || streamingPlanPreview?.questions?.length);
 
+  if (isPlanQuestionsTool) {
     return (
       <PlanQuestionsQuiz
-        questions={questions}
+        questions={questions ?? []}
         embedded
-        title={toolCall.inputRequest.title}
-        description={toolCall.inputRequest.message}
+        streaming={isStreaming}
+        disabled={toolCall.state !== "input-requested"}
+        title={
+          toolCall.inputRequest?.title ||
+          (typeof args.title === "string" ? args.title : undefined) ||
+          streamingPlanPreview?.title
+        }
+        description={
+          toolCall.inputRequest?.message ||
+          (typeof args.message === "string" ? args.message : undefined) ||
+          streamingPlanPreview?.message
+        }
         submitted={toolCall.state !== "input-requested"}
         onSubmit={(answers) => onResolvePlanQuestionsInput?.(toolCall.id, answers)}
+      />
+    );
+  }
+
+  if (toolCall.name === "save_plan") {
+    const planTitle = (typeof args.title === "string" ? args.title : undefined) || "计划草案";
+    const planSummary = (typeof args.summary === "string" ? args.summary : undefined) || "";
+    const planKeySteps = Array.isArray(args.key_steps)
+      ? args.key_steps.filter((s): s is string => typeof s === "string")
+      : [] as string[];
+    const planMarkdown = (typeof args.markdown === "string" ? args.markdown : undefined) || "";
+
+    const detailMd = planMarkdown || [
+      `# ${planTitle}`,
+      "",
+      planSummary,
+      "",
+      typeof args.overview === "string" ? `## 概览\n\n${args.overview}\n` : "",
+      planKeySteps.length > 0 ? ["## 关键步骤", "", ...planKeySteps.map((s, i) => `${i + 1}. ${s}`)].join("\n") : "",
+    ].join("\n");
+
+    const message = typeof output === "object" && output !== null && !Array.isArray(output)
+      ? (output as Record<string, unknown>).message
+      : typeof output === "string"
+        ? output
+        : undefined;
+
+    return (
+      <PlanDraftCard
+        title={planTitle}
+        summary={typeof message === "string" ? message : planSummary}
+        keySteps={planKeySteps}
+        detailMarkdown={detailMd}
       />
     );
   }
@@ -1036,6 +1442,72 @@ function ToolBody({
   );
 }
 
+function PlanDraftCard({
+  title,
+  summary,
+  keySteps,
+  detailMarkdown,
+}: {
+  title: string;
+  summary: string;
+  keySteps: string[];
+  detailMarkdown: string;
+}) {
+  const [isDetailOpen, setIsDetailOpen] = useState(false);
+
+  return (
+    <>
+      <Plan defaultOpen={false}>
+        <PlanHeader>
+          <div>
+            <div className="mb-4 flex items-center gap-2">
+              <FileText className="size-4" />
+              <PlanTitle>{title || "计划草案"}</PlanTitle>
+            </div>
+            {summary && <PlanDescription>{summary}</PlanDescription>}
+          </div>
+          <PlanTrigger />
+        </PlanHeader>
+        <PlanContent>
+          <div className="py-1 text-sm text-muted-foreground">
+            {summary && <p>{summary}</p>}
+            {keySteps.length > 0 && (
+              <ul className="mt-2 list-inside list-disc space-y-0.5">
+                {keySteps.map((step, idx) => (
+                  <li key={idx}>{step}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </PlanContent>
+        <PlanFooter className="justify-end">
+          <PlanAction>
+            <Button size="sm" variant="outline" onClick={() => setIsDetailOpen(true)}>
+              <Eye className="mr-1.5 size-3.5" />
+              查看
+            </Button>
+          </PlanAction>
+        </PlanFooter>
+      </Plan>
+
+      <Sheet open={isDetailOpen} onOpenChange={setIsDetailOpen}>
+        <SheetContentRoot side="right" className="w-full sm:max-w-lg overflow-y-auto p-0">
+          <SheetHeaderRoot className="px-6 pt-6 pb-4 border-b">
+            <SheetTitleRoot className="flex items-center gap-2">
+              <FileText className="size-4" />
+              {title || "计划草案"}
+            </SheetTitleRoot>
+            {summary && <SheetDescriptionRoot>{summary}</SheetDescriptionRoot>}
+          </SheetHeaderRoot>
+          <div className="flex-1 overflow-y-auto px-6 py-4">
+            <MessageResponse>{detailMarkdown}</MessageResponse>
+          </div>
+        </SheetContentRoot>
+      </Sheet>
+    </>
+  );
+}
+
 function PlanToggle({
   planSteps,
   isStreaming,
@@ -1140,6 +1612,38 @@ function DataPartView({
   }
 
   if (part.dataType === "data-plan-questions") return null;
+
+  if (
+    part.dataType === "data-plan-draft" &&
+    data &&
+    typeof data === "object" &&
+    !Array.isArray(data)
+  ) {
+    const draft = data as {
+      title?: unknown;
+      summary?: unknown;
+      overview?: unknown;
+      keySteps?: unknown;
+      markdown?: unknown;
+    };
+    const draftTitle = typeof draft.title === "string" ? draft.title : "";
+    const draftSummary = typeof draft.summary === "string" ? draft.summary : "";
+    const draftKeySteps = Array.isArray(draft.keySteps)
+      ? draft.keySteps.filter((s): s is string => typeof s === "string")
+      : [] as string[];
+    const draftMarkdown = typeof draft.markdown === "string" ? draft.markdown : "";
+
+    const detailMd = draftMarkdown || [
+      `# ${draftTitle}`,
+      "",
+      draftSummary,
+      "",
+      typeof draft.overview === "string" ? `## 概览\n\n${draft.overview}\n` : "",
+      draftKeySteps.length > 0 ? ["## 关键步骤", "", ...draftKeySteps.map((s, i) => `${i + 1}. ${s}`)].join("\n") : "",
+    ].join("\n");
+
+    return <PlanDraftCard title={draftTitle} summary={draftSummary} keySteps={draftKeySteps} detailMarkdown={detailMd} />;
+  }
 
   if (
     part.dataType === "data-chart" &&
@@ -1296,7 +1800,13 @@ const MessageList = memo(function MessageList({
 
   const renderToolCall = (tc: ToolCallRecord, isLastRunning: boolean) => {
     const statusLabel = statusLabelMap[tc.state] ?? "执行中";
-    const shouldOpen = isLastRunning || tc.name.startsWith("git_") || tc.name === "connect";
+    const shouldOpen =
+      isLastRunning ||
+      tc.state === "input-requested" ||
+      tc.name.startsWith("git_") ||
+      tc.name === "connect" ||
+      tc.name === "ask_plan_questions" ||
+      tc.inputRequest?.kind === "plan_questions";
     const toolTitle = `${getToolTitle(tc.name, tc.arguments ?? {})} · ${statusLabel}`;
 
     return (
@@ -1379,6 +1889,7 @@ const MessageList = memo(function MessageList({
 
   const renderPartsAssistant = (msg: ChatMessage, isLast: boolean) => {
     const parts = msg.parts ?? [];
+    const citations = collectCitations(parts);
     const groups: (
       | { type: "cot"; blocks: ContentBlock[]; hasThinking: boolean }
       | { type: "text"; block: Extract<ContentBlock, { type: "text" }> }
@@ -1430,15 +1941,13 @@ const MessageList = memo(function MessageList({
     return groups.map((group, gi) => {
       if (group.type === "text") {
         const isStreamingText = isLast && isLoading && gi === groups.length - 1;
-        return group.block.text ? (
-          <MessageResponse
-            key={`text-${gi}`}
-            className={isStreamingText ? "streaming-tail-fade" : undefined}
-            isAnimating={isStreamingText}
-          >
-            {group.block.text}
-          </MessageResponse>
-        ) : null;
+        return group.block.text
+          ? renderCitationMessage(group.block.text, citations, {
+              className: isStreamingText ? "streaming-tail-fade" : undefined,
+              isAnimating: isStreamingText,
+              key: `text-${gi}`,
+            })
+          : null;
       }
 
       if (group.type === "data") {
@@ -1503,7 +2012,7 @@ const MessageList = memo(function MessageList({
                   return block.text.trim() ? (
                     <ChainOfThoughtStep
                       key={`thinking-${gi}-${bi}`}
-                      label={<MessageResponse>{block.text}</MessageResponse>}
+                      label={renderCitationMessage(block.text, citations)}
                       status={bi === lastRunningIdx && isActive ? "active" : "complete"}
                     />
                   ) : null;
@@ -1543,12 +2052,10 @@ const MessageList = memo(function MessageList({
                   ? renderPartsAssistant(msg, isLast)
                   : renderLegacyAssistant(msg, isLast))}
               {!msg.parts && msg.content ? (
-                <MessageResponse
-                  className={isLast && isLoading ? "streaming-tail-fade" : undefined}
-                  isAnimating={isLast && isLoading}
-                >
-                  {msg.content}
-                </MessageResponse>
+                renderCitationMessage(msg.content, new Map(), {
+                  className: isLast && isLoading ? "streaming-tail-fade" : undefined,
+                  isAnimating: isLast && isLoading,
+                })
               ) : null}
             </MessageContent>
           </Message>
@@ -1632,6 +2139,7 @@ function useCompletionNotification(isLoading: boolean, hasMessages: boolean) {
 export function ChatPanel({
   sessionId,
   contextData,
+  codeChanges,
   messages,
   isContextLoading,
   isContextOpen,
@@ -1649,6 +2157,8 @@ export function ChatPanel({
   onResolveGitConfirmation,
   onResolveConnectInput,
   onResolvePlanQuestionsInput,
+  agentMode,
+  onAgentModeChange,
   onModelChange,
   onReasoningEffortChange,
   elementAttachments = [],
@@ -1755,6 +2265,16 @@ export function ChatPanel({
       <div className="shrink-0 border-t bg-background">
         <div className="max-w-[720px] mx-auto w-full">
           <PlanToggle planSteps={planSteps} isStreaming={isLoading} />
+          <div className="px-3 pb-1">
+            <CodeChangePanel
+              changes={codeChanges}
+              title="本次会话代码追踪"
+              emptyMessage="本轮对话还没有发生新增、修改或删除代码。"
+              collapsible
+              compact
+              defaultOpen={false}
+            />
+          </div>
 
           <div className="p-3 pt-2">
             <div className="flex flex-col rounded-lg border bg-muted/30 p-2 shadow-sm focus-within:ring-1 focus-within:ring-ring">
@@ -1886,6 +2406,26 @@ export function ChatPanel({
                   </ModelSelector>
 
                   <Select
+                    value={agentMode}
+                    onValueChange={(value) => onAgentModeChange(value as AgentMode)}
+                  >
+                    <SelectTrigger
+                      size="sm"
+                      className="h-7 min-w-[96px] max-w-full gap-1.5 border-0 px-2 text-xs text-muted-foreground shadow-none"
+                      aria-label="选择智能体模式"
+                    >
+                      <Code2Icon className="size-3.5" />
+                      <SelectValue placeholder="模式" />
+                    </SelectTrigger>
+                    <SelectContent align="start">
+                      <SelectItem value="auto">自动</SelectItem>
+                      <SelectItem value="plan">计划</SelectItem>
+                      <SelectItem value="coding">编码</SelectItem>
+                      <SelectItem value="deploy">部署</SelectItem>
+                    </SelectContent>
+                  </Select>
+
+                  <Select
                     value={selectedReasoningEffort}
                     onValueChange={onReasoningEffortChange}
                   >
@@ -1910,6 +2450,7 @@ export function ChatPanel({
 
                   <ContextViewer
                     contextData={contextData}
+                    codeChanges={codeChanges}
                     isLoading={isContextLoading}
                     onOpenChange={onContextOpenChange}
                     open={isContextOpen}

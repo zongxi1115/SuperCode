@@ -36,6 +36,7 @@ class PersistedSessionState:
     thoughts: list[str] = field(default_factory=list)
     plan_steps: list[dict[str, str]] = field(default_factory=list)
     plan_state: dict[str, Any] = field(default_factory=dict)
+    code_changes: list[dict[str, Any]] = field(default_factory=list)
     pending_delete_confirmations: dict[str, dict[str, Any]] = field(default_factory=dict)
     pending_commit_confirmations: dict[str, dict[str, Any]] = field(default_factory=dict)
     pending_tag_confirmations: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -90,7 +91,7 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                     is_generating,
                     startup_error, env_file, selected_file_path, open_files,
                     terminal_output, preview_url, history_messages,
-                    history_tools, thoughts, plan_steps, plan_state, pending_delete_confirmations,
+                    history_tools, thoughts, plan_steps, plan_state, code_changes, pending_delete_confirmations,
                     pending_commit_confirmations, pending_tag_confirmations,
                     pending_user_input_requests, pending_connect_requests, deploy_connections, deploy_state
                 )
@@ -101,7 +102,7 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                     :is_generating,
                     :startup_error, :env_file, :selected_file_path, :open_files,
                     :terminal_output, :preview_url, :history_messages,
-                    :history_tools, :thoughts, :plan_steps, :plan_state, :pending_delete_confirmations,
+                    :history_tools, :thoughts, :plan_steps, :plan_state, :code_changes, :pending_delete_confirmations,
                     :pending_commit_confirmations, :pending_tag_confirmations,
                     :pending_user_input_requests, :pending_connect_requests, :deploy_connections, :deploy_state
                 )
@@ -130,6 +131,7 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                     thoughts = excluded.thoughts,
                     plan_steps = excluded.plan_steps,
                     plan_state = excluded.plan_state,
+                    code_changes = excluded.code_changes,
                     pending_delete_confirmations = excluded.pending_delete_confirmations,
                     pending_commit_confirmations = excluded.pending_commit_confirmations,
                     pending_tag_confirmations = excluded.pending_tag_confirmations,
@@ -195,6 +197,7 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                     thoughts TEXT NOT NULL,
                     plan_steps TEXT NOT NULL,
                     plan_state TEXT NOT NULL DEFAULT '{}',
+                    code_changes TEXT NOT NULL DEFAULT '[]',
                     pending_delete_confirmations TEXT NOT NULL,
                     pending_commit_confirmations TEXT NOT NULL DEFAULT '{}',
                     pending_tag_confirmations TEXT NOT NULL DEFAULT '{}',
@@ -245,6 +248,10 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                 connection.execute(
                     "ALTER TABLE sessions ADD COLUMN pending_user_input_requests TEXT NOT NULL DEFAULT '{}'"
                 )
+            if "code_changes" not in existing_columns:
+                connection.execute(
+                    "ALTER TABLE sessions ADD COLUMN code_changes TEXT NOT NULL DEFAULT '[]'"
+                )
             if "deploy_connections" not in existing_columns:
                 connection.execute(
                     "ALTER TABLE sessions ADD COLUMN deploy_connections TEXT NOT NULL DEFAULT '{}'"
@@ -284,6 +291,7 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
             "thoughts": self._to_json(state.thoughts),
             "plan_steps": self._to_json(state.plan_steps),
             "plan_state": self._to_json(state.plan_state),
+            "code_changes": self._to_json(state.code_changes),
             "pending_delete_confirmations": self._to_json(state.pending_delete_confirmations),
             "pending_commit_confirmations": self._to_json(state.pending_commit_confirmations),
             "pending_tag_confirmations": self._to_json(state.pending_tag_confirmations),
@@ -320,6 +328,7 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
             thoughts=self._from_json(row["thoughts"], []),
             plan_steps=self._from_json(row["plan_steps"], []),
             plan_state=self._from_json(row["plan_state"] if "plan_state" in row.keys() else "{}", {}),
+            code_changes=self._from_json(row["code_changes"] if "code_changes" in row.keys() else "[]", []),
             pending_delete_confirmations=self._from_json(row["pending_delete_confirmations"], {}),
             pending_commit_confirmations=self._from_json(row["pending_commit_confirmations"] if "pending_commit_confirmations" in row.keys() else "{}", {}),
             pending_tag_confirmations=self._from_json(row["pending_tag_confirmations"] if "pending_tag_confirmations" in row.keys() else "{}", {}),

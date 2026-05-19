@@ -34,6 +34,23 @@ export type ToolCallRecord = {
   state: 'running' | 'completed' | 'error' | 'approval-requested' | 'input-requested' | 'output-available' | 'output-denied';
 };
 
+export type CodeChangeRecord = {
+  id: string;
+  action: 'added' | 'modified' | 'deleted' | string;
+  path: string;
+  absolutePath?: string | null;
+  source?: string;
+  toolCallId?: string | null;
+  assistantId?: string | null;
+  turnIndex?: number | null;
+  stepIndex?: number | null;
+  timestamp: number;
+  linesAdded: number;
+  linesDeleted: number;
+  summary: string;
+  diffPreview: string;
+};
+
 export type ContentBlock =
   | { type: 'thinking'; text: string }
   | { type: 'tool_call'; toolCall: ToolCallRecord }
@@ -93,6 +110,10 @@ export type SessionContextPayload = {
   mode: 'agent' | 'demo' | string;
   model: string;
   reasoningEffort?: string | null;
+  agentType?: string;
+  phase?: string;
+  deployState?: Record<string, unknown>;
+  planState?: Record<string, unknown>;
   selectedFilePath?: string | null;
   openFiles: string[];
   messageCount: number;
@@ -103,6 +124,8 @@ export type SessionContextPayload = {
   recentMessages: SessionContextMessage[];
   recentThoughts: string[];
   recentTools: SessionContextTool[];
+  codeChangeCount: number;
+  recentCodeChanges: CodeChangeRecord[];
   planSteps: PlanStep[];
 };
 
@@ -125,8 +148,11 @@ export type SessionPayload = {
   fileTree?: FileTreeNode[];
   selectedFilePath?: string | null;
   selectedFileContent?: string;
+  codeChanges?: CodeChangeRecord[];
   planSteps?: PlanStep[];
 };
+
+export type AgentMode = 'auto' | 'plan' | 'coding' | 'deploy';
 
 export interface LastSession {
   workspace: string;
@@ -210,6 +236,10 @@ export type ModelConfigPayload = {
   providers: UIModelProvider[];
   envConfigs: ModelOption[];
   configPath: string;
+};
+
+export type AppSettings = {
+  autoApprove: boolean;
 };
 
 export type GitCommitInfo = {

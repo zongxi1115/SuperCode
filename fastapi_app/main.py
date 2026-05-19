@@ -5,9 +5,11 @@ from contextlib import asynccontextmanager, suppress
 import signal
 
 import asyncio
+import difflib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -54,11 +56,17 @@ from fastapi_app.api_models import (
     SessionHistoryItem,
     SwitchModelRequest,
     TerminalControlRequest,
+    ModelConfigPayload,
+    SettingsPayload,
     TerminalInputRequest,
     TerminalSnapshotResponse,
     ToolConfirmationRequest,
     ToolInputSubmitRequest,
     UIModelProviderPayload,
+)
+from fastapi_app.settings_store import (
+    load_settings,
+    save_settings,
 )
 from fastapi_app.model_config_store import (
     build_agent_config,
@@ -127,6 +135,10 @@ DEFAULT_OPEN_FILES = [
     "ToolPanel.tsx",
     "FilePreview.tsx",
 ]
+MAX_CODE_CHANGE_RECORDS = 300
+MAX_CODE_CHANGE_DIFF_LINES = 80
+
+
 def _resolve_state_db_path() -> Path:
     explicit = os.environ.get("SUPERCODE_STATE_DB_PATH", "").strip()
     if explicit:
@@ -178,6 +190,7 @@ class UISession:
     plan_state: dict[str, Any] = field(default_factory=dict)
     history_messages: list[dict[str, Any]] = field(default_factory=list)
     history_tools: list[dict[str, Any]] = field(default_factory=list)
+    code_changes: list[dict[str, Any]] = field(default_factory=list)
     thoughts: list[str] = field(default_factory=list)
     created_at: int = field(default_factory=lambda: int(time.time() * 1000))
     updated_at: int = field(default_factory=lambda: int(time.time() * 1000))
@@ -223,6 +236,7 @@ class UISession:
             selectedFilePath=self.selected_file_path,
             selectedFileContent=read_text_file(self.selected_file_path, self.workspace),
             openFiles=self.open_files,
+            codeChanges=self.code_changes,
             planSteps=self.plan_steps,
         )
 
@@ -319,6 +333,8 @@ class UISession:
             recentMessages=recent_messages,
             recentThoughts=self.thoughts[-6:],
             recentTools=recent_tools,
+            codeChangeCount=len(self.code_changes),
+            recentCodeChanges=self.code_changes[-8:],
             planSteps=self.plan_steps,
         )
 
@@ -530,6 +546,15 @@ CODE_FILE_SUFFIXES = {
     ".json",
     ".yml",
     ".yaml",
+}
+
+SUPPORTED_EDITOR_COMMANDS = {
+    "code",
+    "code-insiders",
+    "zed",
+    "devenv",
+    "subl",
+    "webstorm",
 }
 
 
@@ -936,8 +961,12 @@ def rebuild_chat_session_for_agent_type(session: UISession, agent_type: str) -> 
             sync_session_runtime_state_for_agent(session)
 
 
-def route_session_for_user_message(session: UISession, user_message: str) -> None:
-    next_agent_type = route_agent_type_for_message(session, user_message)
+def route_session_for_user_message(
+    session: UISession,
+    user_message: str,
+    forced_agent_type: str | None = None,
+) -> None:
+    next_agent_type = forced_agent_type or route_agent_type_for_message(session, user_message)
     if next_agent_type != session.agent_type or session.chat_session is None:
         rebuild_chat_session_for_agent_type(session, next_agent_type)
     else:
@@ -1165,6 +1194,17 @@ async def discover_models(payload: UIModelProviderPayload) -> JSONResponse:
     return JSONResponse({"models": models})
 
 
+@app.get("/api/settings")
+async def get_settings() -> JSONResponse:
+    return JSONResponse(load_settings(ROOT))
+
+
+@app.put("/api/settings")
+async def update_settings(payload: SettingsPayload) -> JSONResponse:
+    merged = save_settings(ROOT, payload.model_dump())
+    return JSONResponse(merged)
+
+
 @app.put("/api/sessions/{session_id}/model")
 async def switch_session_model(session_id: str, request: SwitchModelRequest) -> JSONResponse:
     session = require_session(session_id)
@@ -1340,6 +1380,7 @@ async def create_session(request: CreateSessionRequest) -> JSONResponse:
             selectedFilePath=session.selected_file_path,
             selectedFileContent="",
             openFiles=session.open_files,
+            codeChanges=session.code_changes,
             planSteps=session.plan_steps,
         )
     return JSONResponse(snapshot.model_dump())
@@ -1379,6 +1420,7 @@ async def get_session_snapshot(session_id: str) -> JSONResponse:
             selectedFilePath=session.selected_file_path,
             selectedFileContent="",
             openFiles=session.open_files,
+            codeChanges=session.code_changes,
             planSteps=session.plan_steps,
         )
     return JSONResponse(snapshot.model_dump())
@@ -1468,6 +1510,46 @@ async def get_file(
     )
 
 
+@app.get("/api/files/open")
+@app.post("/api/files/open")
+async def open_file_in_editor(
+    session_id: str | None = Query(None),
+    path: str | None = Query(None),
+    editor: str | None = Query(None),
+    body: dict[str, Any] | None = Body(None),
+) -> JSONResponse:
+    payload = body if isinstance(body, dict) else {}
+    resolved_session_id = str(payload.get("session_id") or session_id or "").strip()
+    resolved_path_arg = str(payload.get("path") or path or "").strip()
+    resolved_editor = str(payload.get("editor") or editor or "").strip()
+
+    if not resolved_session_id:
+        raise HTTPException(status_code=400, detail="缺少 session_id")
+    if not resolved_path_arg:
+        raise HTTPException(status_code=400, detail="缺少 path")
+    if not resolved_editor:
+        raise HTTPException(status_code=400, detail="缺少 editor")
+
+    session, target, resolved_path = resolve_workspace_target(resolved_session_id, resolved_path_arg)
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="文件不存在")
+    if not target.is_file():
+        raise HTTPException(status_code=400, detail="目标不是文件")
+
+    command = launch_editor_process(editor=resolved_editor, target=target)
+    session.selected_file_path = resolved_path
+    session.touch()
+    return JSONResponse(
+        {
+            "launched": True,
+            "path": resolved_path,
+            "absolutePath": str(target),
+            "editor": resolved_editor,
+            "command": command,
+        }
+    )
+
+
 @app.get("/api/sessions/{session_id}/preview")
 @app.get("/api/sessions/{session_id}/preview/{preview_path:path}")
 async def preview_session_file(session_id: str, preview_path: str = "") -> FileResponse:
@@ -1496,19 +1578,27 @@ async def save_file(
     path: str = Query(...),
     body: dict | None = Body(None),
 ) -> JSONResponse:
-    session = require_session(session_id)
-    resolved_path = normalize_relative_path(path, session.workspace)
-    target = Path(resolved_path).expanduser().resolve()
-    workspace_root = resolve_workspace_path(session.workspace)
-    if workspace_root != target and workspace_root not in target.parents:
-        return JSONResponse({"error": "路径不在工作区内"}, status_code=403)
+    session, target, resolved_path = resolve_workspace_target(session_id, path)
     content = body.get("content", "") if body else ""
     try:
+        existed_before_save = target.exists()
+        before_text = read_text_file(str(target), session.workspace) if existed_before_save else ""
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
         session.mark_file_tree_dirty()
+        code_change = None
+        if (not existed_before_save) or before_text != content:
+            code_change = record_code_change(
+                session,
+                action="added" if not existed_before_save else "modified",
+                path=target,
+                before_text=before_text,
+                after_text=content,
+                source="editor",
+                summary=f"{'手动新增' if not existed_before_save else '手动保存'} {relative_workspace_path(target, session.workspace)}",
+            )
         session.touch()
-        return JSONResponse({"saved": True, "path": resolved_path})
+        return JSONResponse({"saved": True, "path": resolved_path, "codeChange": code_change})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -1558,6 +1648,8 @@ async def confirm_delete_tool(
 
     selected_file_cleared = False
     try:
+        target = Path(normalize_relative_path(filename, session.workspace))
+        before_text = read_text_file(str(target), session.workspace)
         output = delete_file_in_workspace(filename, resolve_workspace_path(session.workspace))
         session.mark_file_tree_dirty()
         if session.selected_file_path == normalize_relative_path(filename, session.workspace):
@@ -1572,6 +1664,18 @@ async def confirm_delete_tool(
         }
         session.history_tools = upsert_tool(session.history_tools, tool_record)
         record_confirmation_result_for_agent(session, f"[内部确认结果] delete_file 已确认并执行成功：{output}")
+        code_change = record_code_change(
+            session,
+            action="deleted",
+            path=target,
+            before_text=before_text,
+            after_text="",
+            source="agent",
+            tool_call_id=tool_id,
+            assistant_id=assistant_id or None,
+            turn_index=current_agent_turn_index(session),
+            step_index=pending.get("step_index") if isinstance(pending.get("step_index"), int) else None,
+        )
         session.touch()
         return JSONResponse(
             {
@@ -1584,6 +1688,7 @@ async def confirm_delete_tool(
                 "selectedFileCleared": selected_file_cleared,
                 "assistantId": assistant_id,
                 "shouldContinue": bool(assistant_id),
+                "codeChange": code_change,
             }
         )
     except Exception as exc:
@@ -2216,26 +2321,25 @@ def _resolve_plan_payload(
             return str(getattr(request, field_name) or "").strip()
         return str(base_plan.get(fallback_key) or "").strip()
 
-    def choose_list(field_name: str, fallback_key: str) -> list[str]:
-        if field_name in provided_fields:
-            return [item.strip() for item in getattr(request, field_name) if isinstance(item, str) and item.strip()]
-        base_value = base_plan.get(fallback_key)
-        return [item.strip() for item in base_value if isinstance(item, str) and item.strip()] if isinstance(base_value, list) else []
-
     title = choose_text("title", "title")
     summary = choose_text("summary", "summary")
+    overview = choose_text("overview", "overview")
     markdown = choose_text("markdown", "markdown")
-    if not title or not summary or not markdown:
-        raise HTTPException(status_code=400, detail="提交计划时必须至少提供 title、summary、markdown，或先生成计划草案。")
+    if "keySteps" in provided_fields:
+        key_steps = [item.strip() for item in request.keySteps if isinstance(item, str) and item.strip()]
+    else:
+        raw_key_steps = base_plan.get("keySteps")
+        key_steps = [item.strip() for item in raw_key_steps if isinstance(item, str) and item.strip()] if isinstance(raw_key_steps, list) else []
+
+    if not title or not summary or not overview or not key_steps or not markdown:
+        raise HTTPException(status_code=400, detail="提交计划时必须至少提供 title、summary、overview、keySteps、markdown，或先生成计划草案。")
 
     return {
         "title": title,
         "summary": summary,
+        "overview": overview,
+        "keySteps": key_steps,
         "markdown": markdown,
-        "assumptions": choose_list("assumptions", "assumptions"),
-        "openQuestions": choose_list("openQuestions", "openQuestions"),
-        "acceptanceCriteria": choose_list("acceptanceCriteria", "acceptanceCriteria"),
-        "researchNotes": choose_list("researchNotes", "researchNotes"),
     }
 
 
@@ -2247,27 +2351,21 @@ def _build_coding_input_from_plan(plan: dict[str, Any]) -> str:
         f"# {str(plan.get('title') or '').strip()}",
         str(plan.get("summary") or "").strip(),
         "",
-        str(plan.get("markdown") or "").strip(),
+        "## 总览",
+        str(plan.get("overview") or "").strip(),
+        "",
+        "## 关键步骤",
     ]
 
-    section_mappings = (
-        ("assumptions", "关键假设"),
-        ("acceptanceCriteria", "验收标准"),
-        ("researchNotes", "调研补充"),
-    )
-    for key, title in section_mappings:
-        values = plan.get(key)
-        if not isinstance(values, list) or not values:
-            continue
-        lines.append("")
-        lines.append(f"## {title}")
-        lines.extend(f"- {str(value).strip()}" for value in values if str(value).strip())
+    key_steps = plan.get("keySteps")
+    if isinstance(key_steps, list):
+        lines.extend(f"- {str(step).strip()}" for step in key_steps if str(step).strip())
 
-    open_questions = plan.get("openQuestions")
-    if isinstance(open_questions, list) and open_questions:
-        lines.append("")
-        lines.append("## 未决问题")
-        lines.extend(f"- {str(value).strip()}" for value in open_questions if str(value).strip())
+    lines.extend([
+        "",
+        "## 详细草案",
+        str(plan.get("markdown") or "").strip(),
+    ])
 
     return "\n".join(line for line in lines if line is not None).strip()
 
@@ -2471,7 +2569,11 @@ async def chat_stream(
     user_message = request.message.strip()
     if not user_message:
         raise HTTPException(status_code=400, detail="message 不能为空")
-    route_session_for_user_message(session, user_message)
+    forced_agent_type = None
+    requested_agent_mode = str(request.agent_mode or "").strip().lower()
+    if requested_agent_mode and requested_agent_mode != "auto":
+        forced_agent_type = normalize_agent_type(requested_agent_mode)
+    route_session_for_user_message(session, user_message, forced_agent_type=forced_agent_type)
     if session.agent_type == "coding" and session.plan_state.get("pending_coding_input"):
         update_plan_state(session, pending_coding_input=None)
 
@@ -2719,6 +2821,7 @@ async def run_agent_stream(
     assistant_id = assistant_id or uuid.uuid4().hex
     streamed_assistant_text = ""
     assistant_stream_started = False
+    tool_before_snapshots: dict[str, dict[str, str]] = {}
     reset_phase_for_new_turn(session)
     sync_session_runtime_state_for_agent(session)
     if user_message is not None:
@@ -2744,6 +2847,8 @@ async def run_agent_stream(
                     "phase": session.phase,
                     "deployState": session.deploy_state,
                     "planState": session.plan_state,
+                    "codeChangeCount": len(session.code_changes),
+                    "recentCodeChanges": session.code_changes[-8:],
                 },
             },
         }
@@ -2813,6 +2918,13 @@ async def run_agent_stream(
 
         if event.type == "tool_call" and event.tool_call is not None:
             tool_id = event.tool_call.id or f"step-{event.step_index}-{event.tool_call.name}"
+            before_snapshots = capture_code_change_before_snapshots(
+                session,
+                tool_name=event.tool_call.name,
+                tool_arguments=event.tool_call.arguments,
+            )
+            if before_snapshots:
+                tool_before_snapshots[tool_id] = before_snapshots
             update_plan_steps_for_tool(session, event.step_index, event.tool_call.name)
             if event.tool_call.name == "read_file":
                 maybe_filename = event.tool_call.arguments.get("filename")
@@ -2933,15 +3045,68 @@ async def run_agent_stream(
         if event.type == "tool_result" and event.tool_call is not None and event.tool_result is not None:
             tool_id = event.tool_call.id or event.tool_result.tool_call_id or f"step-{event.step_index}-{event.tool_call.name}"
             output = event.tool_result.output
+            before_snapshots = tool_before_snapshots.pop(tool_id, None)
             terminal_output = extract_terminal_output(output)
             preview_url = extract_preview_url(output)
-            requires_confirmation = bool(
+            raw_requires_confirmation = bool(
                 (event.tool_result.name == "delete_file"
                  or event.tool_result.name == "git_commit"
                  or event.tool_result.name == "git_tag")
                 and isinstance(output, dict)
                 and output.get("requires_confirmation") is True
             )
+            auto_approve_enabled = bool(load_settings(ROOT).get("autoApprove"))
+            if raw_requires_confirmation and auto_approve_enabled:
+                approval = {"id": tool_id, "approved": True}
+                tool_success = True
+                requires_confirmation = False
+                if event.tool_result.name == "delete_file" and isinstance(output, dict):
+                    filename = str(output.get("filename") or "").strip()
+                    if filename:
+                        try:
+                            target = Path(normalize_relative_path(filename, session.workspace))
+                            before_text = read_text_file(str(target), session.workspace)
+                            output = delete_file_in_workspace(filename, resolve_workspace_path(session.workspace))
+                            session.mark_file_tree_dirty()
+                            if session.selected_file_path == normalize_relative_path(filename, session.workspace):
+                                session.selected_file_path = None
+                            record_code_change(
+                                session,
+                                action="deleted",
+                                path=target,
+                                before_text=before_text,
+                                after_text="",
+                                source="agent",
+                                tool_call_id=tool_id,
+                                assistant_id=assistant_id or None,
+                                turn_index=current_agent_turn_index(session),
+                                step_index=event.step_index,
+                            )
+                        except Exception:
+                            pass
+                    record_confirmation_result_for_agent(session, f"[自动确认] delete_file 已自动执行：{filename}")
+                elif event.tool_result.name == "git_commit" and isinstance(output, dict):
+                    commit_message = str(output.get("commit_message") or "").strip()
+                    if commit_message:
+                        try:
+                            output = execute_git_commit(commit_message, resolve_workspace_path(session.workspace))
+                            session.mark_file_tree_dirty()
+                        except Exception:
+                            pass
+                    record_confirmation_result_for_agent(session, f"[自动确认] git_commit 已自动执行：{commit_message}")
+                elif event.tool_result.name == "git_tag" and isinstance(output, dict):
+                    tag_name = str(output.get("tag") or "").strip()
+                    tag_message = str(output.get("tag_message") or f"Release {tag_name}")
+                    if tag_name:
+                        try:
+                            output = execute_git_tag(tag_name, tag_message, resolve_workspace_path(session.workspace))
+                        except Exception:
+                            pass
+                    record_confirmation_result_for_agent(session, f"[自动确认] git_tag 已自动执行：{tag_name}")
+            else:
+                requires_confirmation = raw_requires_confirmation
+                approval = {"id": tool_id} if requires_confirmation else None
+                tool_success = None if requires_confirmation else event.tool_result.success
             requires_user_input = bool(
                 isinstance(output, dict)
                 and output.get("requires_user_input") is True
@@ -2961,14 +3126,13 @@ async def run_agent_stream(
                 if requires_user_input
                 else ("completed" if event.tool_result.success else "error")
             )
-            tool_success: bool | None = None if (requires_confirmation or requires_user_input) else event.tool_result.success
-            approval = {"id": tool_id} if requires_confirmation else None
             input_request = None
             if requires_confirmation and isinstance(output, dict):
                 if event.tool_result.name == "delete_file":
                     session.pending_delete_confirmations[tool_id] = {
                         "filename": str(output.get("filename") or ""),
                         "assistant_id": assistant_id,
+                        "step_index": event.step_index,
                     }
                 elif event.tool_result.name == "git_commit":
                     session.pending_commit_confirmations[tool_id] = {
@@ -3090,6 +3254,28 @@ async def run_agent_stream(
                     **tool_record,
                 },
             )
+            if event.tool_result.success and not requires_confirmation and not requires_user_input:
+                code_change_records = code_change_records_from_tool_result(
+                    session,
+                    tool_name=event.tool_result.name,
+                    tool_arguments=event.tool_call.arguments,
+                    output=output,
+                    tool_call_id=tool_id,
+                    assistant_id=assistant_id,
+                    step_index=event.step_index,
+                    before_snapshots=before_snapshots,
+                )
+                for record in code_change_records:
+                    loop.call_soon_threadsafe(
+                        queue.put_nowait,
+                        {
+                            "type": "data-code-change",
+                            "payload": {
+                                "assistant_id": assistant_id,
+                                "data": record,
+                            },
+                        },
+                    )
             loop.call_soon_threadsafe(
                 queue.put_nowait,
                 {
@@ -3474,6 +3660,290 @@ def compact_text(value: str, limit: int) -> str:
     if len(compact) <= limit:
         return compact
     return f"{compact[:limit].rstrip()}..."
+
+
+def resolve_workspace_target(session_id: str, path: str) -> tuple[UISession, Path, str]:
+    session = require_session(session_id)
+    resolved_path = normalize_relative_path(path, session.workspace)
+    target = Path(resolved_path).expanduser().resolve()
+    workspace_root = resolve_workspace_path(session.workspace)
+    if workspace_root != target and workspace_root not in target.parents:
+        raise HTTPException(status_code=403, detail="路径不在工作区内")
+    return session, target, resolved_path
+
+
+def launch_editor_process(*, editor: str, target: Path) -> list[str]:
+    normalized_editor = editor.strip()
+    if normalized_editor not in SUPPORTED_EDITOR_COMMANDS:
+        raise HTTPException(status_code=400, detail=f"不支持的编辑器命令：{normalized_editor}")
+
+    executable = shutil.which(normalized_editor)
+    if not executable:
+        raise HTTPException(status_code=404, detail=f"未找到编辑器命令：{normalized_editor}")
+
+    command = [executable, str(target)]
+    if normalized_editor == "devenv":
+        command = [executable, "/Edit", str(target)]
+
+    popen_kwargs: dict[str, Any] = {
+        "cwd": str(target.parent),
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if sys.platform == "win32":
+        popen_kwargs["creationflags"] = (
+            getattr(subprocess, "DETACHED_PROCESS", 0)
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        )
+    else:
+        popen_kwargs["start_new_session"] = True
+
+    try:
+        subprocess.Popen(command, **popen_kwargs)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"未找到编辑器命令：{normalized_editor}") from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"启动编辑器失败：{exc}") from exc
+
+    return command
+
+
+def relative_workspace_path(path: str | Path, workspace: str) -> str:
+    workspace_root = resolve_workspace_path(workspace)
+    target = Path(path).expanduser().resolve()
+    try:
+        return target.relative_to(workspace_root).as_posix()
+    except ValueError:
+        return str(target)
+
+
+def count_text_lines(text: str | None) -> int:
+    if not text:
+        return 0
+    return len(text.splitlines())
+
+
+def extract_apply_patch_paths(patch_text: str) -> list[str]:
+    paths: list[str] = []
+    seen: set[str] = set()
+    for line in patch_text.splitlines():
+        if not line.startswith("*** Update File: "):
+            continue
+        path = line.removeprefix("*** Update File: ").strip()
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        paths.append(path)
+    return paths
+
+
+def capture_code_change_before_snapshots(
+    session: UISession,
+    *,
+    tool_name: str,
+    tool_arguments: dict[str, Any],
+) -> dict[str, str]:
+    raw_targets: list[str] = []
+    if tool_name in {"replace_file", "delete_file"}:
+        filename = str(tool_arguments.get("filename") or "").strip()
+        if filename:
+            raw_targets.append(filename)
+    elif tool_name == "apply_patch":
+        raw_targets.extend(extract_apply_patch_paths(str(tool_arguments.get("patch") or "")))
+
+    snapshots: dict[str, str] = {}
+    for raw_target in raw_targets:
+        try:
+            target = Path(normalize_relative_path(raw_target, session.workspace))
+        except HTTPException:
+            continue
+        relative_path = relative_workspace_path(target, session.workspace)
+        snapshots[relative_path] = read_text_file(str(target), session.workspace)
+    return snapshots
+
+
+def build_code_diff_preview(relative_path: str, before_text: str, after_text: str) -> tuple[str, int, int]:
+    diff_lines = list(
+        difflib.unified_diff(
+            before_text.splitlines(),
+            after_text.splitlines(),
+            fromfile=f"a/{relative_path}",
+            tofile=f"b/{relative_path}",
+            lineterm="",
+        )
+    )
+    added = sum(1 for line in diff_lines if line.startswith("+") and not line.startswith("+++"))
+    deleted = sum(1 for line in diff_lines if line.startswith("-") and not line.startswith("---"))
+    preview_lines = diff_lines[:MAX_CODE_CHANGE_DIFF_LINES]
+    if len(diff_lines) > MAX_CODE_CHANGE_DIFF_LINES:
+        preview_lines.append(f"... truncated {len(diff_lines) - MAX_CODE_CHANGE_DIFF_LINES} diff lines")
+    return "\n".join(preview_lines), added, deleted
+
+
+def record_code_change(
+    session: UISession,
+    *,
+    action: str,
+    path: str | Path,
+    before_text: str = "",
+    after_text: str = "",
+    source: str = "agent",
+    tool_call_id: str | None = None,
+    assistant_id: str | None = None,
+    turn_index: int | None = None,
+    step_index: int | None = None,
+    summary: str | None = None,
+) -> dict[str, Any] | None:
+    if action == "modified" and before_text == after_text:
+        return None
+
+    absolute_path = Path(path).expanduser().resolve()
+    relative_path = relative_workspace_path(absolute_path, session.workspace)
+    diff_preview, added, deleted = build_code_diff_preview(relative_path, before_text, after_text)
+    if action == "added":
+        added = count_text_lines(after_text)
+        deleted = 0
+    elif action == "deleted":
+        added = 0
+        deleted = count_text_lines(before_text)
+
+    if summary is None:
+        action_label = {"added": "新增", "modified": "修改", "deleted": "删除"}.get(action, "变更")
+        summary = f"{action_label} {relative_path}"
+
+    record = {
+        "id": uuid.uuid4().hex,
+        "action": action,
+        "path": relative_path,
+        "absolutePath": str(absolute_path),
+        "source": source,
+        "toolCallId": tool_call_id,
+        "assistantId": assistant_id,
+        "turnIndex": turn_index,
+        "stepIndex": step_index,
+        "timestamp": int(time.time() * 1000),
+        "linesAdded": added,
+        "linesDeleted": deleted,
+        "summary": summary,
+        "diffPreview": diff_preview,
+    }
+    session.code_changes = [*session.code_changes, record][-MAX_CODE_CHANGE_RECORDS:]
+    return record
+
+
+def current_agent_turn_index(session: UISession) -> int | None:
+    state = getattr(session.chat_session, "state", None)
+    data = getattr(state, "data", None)
+    if not isinstance(data, dict):
+        return None
+    try:
+        return int(data.get("turn_index"))
+    except (TypeError, ValueError):
+        return None
+
+
+def code_change_records_from_tool_result(
+    session: UISession,
+    *,
+    tool_name: str,
+    tool_arguments: dict[str, Any],
+    output: Any,
+    tool_call_id: str,
+    assistant_id: str,
+    step_index: int | None,
+    before_snapshots: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    before_snapshots = before_snapshots or {}
+    if tool_name == "write_file":
+        filename = str(tool_arguments.get("filename") or "").strip()
+        if not filename:
+            return []
+        target = Path(normalize_relative_path(filename, session.workspace))
+        after_text = read_text_file(str(target), session.workspace)
+        record = record_code_change(
+            session,
+            action="added",
+            path=target,
+            before_text="",
+            after_text=after_text,
+            source="agent",
+            tool_call_id=tool_call_id,
+            assistant_id=assistant_id,
+            turn_index=current_agent_turn_index(session),
+            step_index=step_index,
+        )
+        return [record] if record is not None else []
+
+    if tool_name == "replace_file":
+        filename = str(tool_arguments.get("filename") or "").strip()
+        if not filename:
+            return []
+        target = Path(normalize_relative_path(filename, session.workspace))
+        relative_path = relative_workspace_path(target, session.workspace)
+        before_text = before_snapshots.get(relative_path, str(tool_arguments.get("old_content") or ""))
+        after_text = read_text_file(str(target), session.workspace)
+        record = record_code_change(
+            session,
+            action="modified",
+            path=target,
+            before_text=before_text,
+            after_text=after_text,
+            source="agent",
+            tool_call_id=tool_call_id,
+            assistant_id=assistant_id,
+            turn_index=current_agent_turn_index(session),
+            step_index=step_index,
+        )
+        return [record] if record is not None else []
+
+    if tool_name == "apply_patch" and isinstance(output, dict):
+        files = output.get("files")
+        if not isinstance(files, list) or not files:
+            return []
+        records: list[dict[str, Any]] = []
+        for raw_file in files:
+            target = Path(normalize_relative_path(str(raw_file), session.workspace))
+            relative_path = relative_workspace_path(target, session.workspace)
+            after_text = read_text_file(str(target), session.workspace)
+            record = record_code_change(
+                session,
+                action="modified",
+                path=target,
+                before_text=before_snapshots.get(relative_path, ""),
+                after_text=after_text,
+                source="agent",
+                tool_call_id=tool_call_id,
+                assistant_id=assistant_id,
+                turn_index=current_agent_turn_index(session),
+                step_index=step_index,
+                summary=f"应用补丁 {relative_path}",
+            )
+            if record is not None:
+                records.append(record)
+        return records
+
+    if tool_name == "delete_file":
+        filename = str(tool_arguments.get("filename") or "").strip()
+        if not filename:
+            return []
+        target = Path(normalize_relative_path(filename, session.workspace))
+        relative_path = relative_workspace_path(target, session.workspace)
+        record = record_code_change(
+            session,
+            action="deleted",
+            path=target,
+            before_text=before_snapshots.get(relative_path, ""),
+            after_text="",
+            source="agent",
+            tool_call_id=tool_call_id,
+            assistant_id=assistant_id,
+            turn_index=current_agent_turn_index(session),
+            step_index=step_index,
+        )
+        return [record] if record is not None else []
+
+    return []
 
 
 if __name__ == "__main__":

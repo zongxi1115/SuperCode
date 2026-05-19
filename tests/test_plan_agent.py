@@ -64,14 +64,18 @@ class PlanAgentToolsTests(unittest.TestCase):
             {
                 "title": "后台 MVP",
                 "summary": "先做登录和仪表盘",
+                "overview": "先完成最小可用后台闭环，再补扩展能力。",
+                "key_steps": ["搭登录页", "接鉴权", "做仪表盘"],
                 "markdown": "## 步骤\n- 登录\n- 仪表盘",
-                "assumptions": ["先只做 Web 端"],
             },
             self.context,
         )
 
         self.assertEqual(output["plan"]["title"], "后台 MVP")
-        self.assertEqual(output["plan"]["assumptions"], ["先只做 Web 端"])
+        self.assertEqual(output["plan"]["summary"], "先做登录和仪表盘")
+        self.assertEqual(output["plan"]["overview"], "先完成最小可用后台闭环，再补扩展能力。")
+        self.assertEqual(output["plan"]["keySteps"], ["搭登录页", "接鉴权", "做仪表盘"])
+        self.assertEqual(set(output["plan"].keys()), {"title", "summary", "overview", "keySteps", "markdown"})
         self.assertEqual(output["data_parts"][0]["type"], "data-plan-draft")
 
     def test_search_web_tool_parses_tinyfish_results(self) -> None:
@@ -107,6 +111,8 @@ class PlanAgentEndpointsTests(unittest.IsolatedAsyncioTestCase):
                 "draft": {
                     "title": "后台 MVP",
                     "summary": "先做登录和仪表盘",
+                    "overview": "先完成最小可用后台闭环，再补扩展能力。",
+                    "keySteps": ["搭登录页", "接鉴权", "做仪表盘"],
                     "markdown": "## 步骤\n- 登录\n- 仪表盘",
                 },
             },
@@ -179,7 +185,7 @@ class PlanAgentEndpointsTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(
             api_main,
             "build_chat_session",
-            return_value=(ChatSession(agent=object()), "Demo", None, None),
+            return_value=(ChatSession(agent=object()), "Demo", None, None, None),
         ):
             response = await api_main.submit_plan(
                 self.session.session_id,
@@ -195,6 +201,8 @@ class PlanAgentEndpointsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.session.history_tools, [])
         self.assertEqual(self.session.thoughts, [])
         self.assertIn("后台 MVP", payload["codingInput"])
+        self.assertIn("总览", payload["codingInput"])
+        self.assertIn("关键步骤", payload["codingInput"])
         self.assertIn("仪表盘", payload["codingInput"])
 
 

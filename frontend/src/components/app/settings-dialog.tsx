@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -11,23 +12,41 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Separator } from '@/components/ui/separator';
+import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
-import type { ModelOption, UIModelProvider } from '@/lib/app-types';
-import { Eye, EyeOff, Globe, Key, List, Lock, Plus, RefreshCcw, Server } from 'lucide-react';
+import type { AppSettings, ModelOption, UIModelProvider } from '@/lib/app-types';
+import {
+  AlertTriangle,
+  Eye,
+  EyeOff,
+  Globe,
+  Key,
+  List,
+  Lock,
+  Plus,
+  RefreshCcw,
+  Server,
+  Settings2,
+  Shield,
+  ShieldCheck,
+  Trash2,
+} from 'lucide-react';
 
 type EditableProvider = UIModelProvider & {
   modelsText: string;
 };
 
-type ModelConfigDialogProps = {
+type SettingsDialogProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   providers: UIModelProvider[];
   envConfigs: ModelOption[];
   configPath: string | null;
+  settings: AppSettings;
   onSaveProviders: (providers: UIModelProvider[]) => Promise<void>;
   onDiscoverModels: (provider: UIModelProvider) => Promise<string[]>;
+  onSaveSettings: (settings: AppSettings) => Promise<void>;
 };
 
 function normalizeModels(text: string) {
@@ -53,24 +72,28 @@ function toEditableProvider(provider?: UIModelProvider): EditableProvider {
   };
 }
 
-export function ModelConfigDialog({
+export function SettingsDialog({
   open,
   onOpenChange,
   providers,
   envConfigs,
   configPath,
+  settings,
   onSaveProviders,
   onDiscoverModels,
-}: ModelConfigDialogProps) {
+  onSaveSettings,
+}: SettingsDialogProps) {
   const [draftProviders, setDraftProviders] = useState<EditableProvider[]>(
     providers.length > 0 ? providers.map((p) => toEditableProvider(p)) : [toEditableProvider()],
   );
+  const [draftSettings, setDraftSettings] = useState<AppSettings>(settings);
   const [activeTab, setActiveTab] = useState('providers');
   const [isSaving, setIsSaving] = useState(false);
   const [refreshingId, setRefreshingId] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [visibleKeys, setVisibleKeys] = useState<Set<string>>(new Set());
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
 
   const availableCount = useMemo(
     () => draftProviders.reduce((acc, p) => acc + p.models.length, 0),
@@ -102,6 +125,11 @@ export function ModelConfigDialog({
   const handleAddProvider = () => {
     setDraftProviders((prev) => [...prev, toEditableProvider()]);
     setActiveTab('providers');
+  };
+
+  const handleDeleteProvider = (index: number) => {
+    setDraftProviders((prev) => prev.filter((_, i) => i !== index));
+    setDeleteConfirmId(null);
   };
 
   const handleDiscoverModels = async (provider: EditableProvider, index: number) => {
@@ -141,9 +169,10 @@ export function ModelConfigDialog({
           provider: p.provider ?? null,
         })),
       );
-      setFeedback('配置已保存');
+      await onSaveSettings(draftSettings);
+      setFeedback('设置已保存');
     } catch (e) {
-      setError(e instanceof Error ? e.message : '保存配置失败');
+      setError(e instanceof Error ? e.message : '保存设置失败');
     } finally {
       setIsSaving(false);
     }
@@ -153,17 +182,17 @@ export function ModelConfigDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         showCloseButton={false}
-        className="flex max-h-[90vh] flex-col gap-0 overflow-hidden p-0 sm:max-w-[680px]"
+        className="flex max-h-[90vh] flex-col gap-0 overflow-hidden p-0 sm:max-w-[720px]"
       >
         <DialogHeader className="shrink-0 px-6 pt-6 pb-4">
           <div className="flex items-center gap-3">
             <div className="flex size-9 items-center justify-center rounded-lg bg-primary/10">
-              <Server className="size-4.5 text-primary" />
+              <Settings2 className="size-4.5 text-primary" />
             </div>
             <div className="min-w-0 flex-1">
-              <DialogTitle className="text-lg">模型与供应商设置</DialogTitle>
+              <DialogTitle className="text-lg">设置</DialogTitle>
               <DialogDescription className="mt-0.5 text-sm">
-                新配置写入可视化配置文件，原有 .env* 保持只读兼容
+                管理供应商、模型来源与安全选项
               </DialogDescription>
             </div>
             <div className="shrink-0 text-right">
@@ -184,11 +213,15 @@ export function ModelConfigDialog({
             <TabsList className="w-full">
               <TabsTrigger value="providers" className="flex-1 gap-1.5">
                 <Server className="size-3.5" />
-                供应商配置
+                供应商
               </TabsTrigger>
               <TabsTrigger value="env" className="flex-1 gap-1.5">
                 <Lock className="size-3.5" />
-                .env 兼容来源
+                .env 来源
+              </TabsTrigger>
+              <TabsTrigger value="general" className="flex-1 gap-1.5">
+                <Shield className="size-3.5" />
+                通用
               </TabsTrigger>
             </TabsList>
           </div>
@@ -201,7 +234,7 @@ export function ModelConfigDialog({
                 </p>
                 <Button variant="outline" size="sm" className="gap-1.5" onClick={handleAddProvider}>
                   <Plus className="size-3.5" />
-                  添加
+                  添加供应商
                 </Button>
               </div>
 
@@ -209,9 +242,10 @@ export function ModelConfigDialog({
                 const key = provider.id ?? `draft-${index}`;
                 const isRefreshing = refreshingId === key;
                 const isKeyVisible = visibleKeys.has(key);
+                const isConfirmingDelete = deleteConfirmId === key;
 
                 return (
-                  <div key={key} className="rounded-lg border bg-card">
+                  <div key={key} className="group rounded-lg border bg-card">
                     <div className="flex items-center justify-between px-4 py-3">
                       <div className="flex items-center gap-2">
                         <Globe className="size-4 text-muted-foreground" />
@@ -219,9 +253,41 @@ export function ModelConfigDialog({
                           {provider.name || `供应商 ${index + 1}`}
                         </span>
                       </div>
-                      <Badge variant="secondary" className="text-xs">
-                        {provider.models.length} 模型
-                      </Badge>
+                      <div className="flex items-center gap-2">
+                        <Badge variant="secondary" className="text-xs">
+                          {provider.models.length} 模型
+                        </Badge>
+                        {isConfirmingDelete ? (
+                          <div className="flex items-center gap-1.5">
+                            <Button
+                              variant="destructive"
+                              size="sm"
+                              className="h-7 gap-1 px-2 text-xs"
+                              onClick={() => handleDeleteProvider(index)}
+                            >
+                              确认删除
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="h-7 gap-1 px-2 text-xs"
+                              onClick={() => setDeleteConfirmId(null)}
+                            >
+                              取消
+                            </Button>
+                          </div>
+                        ) : (
+                          <Button
+                            variant="ghost"
+                            size="icon-xs"
+                            className="text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100"
+                            onClick={() => setDeleteConfirmId(key)}
+                            title="删除此供应商"
+                          >
+                            <Trash2 className="size-3.5" />
+                          </Button>
+                        )}
+                      </div>
                     </div>
 
                     <Separator />
@@ -346,6 +412,58 @@ export function ModelConfigDialog({
               )}
             </div>
           </TabsContent>
+
+          <TabsContent value="general" className="mt-0 min-h-0 flex-1 overflow-y-auto px-6 py-4">
+            <div className="space-y-5">
+              <div>
+                <h3 className="mb-3 text-sm font-semibold">安全与确认</h3>
+                <div className="space-y-4">
+                  <div className="flex items-start justify-between gap-4 rounded-lg border bg-card p-4">
+                    <div className="flex items-start gap-3">
+                      <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-amber-500/10">
+                        <ShieldCheck className="size-4 text-amber-600 dark:text-amber-400" />
+                      </div>
+                      <div className="space-y-1">
+                        <div className="text-sm font-medium">自动同意危险操作</div>
+                        <div className="text-xs text-muted-foreground">
+                          启用后，删除文件、提交代码、创建标签等操作将自动执行，无需人工审查确认
+                        </div>
+                      </div>
+                    </div>
+                    <Switch
+                      checked={draftSettings.autoApprove}
+                      onCheckedChange={(checked) =>
+                        setDraftSettings((prev) => ({ ...prev, autoApprove: checked }))
+                      }
+                    />
+                  </div>
+
+                  {draftSettings.autoApprove && (
+                    <Alert variant="destructive" className="border-amber-500/30 bg-amber-500/5 text-amber-700 dark:text-amber-400">
+                      <AlertTriangle className="size-4" />
+                      <AlertDescription className="text-xs">
+                        危险操作将自动执行，可能造成不可逆的文件删除或代码变更。请确保你信任当前 AI 代理的操作行为。
+                      </AlertDescription>
+                    </Alert>
+                  )}
+                </div>
+              </div>
+
+              <Separator />
+
+              <div>
+                <h3 className="mb-3 text-sm font-semibold">配置文件</h3>
+                {configPath ? (
+                  <div className="flex items-center gap-2 rounded-lg border bg-card p-3">
+                    <Server className="size-3.5 text-muted-foreground" />
+                    <span className="truncate text-xs text-muted-foreground">{configPath}</span>
+                  </div>
+                ) : (
+                  <p className="text-xs text-muted-foreground">尚未生成可视化配置文件</p>
+                )}
+              </div>
+            </div>
+          </TabsContent>
         </Tabs>
 
         <Separator />
@@ -356,8 +474,6 @@ export function ModelConfigDialog({
               <span className="text-sm text-destructive">{error}</span>
             ) : feedback ? (
               <span className="text-sm text-emerald-600 dark:text-emerald-400">{feedback}</span>
-            ) : configPath ? (
-              <span className="truncate text-xs text-muted-foreground">{configPath}</span>
             ) : null}
           </div>
           <Button variant="outline" onClick={() => onOpenChange(false)}>

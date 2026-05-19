@@ -59,6 +59,7 @@ class CodingPromptBrain(OpenAICompatibleBrain):
                 "8. 如果 execute/excecute 返回的结果里 `status` 是 `running` 且 `awaiting_input` 为 false，说明命令大概率仍在后台执行，应调用 `terminal_wait` 继续等待。多个活动终端并存时，必须显式传 `terminal_id`。",
                 "9. 如果用户目标已经完成，必须直接输出最终答复，不要为了“继续”而调用无必要工具。",
                 "10. 已成功完成的工具调用会出现在内部工具调用记录里，不要重复同一工具调用；刚刚 write_file 创建的新文件内容以调用参数为准，不要立刻 read_file 回读。",
+                "11. 当回复内容引用了 search_web 或 fetch_url_content 返回的来源时，必须在引用处使用 [[url]] 标注来源，url 填写工具返回的原始链接。例如：「该 API 支持流式响应[[https://docs.example.com/streaming]]」。不要对未经过工具验证的信息使用此标注。",
             ]
         else:
             protocol_lines = [

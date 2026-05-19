@@ -5,6 +5,23 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
+class CodeChangeRecord(BaseModel):
+    id: str
+    action: Literal["added", "modified", "deleted"]
+    path: str
+    absolutePath: str | None = None
+    source: str = "agent"
+    toolCallId: str | None = None
+    assistantId: str | None = None
+    turnIndex: int | None = None
+    stepIndex: int | None = None
+    timestamp: int
+    linesAdded: int = 0
+    linesDeleted: int = 0
+    summary: str
+    diffPreview: str = ""
+
+
 class CreateSessionResponse(BaseModel):
     sessionId: str
     model: str
@@ -29,6 +46,7 @@ class CreateSessionResponse(BaseModel):
     selectedFilePath: str | None
     selectedFileContent: str
     openFiles: list[str]
+    codeChanges: list[CodeChangeRecord] = Field(default_factory=list)
     planSteps: list[dict[str, str]]
 
 
@@ -64,6 +82,8 @@ class SessionContextResponse(BaseModel):
     recentMessages: list[SessionContextMessage]
     recentThoughts: list[str]
     recentTools: list[SessionContextTool]
+    codeChangeCount: int = 0
+    recentCodeChanges: list[CodeChangeRecord] = Field(default_factory=list)
     planSteps: list[dict[str, str]]
 
 
@@ -88,6 +108,10 @@ class ModelConfigPayload(BaseModel):
     providers: list[UIModelProviderPayload] = Field(default_factory=list)
 
 
+class SettingsPayload(BaseModel):
+    autoApprove: bool = False
+
+
 class SessionHistoryItem(BaseModel):
     sessionId: str
     workspace: str
@@ -106,6 +130,7 @@ class SessionHistoryItem(BaseModel):
 class ChatStreamRequest(BaseModel):
     session_id: str = Field(alias="session_id")
     message: str
+    agent_mode: str | None = None
 
 
 class ContinueChatStreamRequest(BaseModel):
@@ -144,11 +169,9 @@ class ToolInputSubmitRequest(BaseModel):
 class PlanSubmitRequest(BaseModel):
     title: str | None = None
     summary: str | None = None
+    overview: str | None = None
+    keySteps: list[str] = Field(default_factory=list)
     markdown: str | None = None
-    assumptions: list[str] = Field(default_factory=list)
-    openQuestions: list[str] = Field(default_factory=list)
-    acceptanceCriteria: list[str] = Field(default_factory=list)
-    researchNotes: list[str] = Field(default_factory=list)
 
 
 class TerminalSnapshotResponse(BaseModel):

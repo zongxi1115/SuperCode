@@ -82,13 +82,36 @@ class MessageRoutingTests(unittest.TestCase):
         with patch.object(
             api_main,
             "build_chat_session",
-            return_value=(ChatSession(agent=object()), "Demo", None, None),
+            return_value=(ChatSession(agent=object()), "Demo", None, None, None),
         ) as mock_build:
             api_main.route_session_for_user_message(session, "帮我部署到 Vercel")
 
         self.assertEqual(session.agent_type, "deploy")
         self.assertEqual(session.phase, "idle")
         self.assertEqual(session.plan_steps[0]["title"], "连接部署目标")
+        mock_build.assert_called_once()
+
+    def test_route_session_for_user_message_accepts_forced_agent_type(self) -> None:
+        session = api_main.UISession(
+            session_id="routing-forced",
+            model="Demo",
+            workspace=str(self.workspace),
+            agent_type="coding",
+            chat_session=ChatSession(agent=object()),
+        )
+
+        with patch.object(
+            api_main,
+            "build_chat_session",
+            return_value=(ChatSession(agent=object()), "Demo", None, None, None),
+        ) as mock_build:
+            api_main.route_session_for_user_message(
+                session,
+                "继续",
+                forced_agent_type="deploy",
+            )
+
+        self.assertEqual(session.agent_type, "deploy")
         mock_build.assert_called_once()
 
     def test_route_agent_type_uses_plan_for_vague_request_on_empty_workspace(self) -> None:

@@ -395,33 +395,21 @@ class AskPlanQuestionsTool(PlanBaseTool):
 class SavePlanTool(PlanBaseTool):
     name = "save_plan"
     description = (
-        "保存当前计划草案到后端。参数：title、summary、markdown（必填），可选 assumptions、"
-        "open_questions、acceptance_criteria、research_notes。"
+        "保存当前计划草案到后端。参数：title、summary、overview、key_steps、markdown（必填）。"
     )
     parameters_schema = {
         "type": "object",
         "properties": {
             "title": {"type": "string"},
             "summary": {"type": "string"},
+            "overview": {"type": "string"},
+            "key_steps": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
             "markdown": {"type": "string"},
-            "assumptions": {
-                "type": "array",
-                "items": {"type": "string"},
-            },
-            "open_questions": {
-                "type": "array",
-                "items": {"type": "string"},
-            },
-            "acceptance_criteria": {
-                "type": "array",
-                "items": {"type": "string"},
-            },
-            "research_notes": {
-                "type": "array",
-                "items": {"type": "string"},
-            },
         },
-        "required": ["title", "summary", "markdown"],
+        "required": ["title", "summary", "overview", "key_steps", "markdown"],
         "additionalProperties": False,
     }
 
@@ -429,22 +417,26 @@ class SavePlanTool(PlanBaseTool):
         del context
         title = str(arguments.get("title") or "").strip()
         summary = str(arguments.get("summary") or "").strip()
+        overview = str(arguments.get("overview") or "").strip()
+        key_steps = _normalize_string_list(arguments.get("key_steps"))
         markdown = str(arguments.get("markdown") or "").strip()
         if not title:
             raise ValueError("title 不能为空。")
         if not summary:
             raise ValueError("summary 不能为空。")
+        if not overview:
+            raise ValueError("overview 不能为空。")
+        if not key_steps:
+            raise ValueError("key_steps 不能为空。")
         if not markdown:
             raise ValueError("markdown 不能为空。")
 
         plan = {
             "title": title,
             "summary": summary,
+            "overview": overview,
+            "keySteps": key_steps,
             "markdown": markdown,
-            "assumptions": _normalize_string_list(arguments.get("assumptions")),
-            "openQuestions": _normalize_string_list(arguments.get("open_questions")),
-            "acceptanceCriteria": _normalize_string_list(arguments.get("acceptance_criteria")),
-            "researchNotes": _normalize_string_list(arguments.get("research_notes")),
         }
         return {
             "message": "计划草案已保存，可继续修改或提交进入编码模式。",

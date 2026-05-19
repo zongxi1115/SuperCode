@@ -34,6 +34,18 @@ class SessionStoreTests(unittest.TestCase):
             ],
             history_tools=[{"id": "t1", "name": "read_file", "state": "completed"}],
             thoughts=["先看文件"],
+            code_changes=[
+                {
+                    "id": "change-1",
+                    "action": "modified",
+                    "path": "src/app.tsx",
+                    "timestamp": 300,
+                    "linesAdded": 4,
+                    "linesDeleted": 1,
+                    "summary": "修改 src/app.tsx",
+                    "diffPreview": "@@",
+                }
+            ],
             plan_steps=[{"id": "1", "title": "done", "status": "completed"}],
             plan_state={
                 "status": "draft_ready",
@@ -88,6 +100,7 @@ class SessionStoreTests(unittest.TestCase):
         self.assertEqual(loaded.phase, "connected")
         self.assertEqual(loaded.history_messages[1]["content"], "收到")
         self.assertEqual(loaded.history_tools[0]["name"], "read_file")
+        self.assertEqual(loaded.code_changes[0]["path"], "src/app.tsx")
         self.assertEqual(loaded.plan_state["draft"]["title"], "后台计划")
         self.assertEqual(loaded.pending_user_input_requests["tool-plan-1"]["tool_name"], "ask_plan_questions")
         self.assertEqual(loaded.deploy_connections["deploy-1"]["display_name"], "prod")
