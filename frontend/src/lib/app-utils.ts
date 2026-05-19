@@ -116,20 +116,35 @@ export function getFileLanguage(path: string): string {
   return langMap[ext] ?? 'text';
 }
 
+const COMPRESSION_SUMMARY_PREFIX = "[会话压缩摘要]";
+
+function isCompressionSummaryMessage(message: ChatMessage): boolean {
+  if (message.role !== "assistant") return false;
+  const text = message.content ?? "";
+  if (text.startsWith(COMPRESSION_SUMMARY_PREFIX)) return true;
+  if (Array.isArray(message.parts)) {
+    return message.parts.some(
+      (part) => part.type === "text" && part.text.startsWith(COMPRESSION_SUMMARY_PREFIX),
+    );
+  }
+  return false;
+}
+
 export function hydrateMessages(
   baseMessages: ChatMessage[],
   thoughts?: string[],
   toolCalls?: ToolCallRecord[]
 ): ChatMessage[] {
-  if (!baseMessages.length) {
-    return baseMessages;
+  const filtered = baseMessages.filter((m) => !isCompressionSummaryMessage(m));
+  if (!filtered.length) {
+    return filtered;
   }
 
-  const assistantMessages = baseMessages.filter((message) => message.role === 'assistant');
+  const assistantMessages = filtered.filter((message) => message.role === 'assistant');
   const hasStructuredParts = assistantMessages.some((message) => Array.isArray(message.parts) && message.parts.length > 0);
 
   if (hasStructuredParts) {
-    return baseMessages.map((message) => {
+    return filtered.map((message) => {
       if (message.role !== 'assistant' || !Array.isArray(message.parts)) {
         return message;
       }
@@ -157,19 +172,19 @@ export function hydrateMessages(
   }
 
   if (assistantMessages.length !== 1) {
-    return baseMessages;
+    return filtered;
   }
 
-  const lastAssistantIndex = [...baseMessages]
+  const lastAssistantIndex = [...filtered]
     .map((message, index) => ({ message, index }))
     .reverse()
     .find(({ message }) => message.role === 'assistant')?.index;
 
   if (lastAssistantIndex === undefined) {
-    return baseMessages;
+    return filtered;
   }
 
-  return baseMessages.map((message, index) => {
+  return filtered.map((message, index) => {
     if (index !== lastAssistantIndex) {
       return message;
     }

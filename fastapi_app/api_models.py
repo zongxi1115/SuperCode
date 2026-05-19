@@ -87,6 +87,41 @@ class SessionContextResponse(BaseModel):
     planSteps: list[dict[str, str]]
 
 
+class SessionContextCompressionRequest(BaseModel):
+    mode: Literal["preview", "apply"] = "preview"
+    usageThreshold: float = 0.7
+    preserveRecentMessages: int = 6
+    preserveRecentTools: int = 8
+    preserveRecentThoughts: int = 4
+    instruction: str | None = None
+
+
+class SessionContextCompressionResponse(BaseModel):
+    sessionId: str
+    mode: Literal["preview", "apply"]
+    applied: bool
+    summary: str
+    usageRatio: float
+    usageThreshold: float
+    sourceMessageCount: int
+    sourceToolCount: int
+    sourceThoughtCount: int
+    preservedMessageCount: int
+    preservedToolCount: int
+    preservedThoughtCount: int
+    originalEstimatedTokens: int
+    maxTokens: int
+    compressedEstimatedTokens: int
+    savedEstimatedTokens: int
+    usedFallback: bool = False
+    skippedReason: str | None = None
+    updatedContext: SessionContextResponse | None = None
+
+
+class SessionRestoreRequest(BaseModel):
+    messageId: str
+
+
 class CreateSessionRequest(BaseModel):
     workspace: str | None = None
     model: str | None = None

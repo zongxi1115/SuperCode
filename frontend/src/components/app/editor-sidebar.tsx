@@ -28,6 +28,8 @@ type PreviewConsoleLog = {
   timestamp: Date;
 };
 
+type PreviewAccessState = 'unknown' | 'same-origin' | 'cross-origin';
+
 function getElementSelector(el: HTMLElement): string {
   const parts: string[] = [];
   let current: HTMLElement | null = el;
@@ -78,6 +80,9 @@ export function EditorSidebar({
   const cleanupRef = useRef<(() => void) | null>(null);
   const detachConsoleRef = useRef<(() => void) | null>(null);
   const [consoleLogs, setConsoleLogs] = useState<PreviewConsoleLog[]>([]);
+  const [previewAccessState, setPreviewAccessState] = useState<PreviewAccessState>('unknown');
+  const previewAccessStateRef = useRef<PreviewAccessState>('unknown');
+  const crossOriginNoticeShownRef = useRef(false);
 
   const pushConsoleLog = useCallback((level: PreviewConsoleLog['level'], message: string) => {
     setConsoleLogs((prev) => [
@@ -94,12 +99,66 @@ export function EditorSidebar({
     setConsoleLogs([]);
   }, []);
 
+  const setPreviewAccess = useCallback((next: PreviewAccessState) => {
+    if (previewAccessStateRef.current === next) {
+      return;
+    }
+    previewAccessStateRef.current = next;
+    setPreviewAccessState(next);
+  }, []);
+
+  const resetSelectModeState = useCallback(() => {
+    setIsSelectMode(false);
+    cleanupRef.current = null;
+  }, []);
+
+  const markCrossOrigin = useCallback((error?: unknown) => {
+    setPreviewAccess('cross-origin');
+    resetSelectModeState();
+
+    if (!crossOriginNoticeShownRef.current) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : '浏览器同源策略阻止了 iframe DOM 访问';
+      pushConsoleLog('warn', `当前预览是跨域页面，无法直接选择元素或捕获控制台输出：${message}`);
+      crossOriginNoticeShownRef.current = true;
+    }
+
+    return null;
+  }, [pushConsoleLog, resetSelectModeState, setPreviewAccess]);
+
+  const resolveIframeDocument = useCallback(() => {
+    const iframe = iframeRef.current;
+    if (!iframe) {
+      return null;
+    }
+
+    try {
+      const doc = iframe.contentWindow?.document;
+      if (!doc) {
+        return null;
+      }
+
+      // Touch the DOM so cross-origin access fails here instead of later in event setup.
+      void doc.documentElement;
+      setPreviewAccess('same-origin');
+      crossOriginNoticeShownRef.current = false;
+      return doc;
+    } catch (error) {
+      return markCrossOrigin(error);
+    }
+  }, [markCrossOrigin, setPreviewAccess]);
+
   const handleRefresh = useCallback(() => {
     if (iframeRef.current) {
       resetConsoleLogs();
+      crossOriginNoticeShownRef.current = false;
+      setPreviewAccess('unknown');
+      resetSelectModeState();
       iframeRef.current.src = iframeRef.current.src;
     }
-  }, [resetConsoleLogs]);
+  }, [resetConsoleLogs, resetSelectModeState, setPreviewAccess]);
 
   const handleOpenInNewTab = useCallback(() => {
     if (url) {
@@ -108,13 +167,16 @@ export function EditorSidebar({
   }, [url]);
 
   const cancelSelectMode = useCallback(() => {
-    if (!iframeRef.current?.contentDocument) return;
-    const doc = iframeRef.current.contentDocument;
+    const doc = resolveIframeDocument();
+    if (!doc) {
+      resetSelectModeState();
+      return;
+    }
     doc.querySelectorAll('.__highlight-hover').forEach((el) => el.classList.remove('__highlight-hover'));
     doc.querySelectorAll('.__highlight-selected').forEach((el) => el.classList.remove('__highlight-selected'));
     cleanupRef.current?.();
     cleanupRef.current = null;
-  }, []);
+  }, [resetSelectModeState, resolveIframeDocument]);
 
   const attachConsoleCapture = useCallback(() => {
     detachConsoleRef.current?.();
@@ -125,12 +187,18 @@ export function EditorSidebar({
       return;
     }
 
+    const doc = resolveIframeDocument();
+    if (!doc) {
+      return;
+    }
+
     try {
       const win = iframe.contentWindow;
       if (!win) {
         return;
       }
 
+      void doc.head;
       const originalConsole = {
         log: win.console.log,
         warn: win.console.warn,
@@ -193,11 +261,9 @@ export function EditorSidebar({
         win.removeEventListener('unhandledrejection', handleRejection);
       };
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : '无法访问预览页控制台';
-      pushConsoleLog('warn', `当前预览可能是跨域页面，无法捕获控制台输出：${message}`);
+      markCrossOrigin(error);
     }
-  }, [pushConsoleLog]);
+  }, [markCrossOrigin, resolveIframeDocument]);
 
   useEffect(() => {
     const iframe = iframeRef.current;
@@ -206,6 +272,9 @@ export function EditorSidebar({
     }
 
     const handleLoad = () => {
+      crossOriginNoticeShownRef.current = false;
+      setPreviewAccess('unknown');
+      resetSelectModeState();
       resetConsoleLogs();
       attachConsoleCapture();
     };
@@ -214,7 +283,7 @@ export function EditorSidebar({
     return () => {
       iframe.removeEventListener('load', handleLoad);
     };
-  }, [attachConsoleCapture, isOpen, resetConsoleLogs, url]);
+  }, [attachConsoleCapture, isOpen, resetConsoleLogs, resetSelectModeState, setPreviewAccess, url]);
 
   useEffect(() => {
     return () => {
@@ -228,9 +297,15 @@ export function EditorSidebar({
     cancelSelectMode();
   }, [cancelSelectMode, isOpen]);
 
+  const handleUnavailableSelect = useCallback(() => {
+    markCrossOrigin(new Error('浏览器同源策略阻止访问跨域 iframe 的 DOM'));
+  }, [markCrossOrigin]);
+
   const handleSelectElement = useCallback(() => {
-    if (!iframeRef.current?.contentDocument) return;
-    const doc = iframeRef.current.contentDocument;
+    const doc = resolveIframeDocument();
+    if (!doc) {
+      return;
+    }
     setIsSelectMode(true);
 
     const style = doc.createElement('style');
@@ -293,7 +368,20 @@ export function EditorSidebar({
     doc.addEventListener('mouseout', handleMouseOut, true);
     doc.addEventListener('click', handleClick, true);
     doc.addEventListener('keydown', handleKeyDown, true);
-  }, [onSelectElement, cancelSelectMode]);
+  }, [onSelectElement, cancelSelectMode, resolveIframeDocument]);
+
+  const selectTooltip = isSelectMode
+    ? '取消选择'
+    : previewAccessState === 'cross-origin'
+      ? '跨域页面暂不支持直接选择元素'
+      : previewAccessState === 'unknown'
+        ? '页面加载完成后可选择元素'
+        : '选择元素';
+
+  const selectButtonClassName = [
+    isSelectMode ? 'bg-primary/15 text-primary' : '',
+    !isSelectMode && previewAccessState === 'cross-origin' ? 'opacity-50' : '',
+  ].filter(Boolean).join(' ');
 
   return (
     <>
@@ -323,9 +411,15 @@ export function EditorSidebar({
                 </WebPreviewNavigationButton>
                 <WebPreviewUrl />
                 <WebPreviewNavigationButton
-                  tooltip={isSelectMode ? '取消选择' : '选择元素'}
-                  onClick={isSelectMode ? cancelSelectMode : handleSelectElement}
-                  className={isSelectMode ? 'bg-primary/15 text-primary' : ''}
+                  tooltip={selectTooltip}
+                  onClick={
+                    isSelectMode
+                      ? cancelSelectMode
+                      : previewAccessState === 'cross-origin'
+                        ? handleUnavailableSelect
+                        : handleSelectElement
+                  }
+                  className={selectButtonClassName}
                 >
                   <MousePointerClick className="w-4 h-4" />
                 </WebPreviewNavigationButton>

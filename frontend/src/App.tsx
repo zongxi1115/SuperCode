@@ -11,6 +11,7 @@ import type {
   AppSettings,
   ChatMessage,
   CodeChangeRecord,
+  CompletionActionKey,
   ContentBlock,
   DirectoryNode,
   FileTreeNode,
@@ -19,6 +20,7 @@ import type {
   ModelOption,
   RecentProject,
   SessionContextPayload,
+  SessionContextCompressionPayload,
   SessionHistoryItem,
   SessionPayload,
   TerminalSnapshotPayload,
@@ -43,6 +45,7 @@ import { PanelRightOpen, PanelRightClose, Settings2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 const DEFAULT_WEB_PREVIEW_URL = 'http://localhost:5173';
+const CONTEXT_COMPRESSION_USAGE_THRESHOLD = 0.7;
 
 function getPreviewUrlFromToolPayload(payload: { preview_url?: unknown; output?: unknown }) {
   if (typeof payload.preview_url === 'string' && payload.preview_url.trim()) {
@@ -107,6 +110,49 @@ function mergeCodeChanges(
   return Array.from(recordsById.values()).sort((a, b) => a.timestamp - b.timestamp);
 }
 
+async function readApiError(response: Response, fallback: string) {
+  try {
+    const text = await response.text();
+    if (text.trim()) {
+      try {
+        const data = JSON.parse(text) as { detail?: unknown; error?: unknown; message?: unknown };
+        const detail = data.detail ?? data.error ?? data.message;
+        if (typeof detail === 'string' && detail.trim()) {
+          return detail;
+        }
+      } catch {
+        return text;
+      }
+    }
+  } catch {
+    // ignore read errors
+  }
+
+  return fallback;
+}
+
+async function copyTextToClipboard(text: string) {
+  const value = text.trim();
+  if (!value) {
+    return;
+  }
+
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = value;
+  textarea.setAttribute('readonly', 'true');
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand('copy');
+  document.body.removeChild(textarea);
+}
+
 export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [codeChanges, setCodeChanges] = useState<CodeChangeRecord[]>([]);
@@ -155,6 +201,10 @@ export default function App() {
   const [visualModelProviders, setVisualModelProviders] = useState<UIModelProvider[]>([]);
   const [envModelConfigs, setEnvModelConfigs] = useState<ModelOption[]>([]);
   const [modelConfigPath, setModelConfigPath] = useState<string | null>(null);
+  const [completionActionState, setCompletionActionState] = useState<{
+    messageId: string;
+    action: CompletionActionKey;
+  } | null>(null);
   const activeRequestRef = useRef<AbortController | null>(null);
   const activeStreamSessionIdRef = useRef<string | null>(null);
   const currentSessionIdRef = useRef<string | null>(null);
@@ -411,6 +461,30 @@ export default function App() {
     setSelectedFileContent(data.selectedFileContent ?? '');
     setIsLoading(Boolean(data.isGenerating));
   }, [modelOptions]);
+
+  const fetchSessionSnapshot = useCallback(async (targetSessionId: string) => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000);
+    try {
+      const res = await fetch(`http://localhost:8000/api/sessions/${targetSessionId}`, {
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        throw new Error(await readApiError(res, '读取会话快照失败'));
+      }
+      return await res.json() as SessionPayload;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }, []);
+
+  const refreshVisibleSessionSnapshot = useCallback(async (targetSessionId: string) => {
+    const data = await fetchSessionSnapshot(targetSessionId);
+    if (currentSessionIdRef.current === targetSessionId) {
+      syncVisibleSessionSnapshot(data);
+    }
+    return data;
+  }, [fetchSessionSnapshot, syncVisibleSessionSnapshot]);
 
   const applySessionPayload = useCallback((data: SessionPayload) => {
     setSessionId(data.sessionId);
@@ -818,18 +892,7 @@ export default function App() {
       setIsSessionBooting(true);
       setSessionError(null);
       try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 30000);
-
-        const res = await fetch(`http://localhost:8000/api/sessions/${targetSessionId}`, {
-          signal: controller.signal,
-        });
-        clearTimeout(timeoutId);
-
-        if (!res.ok) {
-          throw new Error('恢复历史会话失败');
-        }
-        const data: SessionPayload = await res.json();
+        const data = await fetchSessionSnapshot(targetSessionId);
         applySessionPayload(data);
       } catch (error) {
         console.error(error);
@@ -842,7 +905,7 @@ export default function App() {
         setIsSessionBooting(false);
       }
     },
-    [applySessionPayload, sessionId]
+    [applySessionPayload, fetchSessionSnapshot, sessionId]
   );
 
   const handleModelChange = useCallback(
@@ -1917,6 +1980,140 @@ export default function App() {
     setIsLoading(false);
   }, [sessionId, stopManagedProcesses]);
 
+  const handleCopyAssistantMessage = useCallback(async (message: ChatMessage) => {
+    if (message.role !== 'assistant' || !message.content.trim()) {
+      return;
+    }
+    try {
+      await copyTextToClipboard(message.content);
+    } catch (error) {
+      console.error(error);
+    }
+  }, []);
+
+  const handleCompressConversation = useCallback(
+    async (message: ChatMessage) => {
+      if (!sessionId) {
+        return;
+      }
+
+      setCompletionActionState({ messageId: message.id, action: 'compress' });
+      try {
+        const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/context/compress`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            mode: 'apply',
+            usageThreshold: CONTEXT_COMPRESSION_USAGE_THRESHOLD,
+          }),
+        });
+        const data = await res.json() as SessionContextCompressionPayload | { detail?: string };
+        if (!res.ok) {
+          throw new Error(String((data as { detail?: string }).detail ?? '压缩会话失败'));
+        }
+        if (!(data as SessionContextCompressionPayload).applied) {
+          return;
+        }
+
+        await refreshVisibleSessionSnapshot(sessionId);
+        if ((data as SessionContextCompressionPayload).updatedContext) {
+          setSessionContext((data as SessionContextCompressionPayload).updatedContext ?? null);
+        } else {
+          await loadSessionContext({ silent: true, targetSessionId: sessionId });
+        }
+        await loadSessionHistory();
+      } catch (error) {
+        console.error(error);
+      } finally {
+        setCompletionActionState(null);
+      }
+    },
+    [loadSessionContext, loadSessionHistory, refreshVisibleSessionSnapshot, sessionId]
+  );
+
+  const handleForkConversation = useCallback(
+    async (message: ChatMessage) => {
+      if (!sessionId) {
+        return;
+      }
+
+      setCompletionActionState({ messageId: message.id, action: 'fork' });
+      try {
+        const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/fork`, {
+          method: 'POST',
+        });
+        if (!res.ok) {
+          throw new Error(await readApiError(res, '派生分支失败'));
+        }
+        const data = await res.json() as SessionPayload;
+        applySessionPayload(data);
+        await loadSessionHistory();
+        await loadSessionContext({ silent: true, targetSessionId: data.sessionId });
+      } catch (error) {
+        console.error(error);
+      } finally {
+        setCompletionActionState(null);
+      }
+    },
+    [applySessionPayload, loadSessionContext, loadSessionHistory, sessionId]
+  );
+
+  const handleRestoreConversation = useCallback(
+    async (message: ChatMessage) => {
+      if (!sessionId || message.role !== 'assistant' || !message.id) {
+        return;
+      }
+
+      setCompletionActionState({ messageId: message.id, action: 'restore' });
+      try {
+        const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/restore`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messageId: message.id }),
+        });
+        if (!res.ok) {
+          throw new Error(await readApiError(res, '还原对话失败'));
+        }
+        const data = await res.json() as SessionPayload;
+        syncVisibleSessionSnapshot(data);
+        await loadSessionContext({ silent: true, targetSessionId: sessionId });
+        await loadSessionHistory();
+      } catch (error) {
+        console.error(error);
+      } finally {
+        setCompletionActionState(null);
+      }
+    },
+    [loadSessionContext, loadSessionHistory, sessionId, syncVisibleSessionSnapshot]
+  );
+
+  const handleCompletionAction = useCallback(
+    (action: CompletionActionKey, message: ChatMessage) => {
+      switch (action) {
+        case 'copy':
+          void handleCopyAssistantMessage(message);
+          break;
+        case 'compress':
+          void handleCompressConversation(message);
+          break;
+        case 'fork':
+          void handleForkConversation(message);
+          break;
+        case 'restore':
+          void handleRestoreConversation(message);
+          break;
+        default:
+          break;
+      }
+    },
+    [
+      handleCompressConversation,
+      handleCopyAssistantMessage,
+      handleForkConversation,
+      handleRestoreConversation,
+    ]
+  );
+
   const toggleSidebar = useCallback(() => {
     setIsSidebarCollapsed((prev) => !prev);
   }, []);
@@ -2059,6 +2256,8 @@ export default function App() {
         onAgentModeChange={setSelectedAgentMode}
         elementAttachments={elementAttachments}
         onRemoveElementAttachment={(id) => setElementAttachments((prev) => prev.filter((e) => e.id !== id))}
+        onCompletionAction={handleCompletionAction}
+        activeCompletionAction={completionActionState}
         />
       </div>
       {!isRightPanelCollapsed && (

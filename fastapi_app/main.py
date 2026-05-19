@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager, suppress
 import signal
 
 import asyncio
+from copy import deepcopy
 import difflib
 import json
 import os
@@ -18,11 +19,11 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 
 try:
     from winpty import PtyProcess
@@ -51,9 +52,12 @@ from fastapi_app.api_models import (
     ModelConfigPayload,
     PlanSubmitRequest,
     SessionContextMessage,
+    SessionContextCompressionRequest,
+    SessionContextCompressionResponse,
     SessionContextResponse,
     SessionContextTool,
     SessionHistoryItem,
+    SessionRestoreRequest,
     SwitchModelRequest,
     TerminalControlRequest,
     ModelConfigPayload,
@@ -84,6 +88,7 @@ from fastapi_app.session_history import (
     chunk_text,
     clear_assistant_text_part,
     ensure_user_message_recorded,
+    extract_message_thought_text,
     extract_preview_url,
     extract_terminal_output,
     finalize_plan_steps,
@@ -137,6 +142,15 @@ DEFAULT_OPEN_FILES = [
 ]
 MAX_CODE_CHANGE_RECORDS = 300
 MAX_CODE_CHANGE_DIFF_LINES = 80
+CONTEXT_COMPRESSION_SUMMARY_PREFIX = "[会话压缩摘要]"
+DEFAULT_CONTEXT_COMPRESSION_USAGE_THRESHOLD = 0.7
+DEFAULT_CONTEXT_COMPRESSION_RECENT_MESSAGES = 6
+DEFAULT_CONTEXT_COMPRESSION_RECENT_TOOLS = 8
+DEFAULT_CONTEXT_COMPRESSION_RECENT_THOUGHTS = 4
+MAX_CONTEXT_COMPRESSION_SOURCE_MESSAGES = 24
+MAX_CONTEXT_COMPRESSION_SOURCE_TOOLS = 20
+MAX_CONTEXT_COMPRESSION_SOURCE_THOUGHTS = 10
+MAX_CONTEXT_COMPRESSION_SOURCE_CODE_CHANGES = 8
 
 
 def _resolve_state_db_path() -> Path:
@@ -385,6 +399,16 @@ class UISession:
         return "还没有消息内容"
 
 
+@dataclass(slots=True)
+class ContextCompressionSlices:
+    archived_messages: list[dict[str, Any]]
+    preserved_messages: list[dict[str, Any]]
+    archived_tools: list[dict[str, Any]]
+    preserved_tools: list[dict[str, Any]]
+    archived_thoughts: list[str]
+    preserved_thoughts: list[str]
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     def _cleanup_sessions() -> None:
@@ -400,13 +424,40 @@ async def lifespan(app: FastAPI):
     _cleanup_sessions()
 
 
-app = FastAPI(title="SuperCode Agent UI API", lifespan=lifespan)
+app = FastAPI(
+    title="SuperCode Agent UI API",
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    lifespan=lifespan,
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.get("/scalar", include_in_schema=False)
+def scalar_docs():
+    return HTMLResponse("""
+<!doctype html>
+<html>
+  <head>
+    <title>SuperCode API Docs</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+  </head>
+  <body>
+    <script
+      id="api-reference"
+      data-url="/openapi.json"
+      src="https://cdn.jsdelivr.net/npm/@scalar/api-reference">
+    </script>
+  </body>
+</html>
+""")
 
 _sessions: dict[str, UISession] = {}
 
@@ -1106,6 +1157,7 @@ def hydrate_session_from_state(state: PersistedSessionState) -> UISession:
         chat_session=chat_session,
         history_messages=state.history_messages,
         history_tools=state.history_tools,
+        code_changes=state.code_changes,
         thoughts=state.thoughts,
         created_at=state.created_at,
         updated_at=state.updated_at,
@@ -2499,6 +2551,47 @@ async def get_session_context(session_id: str) -> JSONResponse:
     return JSONResponse(session.context_snapshot().model_dump())
 
 
+@app.post("/api/sessions/{session_id}/context/compress")
+async def compress_session_context_endpoint(
+    session_id: str,
+    request: SessionContextCompressionRequest,
+) -> JSONResponse:
+    session = require_session(session_id)
+    if request.mode == "apply":
+        if session.is_generating:
+            raise HTTPException(status_code=409, detail="会话正在生成内容，暂时不能压缩上下文")
+        if _session_has_pending_context_interaction(session):
+            raise HTTPException(status_code=409, detail="当前存在待处理交互，暂时不能压缩上下文")
+    response = await asyncio.to_thread(compress_session_context, session, request)
+    return JSONResponse(response.model_dump())
+
+
+@app.post("/api/sessions/{session_id}/fork")
+async def fork_session_endpoint(session_id: str) -> JSONResponse:
+    session = require_session(session_id)
+    if session.is_generating:
+        raise HTTPException(status_code=409, detail="会话正在生成内容，暂时不能派生分支")
+    if _session_has_pending_context_interaction(session):
+        raise HTTPException(status_code=409, detail="当前存在待处理交互，暂时不能派生分支")
+    forked_session = await asyncio.to_thread(fork_session_from_current, session)
+    snapshot = await asyncio.to_thread(forked_session.snapshot)
+    return JSONResponse(snapshot.model_dump())
+
+
+@app.post("/api/sessions/{session_id}/restore")
+async def restore_session_endpoint(
+    session_id: str,
+    request: SessionRestoreRequest,
+) -> JSONResponse:
+    session = require_session(session_id)
+    if session.is_generating:
+        raise HTTPException(status_code=409, detail="会话正在生成内容，暂时不能还原对话")
+    if _session_has_pending_context_interaction(session):
+        raise HTTPException(status_code=409, detail="当前存在待处理交互，暂时不能还原对话")
+    snapshot = await asyncio.to_thread(restore_session_to_message, session, request.messageId)
+    return JSONResponse(snapshot.model_dump())
+
+
 @app.get("/api/sessions/{session_id}/terminal")
 async def get_session_terminal(
     session_id: str,
@@ -3626,20 +3719,735 @@ def list_workspace_options() -> list[dict[str, str]]:
     return list_workspace_options_impl(DEFAULT_WORKSPACE)
 
 
-def estimate_session_tokens(session: UISession) -> int:
+def _session_has_pending_context_interaction(session: UISession) -> bool:
+    return any(
+        (
+            session.pending_user_input_requests,
+            session.pending_connect_requests,
+            session.pending_delete_confirmations,
+            session.pending_commit_confirmations,
+            session.pending_tag_confirmations,
+        )
+    )
+
+
+def _clone_deploy_connection_manager(session: UISession) -> DeployConnectionManager:
+    manager = DeployConnectionManager(workspace=resolve_workspace_path(session.workspace))
+    for connection in session.deploy_connection_manager.export_state().values():
+        if isinstance(connection, dict):
+            manager.register_connection(deepcopy(connection))
+    return manager
+
+
+def _rebuild_chat_session_for_existing_history(
+    *,
+    session_id: str,
+    workspace: str,
+    env_file: str | None,
+    agent_type: str,
+    reasoning_effort: str | None,
+    history_messages: list[dict[str, Any]],
+    history_tools: list[dict[str, Any]],
+    deploy_connection_manager: DeployConnectionManager,
+    phase: str,
+    selected_file_path: str | None,
+    open_files: list[str],
+    terminal_output: str,
+    preview_url: str,
+    code_changes: list[dict[str, Any]],
+    thoughts: list[str],
+    plan_steps: list[dict[str, str]],
+    plan_state: dict[str, Any],
+    deploy_state: dict[str, Any],
+    startup_error: str | None,
+    mode: str,
+) -> UISession:
+    chat_session, model_name, build_error, env_file_used, resolved_reasoning_effort = build_chat_session(
+        workspace,
+        env_file,
+        agent_type=agent_type,
+        reasoning_effort=reasoning_effort,
+    )
+    interactive_command_session = InteractiveCommandSession(
+        workspace=resolve_workspace_path(workspace)
+    )
+    session = UISession(
+        session_id=session_id,
+        model=model_name if chat_session is not None else "Demo",
+        reasoning_effort=resolved_reasoning_effort if chat_session is not None else reasoning_effort,
+        workspace=workspace,
+        mode="agent" if chat_session is not None else mode,
+        agent_type=agent_type,
+        phase=phase,
+        is_generating=False,
+        startup_error=startup_error if chat_session is not None else (build_error or startup_error),
+        env_file=env_file_used or env_file,
+        selected_file_path=selected_file_path,
+        open_files=deepcopy(open_files),
+        terminal_output=terminal_output,
+        preview_url=preview_url or DEFAULT_BROWSER_PREVIEW_URL,
+        terminal_runtime=TerminalRuntime(workspace=workspace),
+        interactive_command_session=interactive_command_session,
+        chat_session=chat_session,
+        history_messages=deepcopy(history_messages),
+        history_tools=deepcopy(history_tools),
+        code_changes=deepcopy(code_changes),
+        thoughts=deepcopy(thoughts),
+        plan_steps=deepcopy(plan_steps),
+        plan_state=deepcopy(plan_state),
+        deploy_connection_manager=deploy_connection_manager,
+        deploy_state=deepcopy(deploy_state),
+    )
+    if session.chat_session is not None:
+        seed_chat_session_history(session.chat_session, session.history_messages, session.history_tools)
+    if session.chat_session is not None and isinstance(session.chat_session.agent, CodingAgent):
+        attach_agent_runtime_metadata(
+            session.chat_session.agent,
+            session_id=session.session_id,
+            interactive_command_session=interactive_command_session,
+            cancel_event=session.cancel_event,
+            deploy_connection_manager=deploy_connection_manager,
+        )
+        sync_session_runtime_state_for_agent(session)
+    return session
+
+
+def fork_session_from_current(session: UISession) -> UISession:
+    new_session_id = uuid.uuid4().hex
+    deploy_connection_manager = _clone_deploy_connection_manager(session)
+    forked_session = _rebuild_chat_session_for_existing_history(
+        session_id=new_session_id,
+        workspace=session.workspace,
+        env_file=session.env_file,
+        agent_type=session.agent_type,
+        reasoning_effort=session.reasoning_effort,
+        history_messages=session.history_messages,
+        history_tools=session.history_tools,
+        deploy_connection_manager=deploy_connection_manager,
+        phase=session.phase,
+        selected_file_path=session.selected_file_path,
+        open_files=session.open_files,
+        terminal_output=session.terminal_output,
+        preview_url=session.preview_url,
+        code_changes=session.code_changes,
+        thoughts=session.thoughts,
+        plan_steps=session.plan_steps,
+        plan_state=session.plan_state,
+        deploy_state=session.deploy_state,
+        startup_error=session.startup_error,
+        mode=session.mode,
+    )
+    forked_session.created_at = int(time.time() * 1000)
+    forked_session.updated_at = forked_session.created_at
+    refresh_session_runtime_state(forked_session)
+    sync_session_runtime_state_for_agent(forked_session)
+    _sessions[forked_session.session_id] = forked_session
+    persist_session_state(forked_session)
+    return forked_session
+
+
+def _collect_tool_call_ids_from_messages(messages: list[dict[str, Any]]) -> set[str]:
+    tool_ids: set[str] = set()
+    for message in messages:
+        raw_tool_calls = message.get("toolCalls")
+        if isinstance(raw_tool_calls, list):
+            for raw_tool_call in raw_tool_calls:
+                if not isinstance(raw_tool_call, dict):
+                    continue
+                tool_id = str(raw_tool_call.get("id") or "").strip()
+                if tool_id:
+                    tool_ids.add(tool_id)
+        raw_parts = message.get("parts")
+        if not isinstance(raw_parts, list):
+            continue
+        for part in raw_parts:
+            if not isinstance(part, dict):
+                continue
+            raw_tool_call = part.get("toolCall")
+            if not isinstance(raw_tool_call, dict):
+                continue
+            tool_id = str(raw_tool_call.get("id") or "").strip()
+            if tool_id:
+                tool_ids.add(tool_id)
+    return tool_ids
+
+
+def _collect_assistant_message_ids(messages: list[dict[str, Any]]) -> set[str]:
+    return {
+        str(message.get("id") or "").strip()
+        for message in messages
+        if str(message.get("role", "")) == "assistant" and str(message.get("id") or "").strip()
+    }
+
+
+def _rebuild_thoughts_from_history_messages(messages: list[dict[str, Any]]) -> list[str]:
+    thoughts: list[str] = []
+    for message in messages:
+        if str(message.get("role", "")) != "assistant":
+            continue
+        thought_text = extract_message_thought_text(message)
+        if thought_text:
+            thoughts.append(thought_text)
+    return thoughts
+
+
+def _filter_code_changes_for_restored_history(
+    code_changes: list[dict[str, Any]],
+    retained_assistant_ids: set[str],
+    removed_assistant_ids: set[str],
+    retained_tool_ids: set[str],
+    removed_tool_ids: set[str],
+) -> list[dict[str, Any]]:
+    filtered: list[dict[str, Any]] = []
+    for change in code_changes:
+        assistant_id = str(change.get("assistantId") or "").strip()
+        tool_call_id = str(change.get("toolCallId") or "").strip()
+        if assistant_id and assistant_id in removed_assistant_ids:
+            continue
+        if tool_call_id and tool_call_id in removed_tool_ids:
+            continue
+        if assistant_id and retained_assistant_ids and assistant_id not in retained_assistant_ids and assistant_id in removed_assistant_ids:
+            continue
+        if tool_call_id and retained_tool_ids and tool_call_id not in retained_tool_ids and tool_call_id in removed_tool_ids:
+            continue
+        filtered.append(deepcopy(change))
+    return filtered
+
+
+def restore_session_to_message(session: UISession, message_id: str) -> CreateSessionResponse:
+    target_message_id = str(message_id or "").strip()
+    if not target_message_id:
+        raise HTTPException(status_code=400, detail="messageId 不能为空")
+
+    target_index = next(
+        (
+            index
+            for index, message in enumerate(session.history_messages)
+            if str(message.get("id") or "").strip() == target_message_id
+        ),
+        -1,
+    )
+    if target_index < 0:
+        raise HTTPException(status_code=404, detail="未找到对应的消息")
+
+    target_message = session.history_messages[target_index]
+    if str(target_message.get("role", "")) != "assistant":
+        raise HTTPException(status_code=400, detail="只能还原到助手消息")
+
+    kept_messages = deepcopy(session.history_messages[: target_index + 1])
+    removed_messages = session.history_messages[target_index + 1 :]
+    retained_tool_ids = _collect_tool_call_ids_from_messages(kept_messages)
+    removed_tool_ids = _collect_tool_call_ids_from_messages(removed_messages)
+    retained_assistant_ids = _collect_assistant_message_ids(kept_messages)
+    removed_assistant_ids = _collect_assistant_message_ids(removed_messages)
+    kept_tools = [
+        deepcopy(tool)
+        for tool in session.history_tools
+        if str(tool.get("id") or "").strip() in retained_tool_ids
+    ]
+    kept_thoughts = _rebuild_thoughts_from_history_messages(kept_messages)
+    kept_code_changes = _filter_code_changes_for_restored_history(
+        session.code_changes,
+        retained_assistant_ids=retained_assistant_ids,
+        removed_assistant_ids=removed_assistant_ids,
+        retained_tool_ids=retained_tool_ids,
+        removed_tool_ids=removed_tool_ids,
+    )
+
+    session.history_messages = kept_messages
+    session.history_tools = kept_tools
+    session.thoughts = kept_thoughts
+    session.code_changes = kept_code_changes
+    session.pending_user_input_requests.clear()
+    session.pending_connect_requests.clear()
+    session.pending_delete_confirmations.clear()
+    session.pending_commit_confirmations.clear()
+    session.pending_tag_confirmations.clear()
+    set_session_phase(session, "idle")
+    if session.chat_session is not None:
+        session.chat_session.clear()
+        seed_chat_session_history(session.chat_session, session.history_messages, session.history_tools)
+        sync_session_runtime_state_for_agent(session)
+    session.touch()
+    return session.snapshot()
+
+
+def _clamp_non_negative_int(value: int | None, default: int) -> int:
+    try:
+        normalized = int(value if value is not None else default)
+    except (TypeError, ValueError):
+        return default
+    return max(0, normalized)
+
+
+def _clamp_unit_float(value: float | None, default: float) -> float:
+    try:
+        normalized = float(value if value is not None else default)
+    except (TypeError, ValueError):
+        return default
+    return min(max(normalized, 0.0), 1.0)
+
+
+def _slice_items_for_summary(items: list[Any], head_count: int, tail_count: int) -> list[Any]:
+    if len(items) <= head_count + tail_count:
+        return list(items)
+    head = list(items[:head_count])
+    tail = list(items[-tail_count:]) if tail_count > 0 else []
+    return head + tail
+
+
+def _compact_unknown(value: Any, limit: int = 220) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        text = value
+    else:
+        try:
+            text = json.dumps(value, ensure_ascii=False)
+        except TypeError:
+            text = str(value)
+    return compact_text(text, limit)
+
+
+def _slice_context_for_compression(
+    session: UISession,
+    request: SessionContextCompressionRequest,
+) -> ContextCompressionSlices:
+    preserve_recent_messages = _clamp_non_negative_int(
+        request.preserveRecentMessages,
+        DEFAULT_CONTEXT_COMPRESSION_RECENT_MESSAGES,
+    )
+    preserve_recent_tools = _clamp_non_negative_int(
+        request.preserveRecentTools,
+        DEFAULT_CONTEXT_COMPRESSION_RECENT_TOOLS,
+    )
+    preserve_recent_thoughts = _clamp_non_negative_int(
+        request.preserveRecentThoughts,
+        DEFAULT_CONTEXT_COMPRESSION_RECENT_THOUGHTS,
+    )
+
+    if preserve_recent_messages > 0:
+        archived_messages = list(session.history_messages[:-preserve_recent_messages])
+        preserved_messages = list(session.history_messages[-preserve_recent_messages:])
+    else:
+        archived_messages = list(session.history_messages)
+        preserved_messages = []
+
+    if preserve_recent_tools > 0:
+        archived_tools = list(session.history_tools[:-preserve_recent_tools])
+        preserved_tools = list(session.history_tools[-preserve_recent_tools:])
+    else:
+        archived_tools = list(session.history_tools)
+        preserved_tools = []
+
+    if preserve_recent_thoughts > 0:
+        archived_thoughts = list(session.thoughts[:-preserve_recent_thoughts])
+        preserved_thoughts = list(session.thoughts[-preserve_recent_thoughts:])
+    else:
+        archived_thoughts = list(session.thoughts)
+        preserved_thoughts = []
+
+    return ContextCompressionSlices(
+        archived_messages=archived_messages,
+        preserved_messages=preserved_messages,
+        archived_tools=archived_tools,
+        preserved_tools=preserved_tools,
+        archived_thoughts=archived_thoughts,
+        preserved_thoughts=preserved_thoughts,
+    )
+
+
+def _format_messages_for_context_compression(messages: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    sampled_messages = _slice_items_for_summary(
+        messages,
+        head_count=4,
+        tail_count=max(MAX_CONTEXT_COMPRESSION_SOURCE_MESSAGES - 4, 0),
+    )
+    for message in sampled_messages:
+        role = "用户" if str(message.get("role", "")) == "user" else "助手"
+        content = compact_text(str(message.get("content", "")), 220)
+        if content:
+            lines.append(f"- {role}: {content}")
+        thought_text = compact_text(str(message.get("thoughts", "")), 160)
+        if thought_text:
+            lines.append(f"  思考: {thought_text}")
+    return "\n".join(lines) or "- 无"
+
+
+def _format_tools_for_context_compression(tools: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    sampled_tools = _slice_items_for_summary(
+        tools,
+        head_count=2,
+        tail_count=max(MAX_CONTEXT_COMPRESSION_SOURCE_TOOLS - 2, 0),
+    )
+    for tool in sampled_tools:
+        name = str(tool.get("name") or "unknown")
+        state = str(tool.get("state") or "unknown")
+        arguments = _compact_unknown(tool.get("arguments"), 160)
+        output = _compact_unknown(tool.get("output"), 180)
+        segments = [f"- {name} [{state}]"]
+        if arguments:
+            segments.append(f"args={arguments}")
+        if output:
+            segments.append(f"output={output}")
+        lines.append(" ".join(segments))
+    return "\n".join(lines) or "- 无"
+
+
+def _format_thoughts_for_context_compression(thoughts: list[str]) -> str:
+    lines = [
+        f"- {compact_text(thought, 220)}"
+        for thought in _slice_items_for_summary(
+            thoughts,
+            head_count=2,
+            tail_count=max(MAX_CONTEXT_COMPRESSION_SOURCE_THOUGHTS - 2, 0),
+        )
+        if compact_text(thought, 220)
+    ]
+    return "\n".join(lines) or "- 无"
+
+
+def _format_code_changes_for_context_compression(code_changes: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    for change in code_changes[-MAX_CONTEXT_COMPRESSION_SOURCE_CODE_CHANGES:]:
+        path = str(change.get("path") or "")
+        action = str(change.get("action") or "modified")
+        summary = compact_text(str(change.get("summary") or ""), 160)
+        lines.append(f"- {action} {path}: {summary or '无摘要'}")
+    return "\n".join(lines) or "- 无"
+
+
+def _format_plan_steps_for_context_compression(plan_steps: list[dict[str, str]]) -> str:
+    lines: list[str] = []
+    for step in plan_steps:
+        title = str(step.get("title") or "").strip()
+        if not title:
+            continue
+        status = str(step.get("status") or "pending")
+        description = compact_text(str(step.get("description") or ""), 120)
+        if description:
+            lines.append(f"- [{status}] {title}: {description}")
+        else:
+            lines.append(f"- [{status}] {title}")
+    return "\n".join(lines) or "- 无"
+
+
+def build_context_compression_source(
+    session: UISession,
+    slices: ContextCompressionSlices,
+    instruction: str | None = None,
+) -> str:
+    first_user_message = next(
+        (
+            compact_text(str(message.get("content", "")), 240)
+            for message in session.history_messages
+            if str(message.get("role", "")) == "user" and str(message.get("content", "")).strip()
+        ),
+        "无",
+    )
+    sections = [
+        f"工作区: {session.workspace}",
+        f"会话模式: {session.agent_type} / {session.phase}",
+        f"当前文件: {session.selected_file_path or '无'}",
+        f"打开标签: {', '.join(session.open_files[-6:]) or '无'}",
+        f"初始用户目标: {first_user_message}",
+        f"当前会话预览: {session.summary_preview()}",
+        "计划步骤:\n" + _format_plan_steps_for_context_compression(session.plan_steps),
+        "待压缩消息:\n" + _format_messages_for_context_compression(slices.archived_messages),
+        "待压缩工具调用:\n" + _format_tools_for_context_compression(slices.archived_tools),
+        "待压缩思考:\n" + _format_thoughts_for_context_compression(slices.archived_thoughts),
+        "最近代码变更:\n" + _format_code_changes_for_context_compression(session.code_changes),
+    ]
+    if instruction and instruction.strip():
+        sections.append(f"额外要求: {instruction.strip()}")
+    return "\n\n".join(section for section in sections if section.strip())
+
+
+def _clean_context_compression_summary(summary: str) -> str:
+    cleaned = summary.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    cleaned = cleaned.replace(CONTEXT_COMPRESSION_SUMMARY_PREFIX, "").strip()
+    cleaned_lines = [line.rstrip() for line in cleaned.splitlines() if line.strip()]
+    cleaned = "\n".join(cleaned_lines).strip()
+    if len(cleaned) > 2_400:
+        cleaned = f"{cleaned[:2400].rstrip()}..."
+    return cleaned
+
+
+def _build_context_compression_fallback_summary(
+    session: UISession,
+    slices: ContextCompressionSlices,
+) -> str:
+    goal = next(
+        (
+            compact_text(str(message.get("content", "")), 180)
+            for message in session.history_messages
+            if str(message.get("role", "")) == "user" and str(message.get("content", "")).strip()
+        ),
+        session.summary_title(),
+    )
+    completed_items = [
+        f"- {str(change.get('action') or 'modified')} {str(change.get('path') or '')}: "
+        f"{compact_text(str(change.get('summary') or ''), 120) or '已修改'}"
+        for change in session.code_changes[-4:]
+    ]
+    if not completed_items:
+        completed_items = [
+            f"- {str(tool.get('name') or 'tool')} [{str(tool.get('state') or 'unknown')}]"
+            for tool in slices.archived_tools[-3:]
+        ] or ["- 暂无明确已完成事项"]
+    pending_items = [
+        f"- {str(step.get('title') or '').strip()}"
+        for step in session.plan_steps
+        if str(step.get("status") or "pending") != "completed" and str(step.get("title") or "").strip()
+    ] or ["- 保持当前最近对话继续推进"]
+    context_items = [
+        f"- 工作区: {session.workspace}",
+        f"- 当前文件: {session.selected_file_path or '无'}",
+        f"- 打开标签: {', '.join(session.open_files[-4:]) or '无'}",
+    ]
+    if session.history_tools:
+        latest_tool = session.history_tools[-1]
+        context_items.append(
+            f"- 最近工具: {str(latest_tool.get('name') or 'tool')} [{str(latest_tool.get('state') or 'unknown')}]"
+        )
+    return "\n".join(
+        [
+            "## 目标",
+            goal,
+            "",
+            "## 已完成",
+            *completed_items,
+            "",
+            "## 待继续",
+            *pending_items,
+            "",
+            "## 关键上下文",
+            *context_items,
+        ]
+    ).strip()
+
+
+def _summarize_context_with_model(
+    session: UISession,
+    source_text: str,
+    instruction: str | None = None,
+) -> str:
+    model_ref = session.env_file
+    if not model_ref:
+        try:
+            model_ref = resolve_model_option(session.model, None)["envFile"]
+        except HTTPException:
+            model_ref = None
+    config, _normalized_model_ref = build_agent_config(ROOT, model_ref)
+    if session.reasoning_effort:
+        config.reasoning_effort = normalize_reasoning_effort(session.reasoning_effort)
+    client = OpenAICompatibleClient(config)
+    user_prompt = "\n\n".join(
+        part
+        for part in [
+            "请把下面这段 AI 编码会话的较早上下文压缩成一份后续可继续工作的摘要。",
+            "要求：1. 保留用户目标、约束、已完成改动、未完成事项、关键文件和风险；"
+            "2. 不要编造；3. 使用中文；4. 用简洁小标题组织；5. 不要输出代码块。",
+            f"额外要求：{instruction.strip()}" if instruction and instruction.strip() else "",
+            source_text,
+        ]
+        if part
+    )
+    summary = client.chat_messages(
+        [
+            {"role": "system", "content": "你是一个负责为编码代理压缩历史上下文的摘要助手。"},
+            {"role": "user", "content": user_prompt},
+        ]
+    )
+    return _clean_context_compression_summary(summary)
+
+
+def _build_context_compression_message(summary: str) -> dict[str, Any]:
+    cleaned_summary = _clean_context_compression_summary(summary)
+    content = (
+        cleaned_summary
+        if cleaned_summary.startswith(CONTEXT_COMPRESSION_SUMMARY_PREFIX)
+        else f"{CONTEXT_COMPRESSION_SUMMARY_PREFIX}\n{cleaned_summary}"
+    )
+    return {
+        "id": uuid.uuid4().hex,
+        "role": "assistant",
+        "content": content,
+        "parts": [{"type": "text", "text": content}],
+    }
+
+
+def _estimate_context_tokens_from_parts(
+    history_messages: list[dict[str, Any]],
+    thoughts: list[str],
+    history_tools: list[dict[str, Any]],
+    workspace: str,
+) -> int:
     total_chars = 0
-    for message in session.history_messages:
+    for message in history_messages:
         total_chars += len(str(message.get("content", "")))
-    for thought in session.thoughts:
+    for thought in thoughts:
         total_chars += len(thought)
-    for tool in session.history_tools:
+    for tool in history_tools:
         total_chars += len(str(tool.get("name", "")))
         total_chars += len(json.dumps(tool.get("arguments", {}), ensure_ascii=False))
         output = tool.get("output")
         if output is not None:
-            total_chars += len(str(output))
-    total_chars += len(session.workspace)
+            if isinstance(output, str):
+                total_chars += len(output)
+            else:
+                try:
+                    total_chars += len(json.dumps(output, ensure_ascii=False))
+                except TypeError:
+                    total_chars += len(str(output))
+    total_chars += len(workspace)
     return max(1, total_chars // 4)
+
+
+def compress_session_context(
+    session: UISession,
+    request: SessionContextCompressionRequest,
+    summarizer: Callable[[UISession, str, str | None], str] | None = None,
+) -> SessionContextCompressionResponse:
+    slices = _slice_context_for_compression(session, request)
+    original_estimated_tokens = estimate_session_tokens(session)
+    max_tokens = max(infer_model_context_limit(session.model), 1)
+    usage_threshold = _clamp_unit_float(
+        request.usageThreshold,
+        DEFAULT_CONTEXT_COMPRESSION_USAGE_THRESHOLD,
+    )
+    usage_ratio = min(max(original_estimated_tokens / max_tokens, 0.0), 1.0)
+    source_text = build_context_compression_source(session, slices, request.instruction)
+    has_archived_context = any(
+        (
+            slices.archived_messages,
+            slices.archived_tools,
+            slices.archived_thoughts,
+        )
+    )
+    if usage_ratio < usage_threshold:
+        return SessionContextCompressionResponse(
+            sessionId=session.session_id,
+            mode=request.mode,
+            applied=False,
+            summary="",
+            usageRatio=usage_ratio,
+            usageThreshold=usage_threshold,
+            sourceMessageCount=len(slices.archived_messages),
+            sourceToolCount=len(slices.archived_tools),
+            sourceThoughtCount=len(slices.archived_thoughts),
+            preservedMessageCount=len(slices.preserved_messages),
+            preservedToolCount=len(slices.preserved_tools),
+            preservedThoughtCount=len(slices.preserved_thoughts),
+            originalEstimatedTokens=original_estimated_tokens,
+            maxTokens=max_tokens,
+            compressedEstimatedTokens=original_estimated_tokens,
+            savedEstimatedTokens=0,
+            usedFallback=False,
+            skippedReason="usage_below_threshold",
+            updatedContext=None,
+        )
+    if not has_archived_context:
+        return SessionContextCompressionResponse(
+            sessionId=session.session_id,
+            mode=request.mode,
+            applied=False,
+            summary="",
+            usageRatio=usage_ratio,
+            usageThreshold=usage_threshold,
+            sourceMessageCount=0,
+            sourceToolCount=0,
+            sourceThoughtCount=0,
+            preservedMessageCount=len(slices.preserved_messages),
+            preservedToolCount=len(slices.preserved_tools),
+            preservedThoughtCount=len(slices.preserved_thoughts),
+            originalEstimatedTokens=original_estimated_tokens,
+            maxTokens=max_tokens,
+            compressedEstimatedTokens=original_estimated_tokens,
+            savedEstimatedTokens=0,
+            usedFallback=False,
+            skippedReason="no_archived_context",
+            updatedContext=None,
+        )
+
+    used_fallback = False
+    summary = ""
+    try:
+        summary = (
+            summarizer(session, source_text, request.instruction)
+            if summarizer is not None
+            else _summarize_context_with_model(session, source_text, request.instruction)
+        )
+    except Exception:
+        used_fallback = True
+        summary = ""
+    if not summary:
+        used_fallback = True
+        summary = _build_context_compression_fallback_summary(session, slices)
+    cleaned_summary = _clean_context_compression_summary(summary) or _build_context_compression_fallback_summary(session, slices)
+
+    summary_message = _build_context_compression_message(cleaned_summary)
+    projected_history_messages = (
+        [summary_message, *slices.preserved_messages]
+    )
+    projected_history_tools = slices.preserved_tools
+    projected_thoughts = slices.preserved_thoughts
+    compressed_estimated_tokens = _estimate_context_tokens_from_parts(
+        projected_history_messages,
+        projected_thoughts,
+        projected_history_tools,
+        session.workspace,
+    )
+    saved_estimated_tokens = max(original_estimated_tokens - compressed_estimated_tokens, 0)
+
+    applied = request.mode == "apply"
+    updated_context: SessionContextResponse | None = None
+    if applied:
+        session.history_messages = projected_history_messages
+        session.history_tools = projected_history_tools
+        session.thoughts = projected_thoughts
+        if session.chat_session is not None:
+            session.chat_session.clear()
+            seed_chat_session_history(session.chat_session, session.history_messages, session.history_tools)
+            sync_session_runtime_state_for_agent(session)
+        session.touch()
+        updated_context = session.context_snapshot()
+
+    return SessionContextCompressionResponse(
+        sessionId=session.session_id,
+        mode=request.mode,
+        applied=applied,
+        summary=cleaned_summary,
+        usageRatio=usage_ratio,
+        usageThreshold=usage_threshold,
+        sourceMessageCount=len(slices.archived_messages),
+        sourceToolCount=len(slices.archived_tools),
+        sourceThoughtCount=len(slices.archived_thoughts),
+        preservedMessageCount=len(slices.preserved_messages),
+        preservedToolCount=len(slices.preserved_tools),
+        preservedThoughtCount=len(slices.preserved_thoughts),
+        originalEstimatedTokens=original_estimated_tokens,
+        maxTokens=max_tokens,
+        compressedEstimatedTokens=compressed_estimated_tokens,
+        savedEstimatedTokens=saved_estimated_tokens,
+        usedFallback=used_fallback,
+        skippedReason=None,
+        updatedContext=updated_context,
+    )
+
+
+def estimate_session_tokens(session: UISession) -> int:
+    return _estimate_context_tokens_from_parts(
+        session.history_messages,
+        session.thoughts,
+        session.history_tools,
+        session.workspace,
+    )
 
 
 def infer_model_context_limit(model_name: str) -> int:

@@ -139,6 +139,7 @@ import type {
   AgentMode,
   ChatMessage,
   CodeChangeRecord,
+  CompletionActionKey,
   ContentBlock,
   ModelOption,
   PlanStep,
@@ -174,6 +175,8 @@ import {
   RotateCcw,
   Archive,
   Eye,
+  Loader2,
+  Check,
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import type React from "react";
@@ -219,6 +222,8 @@ type ChatPanelProps = {
   onAgentModeChange: (mode: AgentMode) => void;
   onModelChange: (modelId: string) => void;
   onReasoningEffortChange: (reasoningEffort: string) => void;
+  onCompletionAction?: (action: CompletionActionKey, message: ChatMessage) => void;
+  activeCompletionAction?: { messageId: string; action: CompletionActionKey } | null;
   elementAttachments?: ElementAttachment[];
   onRemoveElementAttachment?: (id: string) => void;
 };
@@ -1706,6 +1711,7 @@ const personaLabels: Record<PersonaState, string> = {
 };
 
 const PERSONA_LAYOUT_ID = "chat-persona-shell";
+const CONTEXT_COMPRESSION_USAGE_THRESHOLD = 0.7;
 
 const PersonaShell = memo(function PersonaShell({
   state,
@@ -1733,7 +1739,22 @@ const COMPLETION_ACTIONS = [
   { icon: RocketIcon, label: "发布版本", key: "publish" },
 ] as const;
 
-const CompletionActionToolbar = memo(function CompletionActionToolbar() {
+const DEFAULT_DISABLED_COMPLETION_ACTIONS: Record<CompletionActionKey, boolean> = {
+  copy: false,
+  "view-changes": true,
+  compress: false,
+  fork: false,
+  restore: false,
+  publish: true,
+};
+
+const CompletionActionToolbar = memo(function CompletionActionToolbar({
+  onAction,
+  disabledActions,
+}: {
+  onAction?: (action: CompletionActionKey) => void;
+  disabledActions?: Partial<Record<CompletionActionKey, boolean>>;
+}) {
   return (
     <div className="flex items-center gap-0.5 py-1">
       <TooltipProvider delayDuration={300}>
@@ -1743,13 +1764,18 @@ const CompletionActionToolbar = memo(function CompletionActionToolbar() {
               <Button
                 size="icon-sm"
                 variant="ghost"
-                disabled={action.key === "compress"}
+                disabled={Boolean(
+                  DEFAULT_DISABLED_COMPLETION_ACTIONS[action.key] ||
+                    disabledActions?.[action.key] ||
+                    !onAction,
+                )}
                 className={cn(
                   "shrink-0",
-                  action.key === "compress"
+                  DEFAULT_DISABLED_COMPLETION_ACTIONS[action.key] || disabledActions?.[action.key] || !onAction
                     ? "text-muted-foreground/40"
                     : "text-muted-foreground hover:text-foreground hover:bg-accent/60",
                 )}
+                onClick={() => onAction?.(action.key)}
               >
                 <action.icon className="size-3.5" />
               </Button>
@@ -1764,12 +1790,60 @@ const CompletionActionToolbar = memo(function CompletionActionToolbar() {
   );
 });
 
+const CompressStatusLine = memo(function CompressStatusLine({
+  status,
+}: {
+  status: "compressing" | "compressed";
+}) {
+  const isDone = status === "compressed";
+
+  return (
+    <div className="flex items-center gap-2 py-1.5 text-xs text-muted-foreground">
+      <div className="h-px flex-1 bg-border" />
+      <AnimatePresence mode="wait">
+        {!isDone ? (
+          <motion.span
+            key="compressing"
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -6 }}
+            transition={{ duration: 0.2 }}
+            className="flex shrink-0 items-center gap-1.5"
+          >
+            <Loader2 className="size-3 animate-spin" />
+            正在压缩
+          </motion.span>
+        ) : (
+          <motion.span
+            key="compressed"
+            initial={{ y: 14, opacity: 0, rotateX: -90 }}
+            animate={{ y: 0, opacity: 1, rotateX: 0 }}
+            transition={{ type: "spring", stiffness: 500, damping: 30 }}
+            className="flex shrink-0 items-center gap-1.5 text-emerald-600 dark:text-emerald-400"
+            style={{ perspective: 200 }}
+          >
+            <Check className="size-3" />
+            已压缩上下文
+          </motion.span>
+        )}
+      </AnimatePresence>
+      <div className="h-px flex-1 bg-border" />
+    </div>
+  );
+});
+
 const PersonaRail = memo(function PersonaRail({
   state,
   isCompleted,
+  message,
+  onCompletionAction,
+  disabledActions,
 }: {
   state: PersonaState;
   isCompleted: boolean;
+  message?: ChatMessage | null;
+  onCompletionAction?: (action: CompletionActionKey, message: ChatMessage) => void;
+  disabledActions?: Partial<Record<CompletionActionKey, boolean>>;
 }) {
   const [isHovered, setIsHovered] = useState(false);
   const activeState: PersonaState = isCompleted && isHovered ? "asleep" : state;
@@ -1791,24 +1865,14 @@ const PersonaRail = memo(function PersonaRail({
             transition={{ type: "spring", stiffness: 400, damping: 30 }}
             className="flex items-center gap-0.5"
           >
-            <TooltipProvider delayDuration={300}>
-              {COMPLETION_ACTIONS.map((action) => (
-                <Tooltip key={action.key}>
-                  <TooltipTrigger asChild>
-                    <Button
-                      size="icon-sm"
-                      variant="ghost"
-                      className="shrink-0 text-muted-foreground hover:text-foreground"
-                    >
-                      <action.icon className="size-3.5" />
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent side="top" sideOffset={4}>
-                    {action.label}
-                  </TooltipContent>
-                </Tooltip>
-              ))}
-            </TooltipProvider>
+            <CompletionActionToolbar
+              disabledActions={disabledActions}
+              onAction={
+                message && onCompletionAction
+                  ? (action) => onCompletionAction(action, message)
+                  : undefined
+              }
+            />
           </motion.div>
         )}
       </AnimatePresence>
@@ -1845,6 +1909,10 @@ const MessageList = memo(function MessageList({
   onResolveConnectInput,
   onResolvePlanQuestionsInput,
   onViewPlan,
+  onCompletionAction,
+  activeCompletionAction,
+  compressedMessageIds,
+  canCompress,
 }: {
   sessionId: string | null;
   isLoading: boolean;
@@ -1861,6 +1929,10 @@ const MessageList = memo(function MessageList({
     answers: QuizSubmission,
   ) => void | Promise<void>;
   onViewPlan?: (title: string, markdown: string) => void;
+  onCompletionAction?: (action: CompletionActionKey, message: ChatMessage) => void;
+  activeCompletionAction?: { messageId: string; action: CompletionActionKey } | null;
+  compressedMessageIds: Set<string>;
+  canCompress: boolean;
 }) {
   const statusLabelMap: Record<ToolCallRecord["state"], string> = {
     running: "执行中",
@@ -2128,6 +2200,9 @@ const MessageList = memo(function MessageList({
         const isLast = idx === messages.length - 1;
         const isLastAssistant = idx === lastAssistantIdx;
         const showInlineActions = msg.role === "assistant" && !isLastAssistant;
+        const isCompressing = activeCompletionAction?.action === "compress" && activeCompletionAction.messageId === msg.id;
+        const isCompressed = compressedMessageIds.has(msg.id ?? "");
+        const compressStatus: "compressing" | "compressed" | null = isCompressing ? "compressing" : isCompressed ? "compressed" : null;
         return (
           <Message key={msg.id || idx} from={msg.role}>
             <MessageContent>
@@ -2142,7 +2217,24 @@ const MessageList = memo(function MessageList({
                 })
               ) : null}
             </MessageContent>
-            {showInlineActions && <CompletionActionToolbar />}
+            {msg.role === "assistant" && compressStatus && (
+              <CompressStatusLine status={compressStatus} />
+            )}
+            {showInlineActions && (
+              <CompletionActionToolbar
+                disabledActions={{
+                  copy: !msg.content.trim(),
+                  compress: isLoading || Boolean(activeCompletionAction) || isCompressed || !canCompress,
+                  fork: isLoading || Boolean(activeCompletionAction),
+                  restore: isLoading || Boolean(activeCompletionAction),
+                }}
+                onAction={
+                  onCompletionAction
+                    ? (action) => onCompletionAction(action, msg)
+                    : undefined
+                }
+              />
+            )}
           </Message>
         );
       })}
@@ -2160,6 +2252,9 @@ const ChatStreamBody = memo(function ChatStreamBody({
   onResolvePlanQuestionsInput,
   onViewPlan,
   personaState,
+  onCompletionAction,
+  activeCompletionAction,
+  canCompress,
 }: {
   sessionId: string | null;
   isLoading: boolean;
@@ -2177,10 +2272,39 @@ const ChatStreamBody = memo(function ChatStreamBody({
   ) => void | Promise<void>;
   onViewPlan?: (title: string, markdown: string) => void;
   personaState: PersonaState;
+  onCompletionAction?: (action: CompletionActionKey, message: ChatMessage) => void;
+  activeCompletionAction?: { messageId: string; action: CompletionActionKey } | null;
+  canCompress: boolean;
 }) {
+  const [compressedMessageIds, setCompressedMessageIds] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (!activeCompletionAction) return;
+    if (activeCompletionAction.action !== "compress") return;
+    if (compressedMessageIds.has(activeCompletionAction.messageId)) return;
+    const timer = setTimeout(() => {
+      setCompressedMessageIds((prev) => {
+        const next = new Set(prev);
+        next.add(activeCompletionAction.messageId);
+        return next;
+      });
+    }, 1200);
+    return () => clearTimeout(timer);
+  }, [activeCompletionAction, compressedMessageIds]);
+
   if (messages.length === 0) {
     return <EmptyStateWithPersona state={personaState} />;
   }
+
+  const lastAssistantMessage =
+    [...messages].reverse().find((message) => message.role === "assistant") ?? null;
+
+  const lastCompressStatus: "compressing" | "compressed" | null =
+    activeCompletionAction?.action === "compress" && activeCompletionAction.messageId === lastAssistantMessage?.id
+      ? "compressing"
+      : lastAssistantMessage?.id && compressedMessageIds.has(lastAssistantMessage.id)
+        ? "compressed"
+        : null;
 
   return (
     <>
@@ -2193,8 +2317,23 @@ const ChatStreamBody = memo(function ChatStreamBody({
         onResolveConnectInput={onResolveConnectInput}
         onResolvePlanQuestionsInput={onResolvePlanQuestionsInput}
         onViewPlan={onViewPlan}
+        onCompletionAction={onCompletionAction}
+        activeCompletionAction={activeCompletionAction}
+        compressedMessageIds={compressedMessageIds}
+        canCompress={canCompress}
       />
-      <PersonaRail state={personaState} isCompleted={!isLoading && messages.length > 0} />
+      <PersonaRail
+        state={personaState}
+        isCompleted={!isLoading && messages.length > 0}
+        message={lastAssistantMessage}
+        onCompletionAction={onCompletionAction}
+        disabledActions={{
+          copy: !lastAssistantMessage?.content?.trim(),
+          compress: isLoading || Boolean(activeCompletionAction) || Boolean(lastCompressStatus) || !canCompress,
+          fork: isLoading || Boolean(activeCompletionAction),
+          restore: true,
+        }}
+      />
     </>
   );
 });
@@ -2250,6 +2389,8 @@ export function ChatPanel({
   onAgentModeChange,
   onModelChange,
   onReasoningEffortChange,
+  onCompletionAction,
+  activeCompletionAction,
   elementAttachments = [],
   onRemoveElementAttachment,
 }: ChatPanelProps) {
@@ -2303,6 +2444,9 @@ export function ChatPanel({
     }
     return null;
   }, [messages]);
+  const canCompress =
+    ((contextData?.estimatedTokens ?? 0) / Math.max(contextData?.maxTokens ?? 1, 1)) >=
+    CONTEXT_COMPRESSION_USAGE_THRESHOLD;
 
   const hasDraftInput = isFocused && input.trim().length > 0;
   const hasStreamingResponse =
@@ -2348,6 +2492,9 @@ export function ChatPanel({
             onResolvePlanQuestionsInput={onResolvePlanQuestionsInput}
             onViewPlan={onViewPlan}
             personaState={personaState}
+            onCompletionAction={onCompletionAction}
+            activeCompletionAction={activeCompletionAction}
+            canCompress={canCompress}
           />
         </ConversationContent>
       </Conversation>

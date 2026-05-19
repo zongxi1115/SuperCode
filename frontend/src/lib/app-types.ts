@@ -66,6 +66,14 @@ export type ChatMessage = {
   parts?: ContentBlock[];
 };
 
+export type CompletionActionKey =
+  | 'copy'
+  | 'view-changes'
+  | 'compress'
+  | 'fork'
+  | 'restore'
+  | 'publish';
+
 export type FileTreeNode = {
   path: string;
   name: string;
@@ -127,6 +135,28 @@ export type SessionContextPayload = {
   codeChangeCount: number;
   recentCodeChanges: CodeChangeRecord[];
   planSteps: PlanStep[];
+};
+
+export type SessionContextCompressionPayload = {
+  sessionId: string;
+  mode: 'preview' | 'apply';
+  applied: boolean;
+  summary: string;
+  usageRatio: number;
+  usageThreshold: number;
+  sourceMessageCount: number;
+  sourceToolCount: number;
+  sourceThoughtCount: number;
+  preservedMessageCount: number;
+  preservedToolCount: number;
+  preservedThoughtCount: number;
+  originalEstimatedTokens: number;
+  maxTokens: number;
+  compressedEstimatedTokens: number;
+  savedEstimatedTokens: number;
+  usedFallback?: boolean;
+  skippedReason?: string | null;
+  updatedContext?: SessionContextPayload | null;
 };
 
 export type SessionPayload = {
