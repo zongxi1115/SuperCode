@@ -1,5 +1,6 @@
 import { ContextViewer } from "@/components/app/context-viewer";
 import { CodeChangePanel } from "@/components/app/code-change-panel";
+import { cn } from "@/lib/utils";
 import {
   Conversation,
   ConversationContent,
@@ -82,13 +83,6 @@ import {
   MessageContent,
   MessageResponse,
 } from "@/components/ai-elements/message";
-import {
-  Sheet,
-  SheetContent as SheetContentRoot,
-  SheetHeader as SheetHeaderRoot,
-  SheetTitle as SheetTitleRoot,
-  SheetDescription as SheetDescriptionRoot,
-} from "@/components/ui/sheet";
 import { Persona, type PersonaState } from "@/components/ai-elements/persona";
 import {
   Queue,
@@ -125,6 +119,12 @@ import {
   ModelSelectorLogo,
 } from "@/components/ai-elements/model-selector";
 import { Button } from "@/components/ui/button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import {
   Select,
   SelectContent,
@@ -170,6 +170,9 @@ import {
   LightbulbIcon,
   Code2Icon,
   RocketIcon,
+  Copy,
+  RotateCcw,
+  Archive,
   Eye,
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
@@ -211,6 +214,7 @@ type ChatPanelProps = {
     toolCallId: string,
     answers: QuizSubmission,
   ) => void | Promise<void>;
+  onViewPlan?: (title: string, markdown: string) => void;
   agentMode: AgentMode;
   onAgentModeChange: (mode: AgentMode) => void;
   onModelChange: (modelId: string) => void;
@@ -839,6 +843,7 @@ function ToolBody({
   onResolveGitConfirmation,
   onResolveConnectInput,
   onResolvePlanQuestionsInput,
+  onViewPlan,
 }: {
   toolCall: ToolCallRecord;
   sessionId: string | null;
@@ -853,6 +858,7 @@ function ToolBody({
     toolCallId: string,
     answers: QuizSubmission,
   ) => void | Promise<void>;
+  onViewPlan?: (title: string, markdown: string) => void;
 }) {
   const args = toolCall.arguments || {};
   const output =
@@ -1012,6 +1018,7 @@ function ToolBody({
         summary={typeof message === "string" ? message : planSummary}
         keySteps={planKeySteps}
         detailMarkdown={detailMd}
+        onViewPlan={onViewPlan}
       />
     );
   }
@@ -1447,64 +1454,47 @@ function PlanDraftCard({
   summary,
   keySteps,
   detailMarkdown,
+  onViewPlan,
 }: {
   title: string;
   summary: string;
   keySteps: string[];
   detailMarkdown: string;
+  onViewPlan?: (title: string, markdown: string) => void;
 }) {
-  const [isDetailOpen, setIsDetailOpen] = useState(false);
-
   return (
-    <>
-      <Plan defaultOpen={false}>
-        <PlanHeader>
-          <div>
-            <div className="mb-4 flex items-center gap-2">
-              <FileText className="size-4" />
-              <PlanTitle>{title || "计划草案"}</PlanTitle>
-            </div>
-            {summary && <PlanDescription>{summary}</PlanDescription>}
+    <Plan defaultOpen={false}>
+      <PlanHeader>
+        <div>
+          <div className="mb-4 flex items-center gap-2">
+            <FileText className="size-4" />
+            <PlanTitle>{title || "计划草案"}</PlanTitle>
           </div>
-          <PlanTrigger />
-        </PlanHeader>
-        <PlanContent>
-          <div className="py-1 text-sm text-muted-foreground">
-            {summary && <p>{summary}</p>}
-            {keySteps.length > 0 && (
-              <ul className="mt-2 list-inside list-disc space-y-0.5">
-                {keySteps.map((step, idx) => (
-                  <li key={idx}>{step}</li>
-                ))}
-              </ul>
-            )}
-          </div>
-        </PlanContent>
-        <PlanFooter className="justify-end">
-          <PlanAction>
-            <Button size="sm" variant="outline" onClick={() => setIsDetailOpen(true)}>
-              <Eye className="mr-1.5 size-3.5" />
-              查看
-            </Button>
-          </PlanAction>
-        </PlanFooter>
-      </Plan>
-
-      <Sheet open={isDetailOpen} onOpenChange={setIsDetailOpen}>
-        <SheetContentRoot side="right" className="w-full sm:max-w-lg overflow-y-auto p-0">
-          <SheetHeaderRoot className="px-6 pt-6 pb-4 border-b">
-            <SheetTitleRoot className="flex items-center gap-2">
-              <FileText className="size-4" />
-              {title || "计划草案"}
-            </SheetTitleRoot>
-            {summary && <SheetDescriptionRoot>{summary}</SheetDescriptionRoot>}
-          </SheetHeaderRoot>
-          <div className="flex-1 overflow-y-auto px-6 py-4">
-            <MessageResponse>{detailMarkdown}</MessageResponse>
-          </div>
-        </SheetContentRoot>
-      </Sheet>
-    </>
+          {summary && <PlanDescription>{summary}</PlanDescription>}
+        </div>
+        <PlanTrigger />
+      </PlanHeader>
+      <PlanContent>
+        <div className="py-1 text-sm text-muted-foreground">
+          {summary && <p>{summary}</p>}
+          {keySteps.length > 0 && (
+            <ul className="mt-2 list-inside list-disc space-y-0.5">
+              {keySteps.map((step, idx) => (
+                <li key={idx}>{step}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </PlanContent>
+      <PlanFooter className="justify-end">
+        <PlanAction>
+          <Button size="sm" onClick={() => onViewPlan?.(title || "计划草案", detailMarkdown)}>
+            <Eye className="mr-1.5 size-3.5" />
+            查看详情
+          </Button>
+        </PlanAction>
+      </PlanFooter>
+    </Plan>
   );
 }
 
@@ -1573,8 +1563,10 @@ function PlanToggle({
 
 function DataPartView({
   part,
+  onViewPlan,
 }: {
   part: Extract<ContentBlock, { type: "data" }>;
+  onViewPlan?: (title: string, markdown: string) => void;
 }) {
   const data = part.data;
 
@@ -1642,7 +1634,7 @@ function DataPartView({
       draftKeySteps.length > 0 ? ["## 关键步骤", "", ...draftKeySteps.map((s, i) => `${i + 1}. ${s}`)].join("\n") : "",
     ].join("\n");
 
-    return <PlanDraftCard title={draftTitle} summary={draftSummary} keySteps={draftKeySteps} detailMarkdown={detailMd} />;
+    return <PlanDraftCard title={draftTitle} summary={draftSummary} keySteps={draftKeySteps} detailMarkdown={detailMd} onViewPlan={onViewPlan} />;
   }
 
   if (
@@ -1732,14 +1724,94 @@ const PersonaShell = memo(function PersonaShell({
   );
 });
 
+const COMPLETION_ACTIONS = [
+  { icon: Copy, label: "复制回答", key: "copy" },
+  { icon: Eye, label: "查看修改", key: "view-changes" },
+  { icon: Archive, label: "压缩会话", key: "compress" },
+  { icon: GitBranch, label: "派生分支", key: "fork" },
+  { icon: RotateCcw, label: "还原对话", key: "restore" },
+  { icon: RocketIcon, label: "发布版本", key: "publish" },
+] as const;
+
+const CompletionActionToolbar = memo(function CompletionActionToolbar() {
+  return (
+    <div className="flex items-center gap-0.5 py-1">
+      <TooltipProvider delayDuration={300}>
+        {COMPLETION_ACTIONS.map((action) => (
+          <Tooltip key={action.key}>
+            <TooltipTrigger asChild>
+              <Button
+                size="icon-sm"
+                variant="ghost"
+                disabled={action.key === "compress"}
+                className={cn(
+                  "shrink-0",
+                  action.key === "compress"
+                    ? "text-muted-foreground/40"
+                    : "text-muted-foreground hover:text-foreground hover:bg-accent/60",
+                )}
+              >
+                <action.icon className="size-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="top" sideOffset={4}>
+              {action.label}
+            </TooltipContent>
+          </Tooltip>
+        ))}
+      </TooltipProvider>
+    </div>
+  );
+});
+
 const PersonaRail = memo(function PersonaRail({
   state,
+  isCompleted,
 }: {
   state: PersonaState;
+  isCompleted: boolean;
 }) {
+  const [isHovered, setIsHovered] = useState(false);
+  const activeState: PersonaState = isCompleted && isHovered ? "asleep" : state;
+
   return (
-    <motion.div layout className="flex justify-start py-2">
-      <PersonaShell state={state} />
+    <motion.div
+      layout
+      className="flex items-center gap-2 py-2"
+      onMouseEnter={() => isCompleted && setIsHovered(true)}
+      onMouseLeave={() => setIsHovered(false)}
+    >
+      <PersonaShell state={activeState} />
+      <AnimatePresence>
+        {isCompleted && isHovered && (
+          <motion.div
+            initial={{ opacity: 0, width: 0, overflow: "hidden" }}
+            animate={{ opacity: 1, width: "auto" }}
+            exit={{ opacity: 0, width: 0, overflow: "hidden" }}
+            transition={{ type: "spring", stiffness: 400, damping: 30 }}
+            className="flex items-center gap-0.5"
+          >
+            <TooltipProvider delayDuration={300}>
+              {COMPLETION_ACTIONS.map((action) => (
+                <Tooltip key={action.key}>
+                  <TooltipTrigger asChild>
+                    <Button
+                      size="icon-sm"
+                      variant="ghost"
+                      className="shrink-0 text-muted-foreground hover:text-foreground"
+                    >
+                      <action.icon className="size-3.5" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="top" sideOffset={4}>
+                    {action.label}
+                  </TooltipContent>
+                </Tooltip>
+              ))}
+            </TooltipProvider>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </motion.div>
   );
 });
@@ -1772,6 +1844,7 @@ const MessageList = memo(function MessageList({
   onResolveGitConfirmation,
   onResolveConnectInput,
   onResolvePlanQuestionsInput,
+  onViewPlan,
 }: {
   sessionId: string | null;
   isLoading: boolean;
@@ -1787,6 +1860,7 @@ const MessageList = memo(function MessageList({
     toolCallId: string,
     answers: QuizSubmission,
   ) => void | Promise<void>;
+  onViewPlan?: (title: string, markdown: string) => void;
 }) {
   const statusLabelMap: Record<ToolCallRecord["state"], string> = {
     running: "执行中",
@@ -1824,6 +1898,7 @@ const MessageList = memo(function MessageList({
               onResolveGitConfirmation={onResolveGitConfirmation}
               onResolveConnectInput={onResolveConnectInput}
               onResolvePlanQuestionsInput={onResolvePlanQuestionsInput}
+              onViewPlan={onViewPlan}
             />
           </TaskItem>
         </TaskContent>
@@ -1951,7 +2026,7 @@ const MessageList = memo(function MessageList({
       }
 
       if (group.type === "data") {
-        return <DataPartView key={`data-${gi}`} part={group.block} />;
+        return <DataPartView key={`data-${gi}`} part={group.block} onViewPlan={onViewPlan} />;
       }
 
       if (group.type === "tools") {
@@ -2040,10 +2115,19 @@ const MessageList = memo(function MessageList({
     });
   };
 
+  const lastAssistantIdx = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === "assistant") return i;
+    }
+    return -1;
+  }, [messages]);
+
   return (
     <>
       {messages.map((msg, idx) => {
         const isLast = idx === messages.length - 1;
+        const isLastAssistant = idx === lastAssistantIdx;
+        const showInlineActions = msg.role === "assistant" && !isLastAssistant;
         return (
           <Message key={msg.id || idx} from={msg.role}>
             <MessageContent>
@@ -2058,6 +2142,7 @@ const MessageList = memo(function MessageList({
                 })
               ) : null}
             </MessageContent>
+            {showInlineActions && <CompletionActionToolbar />}
           </Message>
         );
       })}
@@ -2073,6 +2158,7 @@ const ChatStreamBody = memo(function ChatStreamBody({
   onResolveGitConfirmation,
   onResolveConnectInput,
   onResolvePlanQuestionsInput,
+  onViewPlan,
   personaState,
 }: {
   sessionId: string | null;
@@ -2089,6 +2175,7 @@ const ChatStreamBody = memo(function ChatStreamBody({
     toolCallId: string,
     answers: QuizSubmission,
   ) => void | Promise<void>;
+  onViewPlan?: (title: string, markdown: string) => void;
   personaState: PersonaState;
 }) {
   if (messages.length === 0) {
@@ -2105,8 +2192,9 @@ const ChatStreamBody = memo(function ChatStreamBody({
         onResolveGitConfirmation={onResolveGitConfirmation}
         onResolveConnectInput={onResolveConnectInput}
         onResolvePlanQuestionsInput={onResolvePlanQuestionsInput}
+        onViewPlan={onViewPlan}
       />
-      <PersonaRail state={personaState} />
+      <PersonaRail state={personaState} isCompleted={!isLoading && messages.length > 0} />
     </>
   );
 });
@@ -2157,6 +2245,7 @@ export function ChatPanel({
   onResolveGitConfirmation,
   onResolveConnectInput,
   onResolvePlanQuestionsInput,
+  onViewPlan,
   agentMode,
   onAgentModeChange,
   onModelChange,
@@ -2257,6 +2346,7 @@ export function ChatPanel({
             onResolveGitConfirmation={onResolveGitConfirmation}
             onResolveConnectInput={onResolveConnectInput}
             onResolvePlanQuestionsInput={onResolvePlanQuestionsInput}
+            onViewPlan={onViewPlan}
             personaState={personaState}
           />
         </ConversationContent>

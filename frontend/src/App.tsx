@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ChatPanel } from '@/components/app/chat-panel';
-import { EditorPanel } from '@/components/app/editor-panel';
+import { EditorPanel, type PlanData } from '@/components/app/editor-panel';
 import { ResizableHandle } from '@/components/app/resizable-handle';
 import { Sidebar } from '@/components/app/sidebar';
 import { TerminalPanel } from '@/components/app/terminal-panel';
@@ -123,6 +123,7 @@ export default function App() {
   const [isStoppingProcesses, setIsStoppingProcesses] = useState(false);
   const [selectedFileContent, setSelectedFileContent] = useState('');
   const [selectedFilePath, setSelectedFilePath] = useState('');
+  const [planData, setPlanData] = useState<PlanData | null>(null);
   const [backendMode, setBackendMode] = useState<'agent' | 'demo'>('demo');
   const [startupError, setStartupError] = useState<string | null>(null);
   const [directoryTree, setDirectoryTree] = useState<DirectoryNode[]>([]);
@@ -2053,6 +2054,7 @@ export default function App() {
         onResolveGitConfirmation={resolveGitConfirmation}
         onResolveConnectInput={resolveConnectInput}
         onResolvePlanQuestionsInput={resolvePlanQuestionsInput}
+        onViewPlan={(title, markdown) => setPlanData({ title, markdown })}
         agentMode={selectedAgentMode}
         onAgentModeChange={setSelectedAgentMode}
         elementAttachments={elementAttachments}
@@ -2085,6 +2087,11 @@ export default function App() {
               { id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, selector, html, sourceUrl: webPreviewUrl },
             ]);
           }}
+          planData={planData}
+          onPlanSave={(markdown) => {
+            if (planData) setPlanData({ ...planData, markdown });
+          }}
+          onClosePlan={() => setPlanData(null)}
         />
         <TerminalPanel
           output={terminalOutput}

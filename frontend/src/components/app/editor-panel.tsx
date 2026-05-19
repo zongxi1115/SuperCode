@@ -1,5 +1,6 @@
 import { CodeBlock } from '@/components/ai-elements/code-block';
 import { FileTree } from '@/components/ai-elements/file-tree';
+import { MessageResponse } from '@/components/ai-elements/message';
 import { EditorSidebar } from '@/components/app/editor-sidebar';
 import { EditorTools, type EditorTarget } from '@/components/app/editor-tools';
 import { renderFileTreeNodes } from '@/components/app/file-tree-renderers';
@@ -11,8 +12,13 @@ import { getFileLanguage } from '@/lib/app-utils';
 import type { FileTreeNode } from '@/lib/app-types';
 import { SiJetbrains, SiSublimetext, SiVscodium, SiZedindustries } from '@icons-pack/react-simple-icons';
 import { motion } from 'motion/react';
-import { CircleAlert, FileCode, FolderTree, PanelsTopLeft, SquareTerminal } from 'lucide-react';
+import { CircleAlert, FileCode, FolderTree, PanelsTopLeft, PencilIcon, SquareTerminal } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
+
+export type PlanData = {
+  title: string;
+  markdown: string;
+};
 
 type EditorPanelProps = {
   fileTree: FileTreeNode[];
@@ -26,6 +32,9 @@ type EditorPanelProps = {
   webPreviewUrl: string;
   onWebPreviewUrlChange: (url: string) => void;
   onSelectPreviewElement?: (html: string, selector: string) => void;
+  planData?: PlanData | null;
+  onPlanSave?: (markdown: string) => void;
+  onClosePlan?: () => void;
 };
 
 const EDITOR_FONT = 'font-mono text-[13px] leading-[20px]';
@@ -54,6 +63,9 @@ export function EditorPanel({
   webPreviewUrl,
   onWebPreviewUrlChange,
   onSelectPreviewElement,
+  planData,
+  onPlanSave,
+  onClosePlan,
 }: EditorPanelProps) {
   const [isEditing, setIsEditing] = useState(false);
   const [editContent, setEditContent] = useState('');
@@ -61,13 +73,24 @@ export function EditorPanel({
   const [fileTreeWidth, setFileTreeWidth] = useState(DEFAULT_FILE_TREE_WIDTH);
   const [isFileTreeVisible, setIsFileTreeVisible] = useState(true);
   const [editorLaunchError, setEditorLaunchError] = useState<string | null>(null);
+  const [isPlanEditing, setIsPlanEditing] = useState(false);
+  const [planEditContent, setPlanEditContent] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  const isPlanMode = Boolean(planData);
 
   useEffect(() => {
     setIsEditing(false);
     setEditContent('');
   }, [selectedFilePath]);
+
+  useEffect(() => {
+    if (planData) {
+      setIsPlanEditing(false);
+      setPlanEditContent('');
+    }
+  }, [planData]);
 
   useEffect(() => {
     if (isWebPreviewOpen) {
@@ -131,6 +154,36 @@ export function EditorPanel({
     return () => window.removeEventListener('keydown', handler);
   }, [handleSave, isEditing]);
 
+  const handleStartPlanEdit = useCallback(() => {
+    if (!planData) return;
+    setPlanEditContent(planData.markdown);
+    setIsPlanEditing(true);
+    setTimeout(() => textareaRef.current?.focus(), 50);
+  }, [planData]);
+
+  const handleCancelPlanEdit = useCallback(() => {
+    setIsPlanEditing(false);
+    setPlanEditContent('');
+  }, []);
+
+  const handleSavePlanEdit = useCallback(() => {
+    onPlanSave?.(planEditContent);
+    setIsPlanEditing(false);
+    setPlanEditContent('');
+  }, [onPlanSave, planEditContent]);
+
+  useEffect(() => {
+    if (!isPlanEditing) return;
+    const handler = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+        e.preventDefault();
+        handleSavePlanEdit();
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [handleSavePlanEdit, isPlanEditing]);
+
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Tab') {
       e.preventDefault();
@@ -139,12 +192,16 @@ export function EditorPanel({
       const end = textarea.selectionEnd;
       const value = textarea.value;
       const next = value.substring(0, start) + '  ' + value.substring(end);
-      setEditContent(next);
+      if (isPlanEditing) {
+        setPlanEditContent(next);
+      } else {
+        setEditContent(next);
+      }
       requestAnimationFrame(() => {
         textarea.selectionStart = textarea.selectionEnd = start + 2;
       });
     }
-  }, []);
+  }, [isPlanEditing]);
 
   const syncScroll = useCallback(() => {
     if (!textareaRef.current || !scrollRef.current) return;
@@ -204,6 +261,70 @@ export function EditorPanel({
                   onUrlChange={onWebPreviewUrlChange}
                   onSelectElement={onSelectPreviewElement}
                 />
+              ) : isPlanMode ? (
+                <div className="flex h-full min-h-0 w-full flex-col overflow-hidden">
+                  <div className="flex items-center justify-between border-b bg-muted/30 px-3 py-2 shrink-0">
+                    <div className="flex min-w-0 items-center gap-2 text-muted-foreground text-xs">
+                      <FileCode className="w-3.5 h-3.5 shrink-0" />
+                      <span className="truncate font-medium">{planData?.title || '计划草案'}</span>
+                      <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">计划</span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      {!isPlanEditing ? (
+                        <Button size="sm" variant="outline" className="h-7 gap-1.5 text-xs" onClick={handleStartPlanEdit}>
+                          <PencilIcon className="size-3" />
+                          编辑
+                        </Button>
+                      ) : (
+                        <>
+                          <Button size="sm" variant="outline" className="h-7 gap-1.5 text-xs" onClick={handleCancelPlanEdit}>
+                            取消
+                          </Button>
+                          <Button size="sm" className="h-7 gap-1.5 text-xs" onClick={handleSavePlanEdit}>
+                            保存
+                          </Button>
+                        </>
+                      )}
+                      <Button size="sm" variant="ghost" className="h-7 gap-1.5 text-xs" onClick={onClosePlan}>
+                        返回编辑器
+                      </Button>
+                    </div>
+                  </div>
+
+                  <div className="flex-1 min-h-0 overflow-hidden">
+                    {isPlanEditing ? (
+                      <div className="relative h-full min-h-0 overflow-hidden bg-background">
+                        <div
+                          ref={scrollRef}
+                          className="absolute inset-y-0 left-0 w-[52px] overflow-hidden border-r bg-muted/20 pointer-events-none"
+                          aria-hidden="true"
+                        >
+                          <div className={`px-2 py-4 ${EDITOR_FONT} text-right text-muted-foreground/60`}>
+                            {Array.from({ length: planEditContent.split('\n').length }, (_, i) => (
+                              <div key={i + 1} className="h-[20px] leading-[20px]">{i + 1}</div>
+                            ))}
+                          </div>
+                        </div>
+                        <textarea
+                          ref={textareaRef}
+                          value={planEditContent}
+                          onChange={(e) => setPlanEditContent(e.target.value)}
+                          onScroll={syncScroll}
+                          onKeyDown={handleKeyDown}
+                          wrap="off"
+                          className={`absolute inset-0 h-full w-full resize-none bg-transparent py-4 pr-4 pl-[68px] ${EDITOR_FONT} text-foreground outline-none whitespace-pre overflow-auto`}
+                          spellCheck={false}
+                          autoCapitalize="off"
+                          autoCorrect="off"
+                        />
+                      </div>
+                    ) : (
+                      <div className="h-full overflow-auto p-6">
+                        <MessageResponse>{planData?.markdown || ''}</MessageResponse>
+                      </div>
+                    )}
+                  </div>
+                </div>
               ) : (
                 <>
                   <div className="flex flex-1 min-w-0 min-h-0 flex-col overflow-hidden">
@@ -245,7 +366,6 @@ export function EditorPanel({
                               </div>
                             </div>
                             <textarea
-                              ref={textareaRef}
                               value={editContent}
                               onChange={(e) => setEditContent(e.target.value)}
                               onScroll={syncScroll}
