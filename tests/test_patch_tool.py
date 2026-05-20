@@ -73,6 +73,42 @@ class ApplyPatchToolTests(unittest.TestCase):
                 self.context,
             )
 
+    def test_apply_patch_can_match_unique_block_ignoring_indent_whitespace(self) -> None:
+        tool = ApplyPatchTool()
+        (self.workspace / "src" / "template.vue").write_text(
+            "<div>\n"
+            "  <section>\n"
+            "    <div class=\"course-list\">\n"
+            "      <div>row</div>\n"
+            "    </div>\n"
+            "  </section>\n"
+            "</div>\n",
+            encoding="utf-8",
+        )
+
+        result = tool.run(
+            {
+                "patch": (
+                    "*** Begin Patch\n"
+                    "*** Update File: src/template.vue\n"
+                    "@@\n"
+                    "     <div class=\"course-list\">\n"
+                    "       <div>row</div>\n"
+                    "     </div>\n"
+                    "+    <div class=\"powered-by\">Powered by zongxi</div>\n"
+                    "   </section>\n"
+                    "*** End Patch"
+                )
+            },
+            self.context,
+        )
+
+        self.assertEqual(result["files"], ["src/template.vue"])
+        self.assertIn(
+            "<div class=\"powered-by\">Powered by zongxi</div>",
+            (self.workspace / "src" / "template.vue").read_text(encoding="utf-8"),
+        )
+
 
 class DeleteFileInWorkspaceTests(unittest.TestCase):
     def test_delete_file_in_workspace_removes_target_file(self) -> None:

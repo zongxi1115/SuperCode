@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import fnmatch
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -31,6 +33,11 @@ DEFAULT_IGNORED_DIR_NAMES = {
     "venv",
 }
 READ_FILE_MAX_OUTPUT_CHARS = 5000
+LIST_FILE_DEFAULT_MAX_DEPTH = 2
+LIST_FILE_MAX_RESULTS = 200
+GLOB_MAX_RESULTS = 100
+GREP_DEFAULT_LIMIT = 100
+GREP_MAX_LIMIT = 300
 APPLY_PATCH_BEGIN = "*** Begin Patch"
 APPLY_PATCH_END = "*** End Patch"
 APPLY_PATCH_UPDATE_PREFIX = "*** Update File: "
@@ -61,8 +68,28 @@ def _parse_bool_argument(value: object) -> bool:
     return bool(value)
 
 
+def _parse_int_argument(
+    value: object,
+    *,
+    field_name: str,
+    minimum: int | None = None,
+) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} 必须是整数。") from exc
+
+    if minimum is not None and parsed < minimum:
+        raise ValueError(f"{field_name} 必须大于等于 {minimum}。")
+    return parsed
+
+
 def _should_respect_ignored_dirs(target: Path, include_ignored: bool) -> bool:
     return not include_ignored and target.name not in DEFAULT_IGNORED_DIR_NAMES
+
+
+def _relative_posix_path(path: Path, workspace: Path) -> str:
+    return str(path.relative_to(workspace)).replace("\\", "/")
 
 
 def _kill_process_tree(process: subprocess.Popen[str]) -> None:
@@ -288,6 +315,10 @@ class InteractiveCommand:
         with self.lock:
             return self.output
 
+    def snapshot_progress(self) -> tuple[str, int]:
+        with self.lock:
+            return self.output, self.reported_length
+
     def consume_delta(self) -> tuple[str, str]:
         with self.lock:
             full_output = self.output
@@ -420,8 +451,13 @@ class InteractiveCommandSession:
                 return completed_result
             active_command = self._resolve_active_command_locked(terminal_id)
 
-        active_command.mark_activity()
-        return self._await_progress(active_command, timeout, return_on_idle=False)
+        return self._await_progress(
+            active_command,
+            timeout,
+            return_on_idle=True,
+            require_new_output_for_idle=True,
+            return_on_existing_prompt=True,
+        )
 
     def close(self) -> None:
         with self.lock:
@@ -511,8 +547,11 @@ class InteractiveCommandSession:
         active_command: InteractiveCommand,
         timeout: int,
         return_on_idle: bool = True,
+        require_new_output_for_idle: bool = False,
+        return_on_existing_prompt: bool = False,
     ) -> dict[str, object]:
         deadline = time.monotonic() + timeout
+        _, start_reported_length = active_command.snapshot_progress()
 
         while True:
             if not active_command.is_alive():
@@ -533,11 +572,31 @@ class InteractiveCommandSession:
                 active_command.close_streams()
                 return result
 
+            full_output, _ = active_command.snapshot_progress()
+            saw_new_output = len(full_output) > start_reported_length
+            prompt_text = self._extract_prompt_text(full_output)
+            if prompt_text is not None and (saw_new_output or return_on_existing_prompt):
+                return self._build_result(
+                    active_command,
+                    status="running",
+                    exit_reason="awaiting_input",
+                    input_prompt=prompt_text,
+                )
+
             if return_on_idle and active_command.idle_for() >= self.idle_timeout:
-                return self._build_result(active_command, status="running")
+                if saw_new_output or not require_new_output_for_idle:
+                    return self._build_result(
+                        active_command,
+                        status="running",
+                        exit_reason="idle",
+                    )
 
             if time.monotonic() >= deadline:
-                return self._build_result(active_command, status="running")
+                return self._build_result(
+                    active_command,
+                    status="running",
+                    exit_reason="timeout",
+                )
 
             time.sleep(INTERACTIVE_POLL_SECONDS)
 
@@ -545,20 +604,31 @@ class InteractiveCommandSession:
         self,
         active_command: InteractiveCommand,
         status: str,
+        *,
+        exit_reason: str | None = None,
+        input_prompt: str | None = None,
     ) -> dict[str, object]:
         delta, full_output = active_command.consume_delta()
         managed_process = self.managed_processes.get(active_command.terminal_id)
         if managed_process is not None:
             managed_process.last_return_code = active_command.process.returncode
-        awaiting_input = status == "running" and self._looks_like_prompt(full_output)
+        resolved_input_prompt = input_prompt
+        if resolved_input_prompt is None and status == "running":
+            resolved_input_prompt = self._extract_prompt_text(full_output)
+        awaiting_input = status == "running" and resolved_input_prompt is not None
+        resolved_exit_reason = exit_reason or ("completed" if status == "completed" else "running")
         return {
             "terminal_id": active_command.terminal_id,
             "status": status,
+            "exit_reason": resolved_exit_reason,
             "command": active_command.command,
             "delta": delta,
             "full_output": full_output,
             "return_code": active_command.process.returncode,
             "awaiting_input": awaiting_input,
+            "needs_input": awaiting_input,
+            "input_prompt": resolved_input_prompt,
+            "input_request": self._build_input_request(active_command, resolved_input_prompt),
         }
 
     def _clear_finished_locked(self) -> None:
@@ -704,12 +774,28 @@ class InteractiveCommandSession:
             "processes": descendants,
         }
 
-    def _looks_like_prompt(self, full_output: str) -> bool:
-        lines = [line.strip().lower() for line in full_output.splitlines() if line.strip()]
+    def _build_input_request(
+        self,
+        active_command: InteractiveCommand,
+        input_prompt: str | None,
+    ) -> dict[str, object] | None:
+        if input_prompt is None:
+            return None
+        return {
+            "type": "text",
+            "tool": "terminal_input",
+            "terminal_id": active_command.terminal_id,
+            "prompt": input_prompt,
+            "command": active_command.command,
+        }
+
+    def _extract_prompt_text(self, full_output: str) -> str | None:
+        lines = [line.strip() for line in full_output.splitlines() if line.strip()]
         if not lines:
-            return False
+            return None
 
         last_line = lines[-1]
+        normalized_last_line = last_line.lower()
         prompt_hints = [
             "select",
             "choose",
@@ -725,11 +811,16 @@ class InteractiveCommandSession:
             "是否",
             "请选择",
         ]
-        if any(hint in last_line for hint in prompt_hints):
-            return True
-        if last_line.endswith("?"):
-            return True
-        return last_line.endswith(":")
+        if any(hint in normalized_last_line for hint in prompt_hints):
+            return last_line
+        if normalized_last_line.endswith("?"):
+            return last_line
+        if normalized_last_line.endswith(":"):
+            return last_line
+        return None
+
+    def _looks_like_prompt(self, full_output: str) -> bool:
+        return self._extract_prompt_text(full_output) is not None
 
 
 class CodingBaseTool(BaseTool):
@@ -776,14 +867,122 @@ class CodingBaseTool(BaseTool):
         return "\n".join(rendered)
 
 
+class GlobFileTool(CodingBaseTool):
+    """按 glob 模式查找文件。"""
+
+    name = "glob_file"
+    description = (
+        "按 glob 模式查找文件，参数：pattern 必填，search_path 可选默认当前目录，"
+        "include_ignored 可选默认 false，limit 可选默认 100 且最大 100。"
+        "适合先缩小文件范围，再决定是否 grep 或 read。"
+    )
+    supports_parallel = True
+    parameters_schema = {
+        "type": "object",
+        "properties": {
+            "pattern": {"type": "string"},
+            "search_path": {"type": "string"},
+            "include_ignored": {"type": "boolean"},
+            "limit": {"type": "integer"},
+        },
+        "required": ["pattern"],
+        "additionalProperties": False,
+    }
+
+    def run(self, arguments: dict[str, object], context: ToolContext) -> str:
+        pattern = str(arguments["pattern"]).strip()
+        if not pattern:
+            raise ValueError("pattern 不能为空。")
+
+        search_path = str(arguments.get("search_path", ".")).strip() or "."
+        include_ignored = _parse_bool_argument(arguments.get("include_ignored", False))
+        raw_limit = arguments.get("limit", GLOB_MAX_RESULTS)
+        limit = min(_parse_int_argument(raw_limit, field_name="limit", minimum=1), GLOB_MAX_RESULTS)
+
+        target = self._resolve_path(search_path, context)
+        if not target.exists():
+            raise FileNotFoundError(f"搜索路径不存在: {search_path}")
+
+        workspace = context.workspace.resolve()
+        respect_ignored = _should_respect_ignored_dirs(target, include_ignored)
+        matches, truncated = self._collect_matches(
+            target=target,
+            workspace=workspace,
+            search_root=target if target.is_dir() else target.parent,
+            pattern=pattern,
+            respect_ignored=respect_ignored,
+            limit=limit,
+        )
+
+        if not matches:
+            return f"未找到匹配文件: {pattern}"
+
+        rendered = [
+            f"# Search path: {search_path}",
+            f"# Pattern: {pattern}",
+            f"# Returned: {len(matches)}",
+            f"# Limit: {limit}",
+            f"# Truncated: {'true' if truncated else 'false'}",
+            *matches,
+        ]
+        if truncated:
+            rendered.append("# Note: results truncated, please narrow pattern or search_path.")
+        return "\n".join(rendered)
+
+    def _collect_matches(
+        self,
+        *,
+        target: Path,
+        workspace: Path,
+        search_root: Path,
+        pattern: str,
+        respect_ignored: bool,
+        limit: int,
+    ) -> tuple[list[str], bool]:
+        if target.is_file():
+            relative_from_root = _relative_posix_path(target, search_root)
+            if fnmatch.fnmatch(relative_from_root, pattern) or fnmatch.fnmatch(target.name, pattern):
+                return [_relative_posix_path(target, workspace)], False
+            return [], False
+
+        matches: list[str] = []
+        truncated = False
+        for child in sorted(target.iterdir(), key=lambda item: (item.is_file(), item.name.lower())):
+            if respect_ignored and child.is_dir() and child.name in DEFAULT_IGNORED_DIR_NAMES:
+                continue
+
+            if child.is_dir():
+                nested_matches, nested_truncated = self._collect_matches(
+                    target=child,
+                    workspace=workspace,
+                    search_root=search_root,
+                    pattern=pattern,
+                    respect_ignored=respect_ignored,
+                    limit=limit - len(matches),
+                )
+                matches.extend(nested_matches)
+                if nested_truncated or len(matches) >= limit:
+                    truncated = True
+                    break
+                continue
+
+            relative_from_root = _relative_posix_path(child, search_root)
+            if not (fnmatch.fnmatch(relative_from_root, pattern) or fnmatch.fnmatch(child.name, pattern)):
+                continue
+            matches.append(_relative_posix_path(child, workspace))
+            if len(matches) >= limit:
+                truncated = True
+                break
+        return matches, truncated
+
+
 class ListFileTool(CodingBaseTool):
     """列举目录内的路径。"""
 
     name = "list_file"
     description = (
-        "列举指定目录下的文件和目录路径，参数：path 可选，include_ignored 可选默认 false。"
-        "默认会跳过 node_modules、.git、dist、build、__pycache__ 等生成目录；"
-        "只有需要查看这些目录时才传 include_ignored=true。"
+        "列举指定目录下的文件和目录路径，参数：path 可选，include_ignored 可选默认 false，"
+        "max_depth 可选默认 2，limit 可选默认 200。默认只做浅层浏览，避免把整仓结构一次性塞进上下文。"
     )
     supports_parallel = True
     parameters_schema = {
@@ -791,6 +990,8 @@ class ListFileTool(CodingBaseTool):
         "properties": {
             "path": {"type": "string"},
             "include_ignored": {"type": "boolean"},
+            "max_depth": {"type": "integer"},
+            "limit": {"type": "integer"},
         },
         "additionalProperties": False,
     }
@@ -798,6 +999,10 @@ class ListFileTool(CodingBaseTool):
     def run(self, arguments: dict[str, object], context: ToolContext) -> str:
         relative_path = str(arguments.get("path", "."))
         include_ignored = _parse_bool_argument(arguments.get("include_ignored", False))
+        raw_max_depth = arguments.get("max_depth", LIST_FILE_DEFAULT_MAX_DEPTH)
+        raw_limit = arguments.get("limit", LIST_FILE_MAX_RESULTS)
+        max_depth = _parse_int_argument(raw_max_depth, field_name="max_depth", minimum=0)
+        limit = min(_parse_int_argument(raw_limit, field_name="limit", minimum=1), LIST_FILE_MAX_RESULTS)
         target = self._resolve_path(relative_path, context)
         if not target.exists():
             raise FileNotFoundError(f"目录不存在: {relative_path}")
@@ -812,11 +1017,24 @@ class ListFileTool(CodingBaseTool):
                 "# Ignored: "
                 + ", ".join(f"{name}/" for name in sorted(DEFAULT_IGNORED_DIR_NAMES))
             )
+        rendered.append(f"# Max depth: {max_depth}")
+        rendered.append(f"# Limit: {limit}")
 
-        rendered.extend(self._render_tree(target, workspace, respect_ignored))
+        tree_lines, truncated = self._render_tree(
+            target=target,
+            workspace=workspace,
+            respect_ignored=respect_ignored,
+            current_depth=1,
+            max_depth=max_depth,
+            limit=limit,
+        )
+        rendered.append(f"# Truncated: {'true' if truncated else 'false'}")
+        rendered.extend(tree_lines)
 
-        if len(rendered) == 1 or (len(rendered) == 2 and rendered[1].startswith("# Ignored:")):
+        if not tree_lines:
             rendered.append("(empty)")
+        elif truncated:
+            rendered.append("# Note: list truncated, narrow path or increase max_depth thoughtfully.")
         return "\n".join(rendered)
 
     def _render_tree(
@@ -824,35 +1042,57 @@ class ListFileTool(CodingBaseTool):
         target: Path,
         workspace: Path,
         respect_ignored: bool,
-    ) -> list[str]:
+        current_depth: int,
+        max_depth: int,
+        limit: int,
+    ) -> tuple[list[str], bool]:
         rendered: list[str] = []
         for child in sorted(target.iterdir(), key=lambda item: (item.is_file(), item.name.lower())):
+            if len(rendered) >= limit:
+                return rendered, True
             if respect_ignored and child.is_dir() and child.name in DEFAULT_IGNORED_DIR_NAMES:
                 continue
 
-            relative = str(child.relative_to(workspace)).replace("\\", "/")
+            relative = _relative_posix_path(child, workspace)
             if child.is_dir():
                 rendered.append(f"{relative}/")
-                rendered.extend(self._render_tree(child, workspace, respect_ignored))
+                if len(rendered) >= limit:
+                    return rendered, True
+                if current_depth >= max_depth:
+                    continue
+                child_lines, child_truncated = self._render_tree(
+                    target=child,
+                    workspace=workspace,
+                    respect_ignored=respect_ignored,
+                    current_depth=current_depth + 1,
+                    max_depth=max_depth,
+                    limit=limit - len(rendered),
+                )
+                rendered.extend(child_lines)
+                if child_truncated or len(rendered) >= limit:
+                    return rendered, True
             else:
                 rendered.append(relative)
-        return rendered
+        return rendered, False
 
 class ReadFileTool(CodingBaseTool):
     """读取文件并返回带行号的内容。"""
 
     name = "read_file"
     description = (
-        "读取文件内容，可传 filename、start_line、end_line，返回内容带行号。"
-        "输出里会包含 requested_range、actual_range、total_lines 和 eof 元信息。"
+        "读取文件内容，参数：filename 必填；offset、limit 可选，默认从文件开头读取；"
+        "也兼容旧参数 start_line、end_line。返回内容带行号，并附带 requested/actual range、"
+        "total_lines 和 eof 元信息。"
         f"如果返回内容超过 {READ_FILE_MAX_OUTPUT_CHARS} 个字符会直接报错，"
-        "此时必须缩小范围，改用 start_line/end_line 分段读取。"
+        "此时必须缩小范围，优先改用 offset/limit 分段读取。"
     )
     supports_parallel = True
     parameters_schema = {
         "type": "object",
         "properties": {
             "filename": {"type": "string"},
+            "offset": {"type": "integer"},
+            "limit": {"type": "integer"},
             "start_line": {"type": "integer"},
             "end_line": {"type": "integer"},
         },
@@ -862,19 +1102,37 @@ class ReadFileTool(CodingBaseTool):
 
     def run(self, arguments: dict[str, object], context: ToolContext) -> str:
         filename = str(arguments["filename"])
-        start_line = int(arguments.get("start_line", 1))
-        end_line_raw = arguments.get("end_line")
-        end_line = int(end_line_raw) if end_line_raw is not None else None
+        has_offset_limit = "offset" in arguments or "limit" in arguments
+        has_line_range = "start_line" in arguments or "end_line" in arguments
+        if has_offset_limit and has_line_range:
+            raise ValueError("read_file 不能同时混用 offset/limit 和 start_line/end_line。")
+
+        if has_offset_limit:
+            offset = _parse_int_argument(arguments.get("offset", 0), field_name="offset", minimum=0)
+            limit_raw = arguments.get("limit")
+            limit = (
+                _parse_int_argument(limit_raw, field_name="limit", minimum=1)
+                if limit_raw is not None
+                else None
+            )
+            start_line = offset + 1
+            end_line = offset + limit if limit is not None else None
+        else:
+            start_line = _parse_int_argument(arguments.get("start_line", 1), field_name="start_line", minimum=1)
+            end_line_raw = arguments.get("end_line")
+            end_line = (
+                _parse_int_argument(end_line_raw, field_name="end_line", minimum=start_line)
+                if end_line_raw is not None
+                else None
+            )
+            offset = start_line - 1
+            limit = (end_line - start_line + 1) if end_line is not None else None
 
         target = self._resolve_path(filename, context)
         if not target.exists():
             raise FileNotFoundError(f"文件不存在: {filename}")
         if not target.is_file():
             raise IsADirectoryError(f"目标不是文件: {filename}")
-        if start_line <= 0:
-            raise ValueError("start_line 必须大于等于 1。")
-        if end_line is not None and end_line < start_line:
-            raise ValueError("end_line 不能小于 start_line。")
 
         lines = self._read_text(target).splitlines()
         total_lines = len(lines)
@@ -886,7 +1144,11 @@ class ReadFileTool(CodingBaseTool):
         requested_end_line = end_line if end_line is not None else total_lines
         eof = actual_end_line >= total_lines if total_lines > 0 else True
         metadata_lines = [
+            f"# Requested offset: {offset}",
+            f"# Requested limit: {limit if limit is not None else 'to EOF'}",
             f"# Requested lines: {start_line}-{requested_end_line}",
+            f"# Actual offset: {max(actual_start_line - 1, 0)}",
+            f"# Actual limit: {len(sliced)}",
             f"# Actual lines: {actual_start_line}-{actual_end_line}",
             f"# Total lines: {total_lines}",
             f"# EOF: {'true' if eof else 'false'}",
@@ -900,9 +1162,11 @@ class ReadFileTool(CodingBaseTool):
             metadata_lines=metadata_lines,
         )
         if len(rendered) > READ_FILE_MAX_OUTPUT_CHARS:
+            suggested_offset = offset
+            suggested_limit = limit if limit is not None and limit < 200 else 200
             raise ValueError(
                 f"本次 read_file 返回内容过长，已超过 {READ_FILE_MAX_OUTPUT_CHARS} 字符。"
-                "请缩小读取范围并传入更精确的 start_line/end_line。"
+                f"请缩小读取范围，并用更精确的 offset/limit 重试，例如 offset={suggested_offset}, limit={suggested_limit}。"
             )
         return rendered
 
@@ -912,10 +1176,9 @@ class GrepFileTool(CodingBaseTool):
 
     name = "grep_file"
     description = (
-        "按正则搜索文件内容，参数：regex 必填，search_path 可选默认当前目录，"
-        "include_ignored 可选默认 false。默认会跳过 node_modules、.git、dist、build、"
-        "__pycache__ 等生成目录；只有需要搜索这些目录时才传 include_ignored=true。"
-        "只返回命中的文件、行号和对应行内容。"
+        "按正则搜索文件内容，优先使用 ripgrep。参数：regex 必填，search_path 可选默认当前目录，"
+        "output_mode 可选 content/files_with_matches/count，glob 可选用于限制文件范围，"
+        "file_type 可选用于限制语言类型，include_ignored 可选默认 false，limit 可选默认 100。"
     )
     supports_parallel = True
     parameters_schema = {
@@ -923,49 +1186,300 @@ class GrepFileTool(CodingBaseTool):
         "properties": {
             "regex": {"type": "string"},
             "search_path": {"type": "string"},
+            "output_mode": {"type": "string"},
+            "glob": {"type": "string"},
+            "file_type": {"type": "string"},
             "include_ignored": {"type": "boolean"},
+            "limit": {"type": "integer"},
         },
         "required": ["regex"],
         "additionalProperties": False,
     }
 
     def run(self, arguments: dict[str, object], context: ToolContext) -> str:
-        regex = str(arguments["regex"])
-        search_path = str(arguments.get("search_path", "."))
+        regex = str(arguments["regex"]).strip()
+        if not regex:
+            raise ValueError("regex 不能为空。")
+
+        search_path = str(arguments.get("search_path", ".")).strip() or "."
+        output_mode = self._normalize_output_mode(arguments.get("output_mode", "content"))
+        glob_pattern = str(arguments.get("glob", "")).strip()
+        file_type = str(arguments.get("file_type", "")).strip()
         include_ignored = _parse_bool_argument(arguments.get("include_ignored", False))
+        limit = min(
+            _parse_int_argument(arguments.get("limit", GREP_DEFAULT_LIMIT), field_name="limit", minimum=1),
+            GREP_MAX_LIMIT,
+        )
 
         target = self._resolve_path(search_path, context)
         if not target.exists():
             raise FileNotFoundError(f"搜索路径不存在: {search_path}")
 
+        respect_ignored = _should_respect_ignored_dirs(target, include_ignored)
+        if shutil.which("rg"):
+            return self._run_with_ripgrep(
+                regex=regex,
+                target=target,
+                search_path=search_path,
+                context=context,
+                output_mode=output_mode,
+                glob_pattern=glob_pattern,
+                file_type=file_type,
+                respect_ignored=respect_ignored,
+                limit=limit,
+            )
+        return self._run_python_fallback(
+            regex=regex,
+            target=target,
+            context=context,
+            output_mode=output_mode,
+            glob_pattern=glob_pattern,
+            file_type=file_type,
+            respect_ignored=respect_ignored,
+            limit=limit,
+        )
+
+    def _normalize_output_mode(self, raw_mode: object) -> str:
+        mode = str(raw_mode or "content").strip().lower()
+        allowed_modes = {"content", "files_with_matches", "count"}
+        if mode not in allowed_modes:
+            raise ValueError(f"output_mode 只支持: {', '.join(sorted(allowed_modes))}")
+        return mode
+
+    def _run_with_ripgrep(
+        self,
+        *,
+        regex: str,
+        target: Path,
+        search_path: str,
+        context: ToolContext,
+        output_mode: str,
+        glob_pattern: str,
+        file_type: str,
+        respect_ignored: bool,
+        limit: int,
+    ) -> str:
+        workspace = context.workspace.resolve()
+        relative_target = _relative_posix_path(target, workspace) if target != workspace else "."
+        command = [
+            "rg",
+            "--hidden",
+            "--no-ignore",
+            "--color",
+            "never",
+            "--no-messages",
+        ]
+        if output_mode == "content":
+            command.append("--line-number")
+        elif output_mode == "files_with_matches":
+            command.append("--files-with-matches")
+        elif output_mode == "count":
+            command.append("--count")
+
+        if file_type:
+            command.extend(["-t", file_type])
+        if glob_pattern:
+            command.extend(["--glob", glob_pattern])
+        if respect_ignored:
+            for ignored_dir in sorted(DEFAULT_IGNORED_DIR_NAMES):
+                command.extend(["--glob", f"!{ignored_dir}/**"])
+                command.extend(["--glob", f"!**/{ignored_dir}/**"])
+
+        command.extend([regex, relative_target])
+
+        result = subprocess.run(
+            command,
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=20,
+            check=False,
+        )
+        if result.returncode not in {0, 1}:
+            stderr = result.stderr.strip() or result.stdout.strip()
+            raise RuntimeError(f"grep_file 执行 ripgrep 失败：{stderr}")
+
+        stdout_lines = [line for line in result.stdout.splitlines() if line.strip()]
+        if not stdout_lines:
+            return f"未找到匹配项: {regex}"
+
+        if output_mode == "content":
+            return self._render_ripgrep_content(stdout_lines, regex=regex, limit=limit)
+        if output_mode == "files_with_matches":
+            return self._render_ripgrep_files(stdout_lines, regex=regex, limit=limit, search_path=search_path)
+        return self._render_ripgrep_counts(stdout_lines, regex=regex, search_path=search_path)
+
+    def _render_ripgrep_content(self, lines: list[str], *, regex: str, limit: int) -> str:
+        entries: list[tuple[str, int, str]] = []
+        for row in lines:
+            parts = row.split(":", 2)
+            if len(parts) != 3:
+                continue
+            file_path, line_number, content = parts
+            try:
+                parsed_line_number = int(line_number)
+            except ValueError:
+                continue
+            entries.append((self._normalize_ripgrep_relative_path(file_path), parsed_line_number, content))
+
+        if not entries:
+            return f"未找到匹配项: {regex}"
+        entries.sort(key=lambda item: (item[0], item[1]))
+
+        truncated = len(entries) > limit
+        rendered: list[str] = []
+        current_file = ""
+        for file_path, parsed_line_number, content in entries[:limit]:
+            if file_path != current_file:
+                rendered.append(f"# File: {file_path}")
+                current_file = file_path
+            rendered.append(f"{parsed_line_number} | {content}")
+        if truncated:
+            rendered.append(f"# Note: output truncated at {limit} matches, narrow regex/glob/search_path.")
+        return "\n".join(rendered)
+
+    def _render_ripgrep_files(
+        self,
+        lines: list[str],
+        *,
+        regex: str,
+        limit: int,
+        search_path: str,
+    ) -> str:
+        normalized_files = sorted(
+            self._normalize_ripgrep_relative_path(line)
+            for line in lines
+            if line.strip()
+        )
+        truncated = len(normalized_files) > limit
+        files = normalized_files[:limit]
+        rendered = [
+            f"# Search path: {search_path}",
+            f"# Regex: {regex}",
+            f"# Returned files: {len(files)}",
+            f"# Limit: {limit}",
+            f"# Truncated: {'true' if truncated else 'false'}",
+            *files,
+        ]
+        if truncated:
+            rendered.append("# Note: file results truncated, narrow regex/glob/search_path.")
+        return "\n".join(rendered)
+
+    def _render_ripgrep_counts(
+        self,
+        lines: list[str],
+        *,
+        regex: str,
+        search_path: str,
+    ) -> str:
+        rendered = [
+            f"# Search path: {search_path}",
+            f"# Regex: {regex}",
+        ]
+        total_matches = 0
+        rows: list[tuple[str, int]] = []
+        for row in lines:
+            parts = row.rsplit(":", 1)
+            if len(parts) != 2:
+                continue
+            file_path, count_text = parts
+            try:
+                count = int(count_text)
+            except ValueError:
+                continue
+            total_matches += count
+            rows.append((self._normalize_ripgrep_relative_path(file_path), count))
+        rendered.insert(2, f"# Total matches: {total_matches}")
+        for file_path, count in sorted(rows, key=lambda item: item[0]):
+            rendered.append(f"{file_path}: {count}")
+        return "\n".join(rendered)
+
+    def _run_python_fallback(
+        self,
+        *,
+        regex: str,
+        target: Path,
+        context: ToolContext,
+        output_mode: str,
+        glob_pattern: str,
+        file_type: str,
+        respect_ignored: bool,
+        limit: int,
+    ) -> str:
         pattern = re.compile(regex, re.MULTILINE)
         workspace = context.workspace.resolve()
-        rendered: list[str] = []
-        respect_ignored = _should_respect_ignored_dirs(target, include_ignored)
-
         if target.is_file():
             candidate_files = [target]
         else:
             candidate_files = self._collect_search_files(target, respect_ignored)
 
-        for file_path in candidate_files:
-            try:
-                content = self._read_text(file_path)
-            except UnicodeDecodeError:
-                continue
-            lines = content.splitlines()
+        filtered_files = [
+            file_path
+            for file_path in candidate_files
+            if self._matches_glob(file_path, target if target.is_dir() else target.parent, glob_pattern)
+            and self._matches_file_type(file_path, file_type)
+        ]
+
+        if output_mode == "files_with_matches":
+            rendered_files: list[str] = []
+            for file_path in filtered_files:
+                match_line_numbers = self._find_matching_line_numbers(pattern, self._safe_split_lines(file_path))
+                if not match_line_numbers:
+                    continue
+                rendered_files.append(_relative_posix_path(file_path, workspace))
+                if len(rendered_files) >= limit:
+                    break
+            if not rendered_files:
+                return f"未找到匹配项: {regex}"
+            truncated = len(rendered_files) == limit
+            rendered = [
+                f"# Search path: {_relative_posix_path(target, workspace) if target != workspace else '.'}",
+                f"# Regex: {regex}",
+                f"# Returned files: {len(rendered_files)}",
+                f"# Limit: {limit}",
+                f"# Truncated: {'true' if truncated else 'false'}",
+                *rendered_files,
+            ]
+            if truncated:
+                rendered.append("# Note: file results truncated, narrow regex/glob/search_path.")
+            return "\n".join(rendered)
+
+        if output_mode == "count":
+            rendered = [f"# Regex: {regex}"]
+            total_matches = 0
+            for file_path in filtered_files:
+                match_line_numbers = self._find_matching_line_numbers(pattern, self._safe_split_lines(file_path))
+                if not match_line_numbers:
+                    continue
+                total_matches += len(match_line_numbers)
+                rendered.append(f"{_relative_posix_path(file_path, workspace)}: {len(match_line_numbers)}")
+            if total_matches == 0:
+                return f"未找到匹配项: {regex}"
+            rendered.insert(1, f"# Total matches: {total_matches}")
+            return "\n".join(rendered)
+
+        rendered: list[str] = []
+        matched_lines = 0
+        for file_path in filtered_files:
+            lines = self._safe_split_lines(file_path)
             match_line_numbers = self._find_matching_line_numbers(pattern, lines)
             if not match_line_numbers:
                 continue
 
-            relative_path = str(file_path.relative_to(workspace)).replace("\\", "/")
-            rendered.append(f"# File: {relative_path}")
+            rendered.append(f"# File: {_relative_posix_path(file_path, workspace)}")
             for line_number in match_line_numbers:
                 rendered.append(f"{line_number} | {lines[line_number - 1]}")
+                matched_lines += 1
+                if matched_lines >= limit:
+                    rendered.append(
+                        f"# Note: output truncated at {limit} matches, narrow regex/glob/search_path."
+                    )
+                    return "\n".join(rendered)
 
         if not rendered:
             return f"未找到匹配项: {regex}"
-
         return "\n".join(rendered)
 
     def _collect_search_files(self, target: Path, respect_ignored: bool) -> list[Path]:
@@ -995,6 +1509,50 @@ class GrepFileTool(CodingBaseTool):
             if pattern.search(line):
                 matched_lines.append(line_number)
         return matched_lines
+
+    def _safe_split_lines(self, file_path: Path) -> list[str]:
+        try:
+            return self._read_text(file_path).splitlines()
+        except UnicodeDecodeError:
+            return []
+
+    def _matches_glob(self, file_path: Path, search_root: Path, glob_pattern: str) -> bool:
+        if not glob_pattern:
+            return True
+        relative_path = _relative_posix_path(file_path, search_root)
+        return fnmatch.fnmatch(relative_path, glob_pattern) or fnmatch.fnmatch(file_path.name, glob_pattern)
+
+    def _matches_file_type(self, file_path: Path, file_type: str) -> bool:
+        if not file_type:
+            return True
+        extension_map = {
+            "py": {".py"},
+            "ts": {".ts"},
+            "tsx": {".tsx"},
+            "js": {".js", ".mjs", ".cjs"},
+            "jsx": {".jsx"},
+            "json": {".json"},
+            "md": {".md", ".mdx"},
+            "css": {".css", ".scss", ".sass", ".less"},
+            "html": {".html", ".htm"},
+            "yml": {".yml", ".yaml"},
+            "yaml": {".yml", ".yaml"},
+            "toml": {".toml"},
+            "go": {".go"},
+            "rs": {".rs"},
+            "java": {".java"},
+            "vue": {".vue"},
+        }
+        allowed_extensions = extension_map.get(file_type.lower())
+        if not allowed_extensions:
+            return file_path.suffix.lower() == f".{file_type.lower()}"
+        return file_path.suffix.lower() in allowed_extensions
+
+    def _normalize_ripgrep_relative_path(self, file_path: str) -> str:
+        normalized = file_path.replace("\\", "/").strip()
+        if normalized.startswith("./"):
+            return normalized[2:]
+        return normalized
 
 class WriteFileTool(CodingBaseTool):
     """创建新文件。"""
@@ -1160,25 +1718,64 @@ class ApplyPatchTool(CodingBaseTool):
         cursor: int,
         relative_path: str,
     ) -> int:
+        exact_matches = self._find_matching_blocks(
+            current_lines=current_lines,
+            pattern_lines=pattern_lines,
+            cursor=cursor,
+            comparator=lambda actual, expected: actual == expected,
+        )
+        if len(exact_matches) == 1:
+            return exact_matches[0]
+        if len(exact_matches) > 1:
+            raise ValueError(f"补丁上下文匹配到多处，无法唯一定位: {relative_path}")
+
+        whitespace_tolerant_matches = self._find_matching_blocks(
+            current_lines=current_lines,
+            pattern_lines=pattern_lines,
+            cursor=cursor,
+            comparator=lambda actual, expected: actual.strip() == expected.strip(),
+        )
+        if len(whitespace_tolerant_matches) == 1:
+            return whitespace_tolerant_matches[0]
+        if len(whitespace_tolerant_matches) > 1:
+            raise ValueError(
+                f"补丁上下文在忽略首尾空白后匹配到多处，无法唯一定位: {relative_path}"
+            )
+
+        preview = " | ".join(pattern_lines[:3]).strip()
+        raise ValueError(
+            f"补丁上下文未匹配到目标文件内容: {relative_path}。"
+            f"请先重新 read_file 目标片段，再基于最新原文生成 patch。"
+            f"未匹配片段预览: {preview}"
+        )
+
+    def _find_matching_blocks(
+        self,
+        *,
+        current_lines: list[str],
+        pattern_lines: list[str],
+        cursor: int,
+        comparator: Any,
+    ) -> list[int]:
         matches: list[int] = []
         max_start = len(current_lines) - len(pattern_lines)
 
-        for start_index in range(max(cursor, 0), max_start + 1):
-            if current_lines[start_index : start_index + len(pattern_lines)] == pattern_lines:
-                matches.append(start_index)
+        def scan(start_from: int) -> list[int]:
+            found: list[int] = []
+            for start_index in range(max(start_from, 0), max_start + 1):
+                window = current_lines[start_index : start_index + len(pattern_lines)]
+                if len(window) != len(pattern_lines):
+                    continue
+                if all(comparator(actual, expected) for actual, expected in zip(window, pattern_lines)):
+                    found.append(start_index)
+            return found
 
+        matches = scan(cursor)
         if len(matches) == 1:
-            return matches[0]
+            return matches
         if not matches and cursor > 0:
-            for start_index in range(0, max_start + 1):
-                if current_lines[start_index : start_index + len(pattern_lines)] == pattern_lines:
-                    matches.append(start_index)
-            if len(matches) == 1:
-                return matches[0]
-
-        if not matches:
-            raise ValueError(f"补丁上下文未匹配到目标文件内容: {relative_path}")
-        raise ValueError(f"补丁上下文匹配到多处，无法唯一定位: {relative_path}")
+            matches = scan(0)
+        return matches
 
 
 class ReplaceFileTool(CodingBaseTool):
@@ -1865,6 +2462,7 @@ def build_coding_tools() -> list[BaseTool]:
 
     return [
         ListFileTool(),
+        GlobFileTool(),
         ReadFileTool(),
         GrepFileTool(),
         ApplyPatchTool(),

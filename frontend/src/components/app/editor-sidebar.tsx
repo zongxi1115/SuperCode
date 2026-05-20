@@ -7,6 +7,7 @@ import {
   WebPreviewUrl,
 } from '@/components/ai-elements/web-preview';
 import { Button } from '@/components/ui/button';
+import { buildPreviewSelectBridgeSrc, canUsePreviewSelectBridge } from '@/lib/preview-select-bridge';
 import { AnimatePresence, motion } from 'motion/react';
 import { ExternalLink, FolderTree, Globe, MousePointerClick, PanelRightClose, RefreshCw, X } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -81,8 +82,10 @@ export function EditorSidebar({
   const detachConsoleRef = useRef<(() => void) | null>(null);
   const [consoleLogs, setConsoleLogs] = useState<PreviewConsoleLog[]>([]);
   const [previewAccessState, setPreviewAccessState] = useState<PreviewAccessState>('unknown');
+  const [isSelectBridgeActive, setIsSelectBridgeActive] = useState(false);
   const previewAccessStateRef = useRef<PreviewAccessState>('unknown');
   const crossOriginNoticeShownRef = useRef(false);
+  const pendingBridgeSelectionRef = useRef(false);
 
   const pushConsoleLog = useCallback((level: PreviewConsoleLog['level'], message: string) => {
     setConsoleLogs((prev) => [
@@ -98,6 +101,11 @@ export function EditorSidebar({
   const resetConsoleLogs = useCallback(() => {
     setConsoleLogs([]);
   }, []);
+
+  const canBridgeCurrentPreview = canUsePreviewSelectBridge(url);
+  const previewFrameSrc = isSelectBridgeActive
+    ? buildPreviewSelectBridgeSrc(url)
+    : undefined;
 
   const setPreviewAccess = useCallback((next: PreviewAccessState) => {
     if (previewAccessStateRef.current === next) {
@@ -156,9 +164,9 @@ export function EditorSidebar({
       crossOriginNoticeShownRef.current = false;
       setPreviewAccess('unknown');
       resetSelectModeState();
-      iframeRef.current.src = iframeRef.current.src;
+      iframeRef.current.src = previewFrameSrc ?? url;
     }
-  }, [resetConsoleLogs, resetSelectModeState, setPreviewAccess]);
+  }, [previewFrameSrc, resetConsoleLogs, resetSelectModeState, setPreviewAccess, url]);
 
   const handleOpenInNewTab = useCallback(() => {
     if (url) {
@@ -170,12 +178,16 @@ export function EditorSidebar({
     const doc = resolveIframeDocument();
     if (!doc) {
       resetSelectModeState();
+      pendingBridgeSelectionRef.current = false;
+      setIsSelectBridgeActive(false);
       return;
     }
     doc.querySelectorAll('.__highlight-hover').forEach((el) => el.classList.remove('__highlight-hover'));
     doc.querySelectorAll('.__highlight-selected').forEach((el) => el.classList.remove('__highlight-selected'));
     cleanupRef.current?.();
     cleanupRef.current = null;
+    pendingBridgeSelectionRef.current = false;
+    setIsSelectBridgeActive(false);
   }, [resetSelectModeState, resolveIframeDocument]);
 
   const attachConsoleCapture = useCallback(() => {
@@ -263,7 +275,7 @@ export function EditorSidebar({
     } catch (error) {
       markCrossOrigin(error);
     }
-  }, [markCrossOrigin, resolveIframeDocument]);
+  }, [markCrossOrigin, pushConsoleLog, resolveIframeDocument]);
 
   useEffect(() => {
     const iframe = iframeRef.current;
@@ -277,29 +289,106 @@ export function EditorSidebar({
       resetSelectModeState();
       resetConsoleLogs();
       attachConsoleCapture();
+
+      if (pendingBridgeSelectionRef.current) {
+        pendingBridgeSelectionRef.current = false;
+        queueMicrotask(() => {
+          const doc = resolveIframeDocument();
+          if (!doc) {
+            return;
+          }
+
+          setIsSelectMode(true);
+
+          const style = doc.createElement('style');
+          style.setAttribute('data-selector-mode', 'true');
+          style.textContent = `
+            * { cursor: crosshair !important; }
+            .__highlight-hover { outline: 2px dashed #3b82f6 !important; outline-offset: 2px !important; background-color: rgba(59, 130, 246, 0.1) !important; }
+            .__highlight-selected { outline: 2px solid #3b82f6 !important; outline-offset: 2px !important; background-color: rgba(59, 130, 246, 0.15) !important; }
+          `;
+          doc.head.appendChild(style);
+
+          const handleMouseOver = (e: MouseEvent) => {
+            e.stopPropagation();
+            const target = e.target as HTMLElement;
+            if (target === doc.body || target === doc.documentElement) return;
+            doc.querySelectorAll('.__highlight-hover').forEach((el) => el.classList.remove('__highlight-hover'));
+            target.classList.add('__highlight-hover');
+          };
+
+          const handleMouseOut = (e: MouseEvent) => {
+            (e.target as HTMLElement).classList.remove('__highlight-hover');
+          };
+
+          const handleClick = (e: MouseEvent) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const target = e.target as HTMLElement;
+            if (target === doc.body || target === doc.documentElement) return;
+
+            doc.querySelectorAll('.__highlight-selected').forEach((el) => el.classList.remove('__highlight-selected'));
+            doc.querySelectorAll('.__highlight-hover').forEach((el) => el.classList.remove('__highlight-hover'));
+            target.classList.add('__highlight-selected');
+
+            const outerHtml = target.outerHTML;
+            const selector = getElementSelector(target);
+
+            cleanup();
+            onSelectElement?.(outerHtml, selector);
+            setIsSelectBridgeActive(false);
+          };
+
+          const handleKeyDown = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') {
+              cancelSelectMode();
+            }
+          };
+
+          const cleanup = () => {
+            style.remove();
+            doc.removeEventListener('mouseover', handleMouseOver, true);
+            doc.removeEventListener('mouseout', handleMouseOut, true);
+            doc.removeEventListener('click', handleClick, true);
+            doc.removeEventListener('keydown', handleKeyDown, true);
+            setIsSelectMode(false);
+            cleanupRef.current = null;
+          };
+
+          cleanupRef.current = cleanup;
+
+          doc.addEventListener('mouseover', handleMouseOver, true);
+          doc.addEventListener('mouseout', handleMouseOut, true);
+          doc.addEventListener('click', handleClick, true);
+          doc.addEventListener('keydown', handleKeyDown, true);
+        });
+      }
     };
 
     iframe.addEventListener('load', handleLoad);
     return () => {
       iframe.removeEventListener('load', handleLoad);
     };
-  }, [attachConsoleCapture, isOpen, resetConsoleLogs, resetSelectModeState, setPreviewAccess, url]);
+  }, [attachConsoleCapture, cancelSelectMode, isOpen, onSelectElement, resetConsoleLogs, resetSelectModeState, resolveIframeDocument, setPreviewAccess, url]);
 
   useEffect(() => {
     return () => {
+      cleanupRef.current?.();
+      cleanupRef.current = null;
       detachConsoleRef.current?.();
       detachConsoleRef.current = null;
     };
   }, []);
 
-  useEffect(() => {
-    if (isOpen) return;
-    cancelSelectMode();
-  }, [cancelSelectMode, isOpen]);
-
   const handleUnavailableSelect = useCallback(() => {
+    if (canBridgeCurrentPreview) {
+      pendingBridgeSelectionRef.current = true;
+      setIsSelectBridgeActive(true);
+      pushConsoleLog('log', '正在尝试为本地页面启用桥接选择模式...');
+      return;
+    }
     markCrossOrigin(new Error('浏览器同源策略阻止访问跨域 iframe 的 DOM'));
-  }, [markCrossOrigin]);
+  }, [canBridgeCurrentPreview, markCrossOrigin, pushConsoleLog]);
 
   const handleSelectElement = useCallback(() => {
     const doc = resolveIframeDocument();
@@ -373,7 +462,9 @@ export function EditorSidebar({
   const selectTooltip = isSelectMode
     ? '取消选择'
     : previewAccessState === 'cross-origin'
-      ? '跨域页面暂不支持直接选择元素'
+      ? canBridgeCurrentPreview
+        ? '跨域本地页面将尝试桥接选择元素'
+        : '跨域页面暂不支持直接选择元素'
       : previewAccessState === 'unknown'
         ? '页面加载完成后可选择元素'
         : '选择元素';
@@ -382,7 +473,6 @@ export function EditorSidebar({
     isSelectMode ? 'bg-primary/15 text-primary' : '',
     !isSelectMode && previewAccessState === 'cross-origin' ? 'opacity-50' : '',
   ].filter(Boolean).join(' ');
-
   return (
     <>
       <AnimatePresence initial={false}>
@@ -430,7 +520,7 @@ export function EditorSidebar({
                   <X className="w-4 h-4" />
                 </WebPreviewNavigationButton>
               </WebPreviewNavigation>
-              <WebPreviewBody ref={iframeRef} className="bg-white" />
+              <WebPreviewBody ref={iframeRef} className="bg-white" src={previewFrameSrc} />
               <WebPreviewConsole logs={consoleLogs} />
             </WebPreview>
           </motion.div>

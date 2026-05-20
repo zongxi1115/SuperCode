@@ -178,7 +178,7 @@ export default function App() {
   const [isSessionBooting, setIsSessionBooting] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
-  const [isRightPanelCollapsed, setIsRightPanelCollapsed] = useState(false);
+  const [isRightPanelCollapsed, setIsRightPanelCollapsed] = useState(true);
   const [sidebarWidth, setSidebarWidth] = useState(280);
   const [isGitPanelOpen, setIsGitPanelOpen] = useState(false);  const [isContextOpen, setIsContextOpen] = useState(false);
   const [isContextLoading, setIsContextLoading] = useState(false);

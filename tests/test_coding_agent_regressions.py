@@ -114,6 +114,31 @@ class ReadFileToolMetadataTests(unittest.TestCase):
         self.assertIn("# EOF: true", output)
         self.assertIn("# Note: requested range starts beyond end of file.", output)
 
+    def test_read_file_supports_offset_and_limit(self) -> None:
+        target = self.workspace / "demo.txt"
+        target.write_text("a\nb\nc\nd\n", encoding="utf-8")
+
+        output = self.tool.run(
+            {"filename": "demo.txt", "offset": 1, "limit": 2},
+            self.context,
+        )
+
+        self.assertIn("# Requested offset: 1", output)
+        self.assertIn("# Requested limit: 2", output)
+        self.assertIn("# Requested lines: 2-3", output)
+        self.assertIn("2 | b", output)
+        self.assertIn("3 | c", output)
+
+    def test_read_file_rejects_mixing_offset_and_line_range(self) -> None:
+        target = self.workspace / "demo.txt"
+        target.write_text("a\nb\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "不能同时混用"):
+            self.tool.run(
+                {"filename": "demo.txt", "offset": 0, "start_line": 1},
+                self.context,
+            )
+
 
 class _ConfirmationTool(BaseTool):
     name = "git_commit"

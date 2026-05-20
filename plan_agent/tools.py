@@ -11,7 +11,7 @@ from urllib.request import Request, urlopen
 
 from agent.config import read_dotenv_values
 from agent.tools import BaseTool, ToolContext
-from coding_agent.tools import GrepFileTool, ListFileTool, ReadFileTool
+from coding_agent.tools import GlobFileTool, GrepFileTool, ListFileTool, ReadFileTool
 
 DEFAULT_TINYFISH_SEARCH_URL = "https://api.search.tinyfish.ai"
 DEFAULT_TINYFISH_FETCH_URL = "https://api.fetch.tinyfish.ai"
@@ -453,6 +453,7 @@ class SavePlanTool(PlanBaseTool):
 def build_plan_tools() -> list[BaseTool]:
     return [
         ListFileTool(),
+        GlobFileTool(),
         ReadFileTool(),
         GrepFileTool(),
         SearchWebTool(),

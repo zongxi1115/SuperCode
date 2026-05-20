@@ -89,6 +89,42 @@ class GrepFileToolTests(unittest.TestCase):
             ),
         )
 
+    def test_grep_can_return_only_matching_files(self) -> None:
+        tool = GrepFileTool()
+
+        output = tool.run(
+            {"regex": "needle", "search_path": "src", "output_mode": "files_with_matches"},
+            self.context,
+        )
+
+        self.assertIn("# Returned files: 2", output)
+        self.assertIn("src/alpha.py", output)
+        self.assertIn("src/beta.py", output)
+        self.assertNotIn("1 |", output)
+
+    def test_grep_can_return_match_counts(self) -> None:
+        tool = GrepFileTool()
+
+        output = tool.run(
+            {"regex": "needle", "search_path": "src", "output_mode": "count"},
+            self.context,
+        )
+
+        self.assertIn("# Total matches: 3", output)
+        self.assertIn("src/alpha.py: 2", output)
+        self.assertIn("src/beta.py: 1", output)
+
+    def test_grep_can_filter_by_glob(self) -> None:
+        tool = GrepFileTool()
+
+        output = tool.run(
+            {"regex": "needle", "search_path": "src", "glob": "*alpha.py"},
+            self.context,
+        )
+
+        self.assertIn("# File: src/alpha.py", output)
+        self.assertNotIn("# File: src/beta.py", output)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -104,7 +104,21 @@ class ExecuteToolTests(unittest.TestCase):
         )
 
         self.assertEqual(first_result["status"], "running")
+        self.assertEqual(first_result["exit_reason"], "awaiting_input")
+        self.assertTrue(bool(first_result["awaiting_input"]))
+        self.assertTrue(bool(first_result["needs_input"]))
+        self.assertEqual(str(first_result["input_prompt"]), "Name:")
         self.assertIn("Name:", str(first_result["full_output"]))
+        self.assertEqual(
+            first_result["input_request"],
+            {
+                "type": "text",
+                "tool": "terminal_input",
+                "terminal_id": first_result["terminal_id"],
+                "prompt": "Name:",
+                "command": "[Console]::Write('Name: '); $name = [Console]::ReadLine(); Write-Output ('Hello ' + $name)",
+            },
+        )
 
         second_result = terminal_input_tool.run(
             {
@@ -115,6 +129,11 @@ class ExecuteToolTests(unittest.TestCase):
         )
 
         self.assertEqual(second_result["status"], "completed")
+        self.assertEqual(second_result["exit_reason"], "completed")
+        self.assertFalse(bool(second_result["awaiting_input"]))
+        self.assertFalse(bool(second_result["needs_input"]))
+        self.assertIsNone(second_result["input_prompt"])
+        self.assertIsNone(second_result["input_request"])
         self.assertIn("Hello Alice", str(second_result["full_output"]))
 
     def test_interactive_execute_bootstraps_powershell_utf8(self) -> None:
@@ -154,19 +173,89 @@ class ExecuteToolTests(unittest.TestCase):
         first_result = execute_tool.run(
             {
                 "content": "Write-Output 'Installing'; Start-Sleep -Seconds 2; Write-Output 'Done'",
-                "timeout": 1,
+                "timeout": 3,
             },
             interactive_context,
         )
 
         self.assertEqual(first_result["status"], "running")
+        self.assertEqual(first_result["exit_reason"], "idle")
         self.assertFalse(bool(first_result["awaiting_input"]))
         self.assertIn("Installing", str(first_result["full_output"]))
 
         second_result = wait_tool.run({"timeout": 4}, interactive_context)
 
         self.assertEqual(second_result["status"], "completed")
+        self.assertEqual(second_result["exit_reason"], "completed")
         self.assertIn("Done", str(second_result["full_output"]))
+
+    def test_terminal_wait_returns_prompt_without_waiting_full_timeout(self) -> None:
+        self.interactive_session = InteractiveCommandSession(workspace=self.workspace)
+        interactive_context = ToolContext(
+            workspace=self.workspace,
+            metadata={"interactive_command_session": self.interactive_session},
+        )
+        execute_tool = ExecuteTool()
+        wait_tool = TerminalWaitTool()
+
+        first_result = execute_tool.run(
+            {
+                "content": "[Console]::Write('Name: '); $name = [Console]::ReadLine(); Write-Output ('Hello ' + $name)",
+                "timeout": 2,
+            },
+            interactive_context,
+        )
+
+        self.assertEqual(first_result["status"], "running")
+        self.assertEqual(first_result["exit_reason"], "awaiting_input")
+
+        started_at = time.monotonic()
+        second_result = wait_tool.run(
+            {"timeout": 5, "terminal_id": str(first_result["terminal_id"])},
+            interactive_context,
+        )
+        elapsed = time.monotonic() - started_at
+
+        self.assertLess(elapsed, 2.0)
+        self.assertEqual(second_result["status"], "running")
+        self.assertEqual(second_result["exit_reason"], "awaiting_input")
+        self.assertTrue(bool(second_result["awaiting_input"]))
+        self.assertEqual(str(second_result["input_prompt"]), "Name:")
+
+    def test_terminal_wait_uses_timeout_window_when_command_is_hung(self) -> None:
+        self.interactive_session = InteractiveCommandSession(workspace=self.workspace)
+        interactive_context = ToolContext(
+            workspace=self.workspace,
+            metadata={"interactive_command_session": self.interactive_session},
+        )
+        execute_tool = ExecuteTool()
+        wait_tool = TerminalWaitTool()
+
+        first_result = execute_tool.run(
+            {
+                "content": "Start-Sleep -Seconds 4",
+                "timeout": 3,
+            },
+            interactive_context,
+        )
+
+        self.assertEqual(first_result["status"], "running")
+        self.assertEqual(first_result["exit_reason"], "idle")
+        self.assertEqual(str(first_result["delta"]), "")
+
+        started_at = time.monotonic()
+        second_result = wait_tool.run(
+            {"timeout": 2, "terminal_id": str(first_result["terminal_id"])},
+            interactive_context,
+        )
+        elapsed = time.monotonic() - started_at
+
+        self.assertGreaterEqual(elapsed, 1.5)
+        self.assertLess(elapsed, 3.5)
+        self.assertEqual(second_result["status"], "running")
+        self.assertEqual(second_result["exit_reason"], "timeout")
+        self.assertEqual(str(second_result["delta"]), "")
+        self.assertFalse(bool(second_result["awaiting_input"]))
 
     def test_terminal_wait_returns_cached_result_after_command_finishes_early(self) -> None:
         self.interactive_session = InteractiveCommandSession(workspace=self.workspace)
@@ -180,7 +269,7 @@ class ExecuteToolTests(unittest.TestCase):
         first_result = execute_tool.run(
             {
                 "content": "Write-Output 'Installing'; Start-Sleep -Seconds 2; Write-Output 'Done'",
-                "timeout": 1,
+                "timeout": 3,
             },
             interactive_context,
         )
@@ -196,6 +285,7 @@ class ExecuteToolTests(unittest.TestCase):
         )
 
         self.assertEqual(second_result["status"], "completed")
+        self.assertEqual(second_result["exit_reason"], "completed")
         self.assertEqual(second_result["terminal_id"], terminal_id)
         self.assertIn("Done", str(second_result["delta"]))
         self.assertIn("Done", str(second_result["full_output"]))

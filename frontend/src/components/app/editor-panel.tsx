@@ -38,7 +38,7 @@ type EditorPanelProps = {
 };
 
 const EDITOR_FONT = 'font-mono text-[13px] leading-[20px]';
-const DEFAULT_FILE_TREE_WIDTH = 260;
+const DEFAULT_FILE_TREE_WIDTH = 200;
 const MIN_FILE_TREE_WIDTH = 180;
 const MAX_FILE_TREE_WIDTH = 420;
 

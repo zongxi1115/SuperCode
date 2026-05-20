@@ -88,9 +88,10 @@ response = session.ask("先看看项目结构", on_event=on_event)
 
 `coding_agent` 当前提供这些工具名：
 
-- `list_file(path, include_ignored?)`
-- `read_file(filename, start_line, end_line)`
-- `grep_file(regex, search_path, include_ignored?)`
+- `list_file(path, include_ignored?, max_depth?, limit?)`
+- `glob_file(pattern, search_path, include_ignored?, limit?)`
+- `read_file(filename, offset?, limit?, start_line?, end_line?)`
+- `grep_file(regex, search_path, output_mode?, glob?, file_type?, include_ignored?, limit?)`
 - `write_file(filename, content)`
 - `replace_file(filename, old_content, new_content)`
 - `excecute(content, timeout)`
@@ -99,8 +100,22 @@ response = session.ask("先看看项目结构", on_event=on_event)
 
 说明：
 
-- `list_file(..., include_ignored?)` 和 `grep_file(..., include_ignored?)` 默认都会跳过 `node_modules`、`.git`、`dist`、`build`、`__pycache__` 等生成目录。
+- `list_file(..., include_ignored?)`、`glob_file(..., include_ignored?)` 和 `grep_file(..., include_ignored?)` 默认都会跳过 `node_modules`、`.git`、`dist`、`build`、`__pycache__` 等生成目录。
 - 只有在你明确想查看或搜索这些目录时，才需要传 `include_ignored=true`。
+- `list_file(...)` 默认只做浅层目录浏览；推荐先 `glob_file(...)` 找文件，再 `grep_file(...)` 看内容分布，最后 `read_file(...)` 精读。
+- `glob_file(...)` 最多返回 100 个结果；如果被截断，应该继续缩小 pattern 或 search_path。
+- `grep_file(...)` 支持三种输出模式：
+  - `content`：返回命中的文件、行号和文本
+  - `files_with_matches`：只返回命中文件
+  - `count`：返回每个文件的命中次数和总数
+- `grep_file(...)` 可通过 `glob` 或 `file_type` 限制搜索范围。
+- `read_file(...)` 默认从文件开头读取；如果返回过长，不会静默截断，而是直接报错，要求改用更小的 `offset/limit` 或 `start_line/end_line` 重试。
+- `execute(...)`、`terminal_input(...)`、`terminal_wait(...)` 的 `timeout` 都是必填秒数。
+- 交互式终端结果会带 `status`、`exit_reason`、`awaiting_input`、`input_prompt`、`input_request` 等字段：
+  - `status=completed`：命令已结束，立即返回最终结果
+  - `status=running` 且 `exit_reason=awaiting_input`：命令正在等输入，应调用 `terminal_input(...)`
+  - `status=running` 且 `exit_reason=idle`：本次已经收集到一段输出，但命令暂时安静下来了
+  - `status=running` 且 `exit_reason=timeout`：在这次等待窗口内没有等到完成，只返回该窗口期间收集到的新增输出
 - `terminal_wait(...)` 如果遇到命令已在下一次等待前完成，会返回缓存的最终结果，而不是因为终端已释放直接报错。
 
 ### 配置项说明
