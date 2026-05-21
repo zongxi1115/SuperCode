@@ -1,5 +1,6 @@
 import { ContextViewer } from "@/components/app/context-viewer";
 import { CodeChangePanel } from "@/components/app/code-change-panel";
+import { ChatComposerEditor } from "@/components/app/chat-composer-editor";
 import { cn } from "@/lib/utils";
 import {
   Conversation,
@@ -132,8 +133,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Textarea } from "@/components/ui/textarea";
-import { getFileLanguage } from "@/lib/app-utils";
+import { getShikiLanguage } from "@/lib/app-utils";
+import {
+  buildPlanDraftMarkdown,
+  normalizePlanDraft,
+  parseStreamingPlanDraft,
+  resolvePlanDraftTitle,
+} from "@/lib/plan-draft";
 import { getFileIcon } from "@/lib/file-icons";
 import type {
   AgentMode,
@@ -141,9 +147,11 @@ import type {
   CodeChangeRecord,
   CompletionActionKey,
   ContentBlock,
+  FileTreeNode,
   ModelOption,
   PlanStep,
   SessionContextPayload,
+  SkillSummary,
   ToolCallRecord,
 } from "@/lib/app-types";
 import {
@@ -177,10 +185,11 @@ import {
   Eye,
   Loader2,
   Check,
+  MessageSquareIcon,
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import type React from "react";
-import { memo, useMemo, useRef, useState, useCallback, useEffect } from "react";
+import { memo, useMemo, useRef, useState, useCallback, useEffect, useId, useLayoutEffect } from "react";
 
 type ElementAttachment = {
   id: string;
@@ -201,9 +210,11 @@ type ChatPanelProps = {
   model: string | null;
   reasoningEffort: string | null;
   modelOptions: ModelOption[];
+  availableSkills: SkillSummary[];
+  fileTree: FileTreeNode[];
   onContextOpenChange: (open: boolean) => void;
   onInputChange: (value: string) => void;
-  onKeyDown: (e: React.KeyboardEvent<HTMLTextAreaElement>) => void;
+  onKeyDown: (e: React.KeyboardEvent<HTMLElement>) => void;
   onSendMessage: () => void;
   onStopMessage: () => void;
   onResolveDeleteConfirmation: (toolCallId: string, approved: boolean) => void;
@@ -226,6 +237,29 @@ type ChatPanelProps = {
   activeCompletionAction?: { messageId: string; action: CompletionActionKey } | null;
   elementAttachments?: ElementAttachment[];
   onRemoveElementAttachment?: (id: string) => void;
+};
+
+type MentionSuggestion = {
+  id: string;
+  kind: "workspace" | "file" | "change" | "element" | "skill";
+  label: string;
+  description: string;
+  insertValue: string;
+};
+
+type MentionRenderSegment =
+  | { type: "text"; value: string }
+  | {
+      type: "mention";
+      token: string;
+      value: string;
+      label: string;
+      kind?: MentionSuggestion["kind"];
+    };
+
+type ComposerSelectionOffsets = {
+  start: number;
+  end: number;
 };
 
 const TOOL_ICONS: Record<string, React.ReactNode> = {
@@ -292,7 +326,7 @@ const TOOL_TITLES: Record<string, (args: Record<string, unknown>) => string> = {
   git_log: () => "正在查看日志",
   git_tag: () => "正在创建标签",
   ask_plan_questions: () => "正在生成澄清问题",
-  save_plan: () => "正在保存计划草案",
+  save_plan: () => "正在设计计划",
 };
 
 function getToolTitle(name: string, args: Record<string, unknown>): string {
@@ -849,6 +883,7 @@ function ToolBody({
   onResolveConnectInput,
   onResolvePlanQuestionsInput,
   onViewPlan,
+  replaceCompletedPlanQuestionsWithLoading = false,
 }: {
   toolCall: ToolCallRecord;
   sessionId: string | null;
@@ -864,6 +899,7 @@ function ToolBody({
     answers: QuizSubmission,
   ) => void | Promise<void>;
   onViewPlan?: (title: string, markdown: string) => void;
+  replaceCompletedPlanQuestionsWithLoading?: boolean;
 }) {
   const args = toolCall.arguments || {};
   const output =
@@ -972,58 +1008,62 @@ function ToolBody({
     Boolean(streamingPlanPreview?.title || streamingPlanPreview?.message || streamingPlanPreview?.questions?.length);
 
   if (isPlanQuestionsTool) {
-    return (
-      <PlanQuestionsQuiz
-        questions={questions ?? []}
-        embedded
-        streaming={isStreaming}
-        disabled={toolCall.state !== "input-requested"}
-        title={
-          toolCall.inputRequest?.title ||
-          (typeof args.title === "string" ? args.title : undefined) ||
-          streamingPlanPreview?.title
-        }
-        description={
-          toolCall.inputRequest?.message ||
-          (typeof args.message === "string" ? args.message : undefined) ||
-          streamingPlanPreview?.message
-        }
-        submitted={toolCall.state !== "input-requested"}
-        onSubmit={(answers) => onResolvePlanQuestionsInput?.(toolCall.id, answers)}
-      />
-    );
+    if (toolCall.state === "input-requested") {
+      return (
+        <PlanQuestionsQuiz
+          questions={questions ?? []}
+          embedded
+          streaming={isStreaming}
+          disabled={false}
+          title={
+            toolCall.inputRequest?.title ||
+            (typeof args.title === "string" ? args.title : undefined) ||
+            streamingPlanPreview?.title
+          }
+          description={
+            toolCall.inputRequest?.message ||
+            (typeof args.message === "string" ? args.message : undefined) ||
+            streamingPlanPreview?.message
+          }
+          submitted={false}
+          onSubmit={(answers) =>
+            onResolvePlanQuestionsInput?.(toolCall.id, answers)
+          }
+        />
+      );
+    }
+
+    if (replaceCompletedPlanQuestionsWithLoading) {
+      return (
+        <Button size="sm" variant="outline" disabled>
+          <Loader2 className="mr-2 size-3.5 animate-spin" />
+          正在生成计划中
+        </Button>
+      );
+    }
+
+    return null;
   }
 
   if (toolCall.name === "save_plan") {
-    const planTitle = (typeof args.title === "string" ? args.title : undefined) || "计划草案";
-    const planSummary = (typeof args.summary === "string" ? args.summary : undefined) || "";
-    const planKeySteps = Array.isArray(args.key_steps)
-      ? args.key_steps.filter((s): s is string => typeof s === "string")
-      : [] as string[];
-    const planMarkdown = (typeof args.markdown === "string" ? args.markdown : undefined) || "";
-
-    const detailMd = planMarkdown || [
-      `# ${planTitle}`,
-      "",
-      planSummary,
-      "",
-      typeof args.overview === "string" ? `## 概览\n\n${args.overview}\n` : "",
-      planKeySteps.length > 0 ? ["## 关键步骤", "", ...planKeySteps.map((s, i) => `${i + 1}. ${s}`)].join("\n") : "",
-    ].join("\n");
-
-    const message = typeof output === "object" && output !== null && !Array.isArray(output)
-      ? (output as Record<string, unknown>).message
-      : typeof output === "string"
-        ? output
-        : undefined;
+    const planDraft = {
+      ...parseStreamingPlanDraft(toolCall.streamedInput),
+      ...normalizePlanDraft(args),
+    };
+    const planTitle = resolvePlanDraftTitle(
+      planDraft,
+      isStreaming ? "正在设计计划" : "计划草案",
+    );
+    const detailMd = buildPlanDraftMarkdown(planDraft, planTitle);
 
     return (
       <PlanDraftCard
         title={planTitle}
-        summary={typeof message === "string" ? message : planSummary}
-        keySteps={planKeySteps}
+        summary={planDraft.summary ?? ""}
+        keySteps={planDraft.keySteps ?? []}
         detailMarkdown={detailMd}
         onViewPlan={onViewPlan}
+        isStreaming={isStreaming}
       />
     );
   }
@@ -1040,7 +1080,7 @@ function ToolBody({
         <CodeBlock
           code={content}
           enableHighlighting={!isStreaming}
-          language={filename ? (getFileLanguage(filename) as never) : "text"}
+          language={filename ? (getShikiLanguage(filename) as never) : "text"}
           viewportClassName="overflow-x-auto"
         />
       </div>
@@ -1119,7 +1159,7 @@ function ToolBody({
         <CodeBlock
           code={newContent}
           enableHighlighting={!isStreaming}
-          language={filename ? (getFileLanguage(filename) as never) : "text"}
+          language={filename ? (getShikiLanguage(filename) as never) : "text"}
           viewportClassName="overflow-x-auto"
         />
       </div>
@@ -1460,15 +1500,17 @@ function PlanDraftCard({
   keySteps,
   detailMarkdown,
   onViewPlan,
+  isStreaming = false,
 }: {
   title: string;
   summary: string;
   keySteps: string[];
   detailMarkdown: string;
   onViewPlan?: (title: string, markdown: string) => void;
+  isStreaming?: boolean;
 }) {
   return (
-    <Plan defaultOpen={false}>
+    <Plan defaultOpen={false} isStreaming={isStreaming}>
       <PlanHeader>
         <div>
           <div className="mb-4 flex items-center gap-2">
@@ -1493,10 +1535,20 @@ function PlanDraftCard({
       </PlanContent>
       <PlanFooter className="justify-end">
         <PlanAction>
-          <Button size="sm" onClick={() => onViewPlan?.(title || "计划草案", detailMarkdown)}>
-            <Eye className="mr-1.5 size-3.5" />
-            查看详情
-          </Button>
+          {isStreaming ? (
+            <Button size="sm" variant="outline" disabled>
+              <Loader2 className="mr-1.5 size-3.5 animate-spin" />
+              生成中
+            </Button>
+          ) : (
+            <Button
+              size="sm"
+              onClick={() => onViewPlan?.(title || "计划草案", detailMarkdown)}
+            >
+              <Eye className="mr-1.5 size-3.5" />
+              查看详情
+            </Button>
+          )}
         </PlanAction>
       </PlanFooter>
     </Plan>
@@ -1934,6 +1986,32 @@ const MessageList = memo(function MessageList({
   compressedMessageIds: Set<string>;
   canCompress: boolean;
 }) {
+  const [taskOpenState, setTaskOpenState] = useState<Record<string, boolean>>(
+    {},
+  );
+
+  useEffect(() => {
+    setTaskOpenState((prev) => {
+      let changed = false;
+      const next = { ...prev };
+
+      for (const message of messages) {
+        for (const toolCall of message.toolCalls ?? []) {
+          const shouldAutoCollapse =
+            toolCall.name === "save_plan" &&
+            (toolCall.state === "completed" ||
+              toolCall.state === "output-available");
+          if (shouldAutoCollapse && next[toolCall.id] !== false) {
+            next[toolCall.id] = false;
+            changed = true;
+          }
+        }
+      }
+
+      return changed ? next : prev;
+    });
+  }, [messages]);
+
   const statusLabelMap: Record<ToolCallRecord["state"], string> = {
     running: "执行中",
     completed: "已完成",
@@ -1944,7 +2022,13 @@ const MessageList = memo(function MessageList({
     "input-requested": "待填写",
   };
 
-  const renderToolCall = (tc: ToolCallRecord, isLastRunning: boolean) => {
+  const renderToolCall = (
+    tc: ToolCallRecord,
+    isLastRunning: boolean,
+    options?: {
+      replaceCompletedPlanQuestionsWithLoading?: boolean;
+    },
+  ) => {
     const statusLabel = statusLabelMap[tc.state] ?? "执行中";
     const shouldOpen =
       isLastRunning ||
@@ -1954,9 +2038,23 @@ const MessageList = memo(function MessageList({
       tc.name === "ask_plan_questions" ||
       tc.inputRequest?.kind === "plan_questions";
     const toolTitle = `${getToolTitle(tc.name, tc.arguments ?? {})} · ${statusLabel}`;
+    const hasControlledOpen = Object.prototype.hasOwnProperty.call(
+      taskOpenState,
+      tc.id,
+    );
 
     return (
-      <Task key={tc.id} defaultOpen={shouldOpen}>
+      <Task
+        key={tc.id}
+        defaultOpen={shouldOpen}
+        {...(hasControlledOpen
+          ? {
+              open: taskOpenState[tc.id],
+              onOpenChange: (open: boolean) =>
+                setTaskOpenState((prev) => ({ ...prev, [tc.id]: open })),
+            }
+          : {})}
+      >
         <TaskTrigger
           title={tc.state === "running" && isLastRunning ? <Shimmer duration={1}>{toolTitle}</Shimmer> : toolTitle}
           icon={getToolIcon(tc.name)}
@@ -1971,6 +2069,9 @@ const MessageList = memo(function MessageList({
               onResolveConnectInput={onResolveConnectInput}
               onResolvePlanQuestionsInput={onResolvePlanQuestionsInput}
               onViewPlan={onViewPlan}
+              replaceCompletedPlanQuestionsWithLoading={
+                options?.replaceCompletedPlanQuestionsWithLoading
+              }
             />
           </TaskItem>
         </TaskContent>
@@ -2119,6 +2220,20 @@ const MessageList = memo(function MessageList({
 
       const hasContent = group.blocks.length > 0;
       const isActive = gi === activeCotGroupIdx;
+      const hasAutoOpenTool = group.blocks.some(
+        (block) =>
+          block.type === "tool_call" &&
+          ["running", "input-requested", "approval-requested"].includes(
+            block.toolCall.state,
+          ),
+      );
+      const autoCloseDelay = group.blocks.some(
+        (block) =>
+          block.type === "tool_call" &&
+          block.toolCall.inputRequest?.kind === "plan_questions",
+      )
+        ? 3500
+        : 0;
       const lastRunningTool = isActive
         ? [...group.blocks]
             .reverse()
@@ -2128,6 +2243,12 @@ const MessageList = memo(function MessageList({
                 b.toolCall.state === "running",
             )
         : undefined;
+      const isDraftingPlan = group.blocks.some(
+        (block) =>
+          block.type === "tool_call" &&
+          block.toolCall.name === "save_plan" &&
+          block.toolCall.state === "running",
+      );
       const activeLabel = lastRunningTool
         ? getToolTitle(
             lastRunningTool.toolCall.name,
@@ -2137,7 +2258,12 @@ const MessageList = memo(function MessageList({
           ? "正在思考..."
           : "思考过程";
       return (
-        <ChainOfThought key={`cot-${gi}`} defaultOpen={isActive || hasContent}>
+        <ChainOfThought
+          key={`cot-${gi}`}
+          defaultOpen={isActive || hasContent}
+          autoOpen={isActive || hasAutoOpenTool}
+          autoCloseDelay={autoCloseDelay}
+        >
           <ChainOfThoughtHeader>
             {isActive ? (
               <Shimmer duration={1}>{activeLabel}</Shimmer>
@@ -2167,7 +2293,13 @@ const MessageList = memo(function MessageList({
                 if (block.type === "tool_call") {
                   return (
                     <div key={`tool-${gi}-${bi}`}>
-                      {renderToolCall(block.toolCall, bi === lastRunningIdx)}
+                      {renderToolCall(block.toolCall, bi === lastRunningIdx, {
+                        replaceCompletedPlanQuestionsWithLoading:
+                          isDraftingPlan &&
+                          (block.toolCall.inputRequest?.kind ===
+                            "plan_questions" ||
+                            block.toolCall.name === "ask_plan_questions"),
+                      })}
                     </div>
                   );
                 }
@@ -2204,7 +2336,7 @@ const MessageList = memo(function MessageList({
         const isCompressed = compressedMessageIds.has(msg.id ?? "");
         const compressStatus: "compressing" | "compressed" | null = isCompressing ? "compressing" : isCompressed ? "compressed" : null;
         return (
-          <Message key={msg.id || idx} from={msg.role}>
+          <Message key={msg.id || idx} from={msg.role} data-message-id={msg.id}>
             <MessageContent>
               {msg.role === "assistant" &&
                 (msg.parts
@@ -2356,11 +2488,458 @@ function useCompletionNotification(isLoading: boolean, hasMessages: boolean) {
             body: "生成完成",
             tag: "supercode-completion",
           });
-        } catch {}
+        } catch {
+          // Ignore notification failures when the browser blocks system notices.
+        }
       }
     }
     wasLoading.current = isLoading;
   }, [isLoading, hasMessages]);
+}
+
+const MessageOutline = memo(function MessageOutline({
+  messages,
+  isLoading,
+}: {
+  messages: ChatMessage[];
+  isLoading: boolean;
+}) {
+  const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
+  const [tooltipRect, setTooltipRect] = useState<{ top: number; right: number } | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  const getPreview = useCallback((msg: ChatMessage): string => {
+    const raw = msg.parts
+      ?.filter((p) => p.type === "text")
+      .map((p) => (p as { type: "text"; text: string }).text)
+      .join("") ?? msg.content ?? "";
+    const clean = raw.replace(/[#*`\n]/g, " ").replace(/\s+/g, " ").trim();
+    return clean.length > 28 ? clean.slice(0, 28) + "…" : clean || (msg.role === "user" ? "用户消息" : "AI 回复");
+  }, []);
+
+  const scrollToMessage = useCallback((msgId: string) => {
+    const el = document.querySelector(`[data-message-id="${msgId}"]`);
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }, []);
+
+  const handleHover = useCallback((idx: number) => {
+    setHoveredIdx(idx);
+    const bar = containerRef.current?.querySelector(`[data-outline-idx="${idx}"]`);
+    if (bar) {
+      const barRect = bar.getBoundingClientRect();
+      const containerRect = containerRef.current!.getBoundingClientRect();
+      setTooltipRect({
+        top: barRect.top + barRect.height / 2,
+        right: window.innerWidth - containerRect.left + 6,
+      });
+    }
+  }, []);
+
+  const handleLeave = useCallback(() => {
+    setHoveredIdx(null);
+    setTooltipRect(null);
+  }, []);
+
+  const lineLengths = useMemo(() => {
+    return messages.map((msg) => {
+      const textLen = (msg.parts
+        ?.filter((p) => p.type === "text")
+        .map((p) => (p as { type: "text"; text: string }).text)
+        .join("") ?? msg.content ?? "").length;
+      if (msg.role === "user") return 10;
+      if (textLen === 0) return 6;
+      if (textLen < 20) return 8;
+      if (textLen < 80) return 12;
+      if (textLen < 200) return 16;
+      return 20;
+    });
+  }, [messages]);
+
+  if (messages.length === 0) return null;
+
+  return (
+    <>
+      <div
+        ref={containerRef}
+        className="flex flex-col gap-[9px] items-end select-none"
+      >
+        {messages.map((msg, idx) => {
+          const isLast = idx === messages.length - 1;
+          const isStreaming = isLast && isLoading && msg.role === "assistant";
+          const isActive = isStreaming || (isLast && !isLoading);
+          const isHovered = hoveredIdx === idx;
+          const w = lineLengths[idx];
+
+          return (
+            <div
+              key={msg.id || idx}
+              data-outline-idx={idx}
+              className="cursor-pointer"
+              onMouseEnter={() => handleHover(idx)}
+              onMouseLeave={handleLeave}
+              onClick={() => msg.id && scrollToMessage(msg.id)}
+            >
+              <motion.div
+                className={cn(
+                  "h-[3px] rounded-full transition-colors duration-200",
+                  isActive
+                    ? "bg-foreground/90"
+                    : isHovered
+                      ? "bg-foreground/50"
+                      : msg.role === "user"
+                        ? "bg-foreground/20"
+                        : "bg-foreground/12",
+                )}
+                animate={isStreaming ? { opacity: [1, 0.4, 1] } : undefined}
+                transition={isStreaming ? { duration: 2, repeat: Infinity, ease: "easeInOut" } : { duration: 0.15 }}
+                style={{ width: w * (isActive ? 1.3 : isHovered ? 1.15 : 1) }}
+              />
+            </div>
+          );
+        })}
+      </div>
+
+      <AnimatePresence>
+        {hoveredIdx !== null && tooltipRect && messages[hoveredIdx] && (
+          <motion.div
+            initial={{ opacity: 0, x: 4 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: 4 }}
+            transition={{ duration: 0.12, ease: "easeOut" }}
+            className="fixed z-[9999] pointer-events-none"
+            style={{
+              top: tooltipRect.top,
+              right: tooltipRect.right,
+              transform: "translateY(-50%)",
+            }}
+          >
+            <div
+              className="flex items-center gap-1.5 rounded px-2 py-1 text-[11px] whitespace-nowrap shadow-sm"
+              style={{
+                background: "oklch(0.22 0 0 / 0.92)",
+                color: "oklch(0.82 0 0)",
+                backdropFilter: "blur(8px)",
+              }}
+            >
+              <span
+                className="size-1.5 rounded-full shrink-0"
+                style={{
+                  background: messages[hoveredIdx].role === "user"
+                    ? "oklch(0.65 0.15 250)"
+                    : "oklch(0.7 0.14 160)",
+                }}
+              />
+              <span className="truncate max-w-[160px]">
+                {getPreview(messages[hoveredIdx])}
+              </span>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </>
+  );
+});
+
+function getPathLeaf(input: string) {
+  const normalized = input.replace(/\\/g, "/");
+  return normalized.split("/").filter(Boolean).pop() ?? input;
+}
+
+function getActiveMentionAtCaret(value: string, caret: number) {
+  const safeCaret = Math.max(0, Math.min(caret, value.length));
+  const mentionToken = findMentionTokenAtCaret(value, safeCaret);
+  if (mentionToken && safeCaret > mentionToken.start && safeCaret <= mentionToken.end) {
+    return null;
+  }
+  const mentionStart = value.lastIndexOf("@", safeCaret - 1);
+  if (mentionStart < 0) return null;
+
+  const previousChar = value[mentionStart - 1];
+  if (previousChar && !/[\s([{"'`]/.test(previousChar)) {
+    return null;
+  }
+
+  const query = value.slice(mentionStart + 1, safeCaret);
+  if (/[\s@]/.test(query)) {
+    return null;
+  }
+
+  return {
+    start: mentionStart,
+    end: safeCaret,
+    query,
+  };
+}
+
+const MENTION_KIND_LABELS: Record<MentionSuggestion["kind"], string> = {
+  workspace: "工作区",
+  file: "文件",
+  change: "改动",
+  element: "元素",
+  skill: "技能",
+};
+
+function getMentionSuggestionIcon(kind: MentionSuggestion["kind"]) {
+  switch (kind) {
+    case "workspace":
+      return <FolderOpenIcon className="size-3.5" />;
+    case "file":
+      return <FileCodeIcon className="size-3.5" />;
+    case "change":
+      return <PencilIcon className="size-3.5" />;
+    case "element":
+      return <GlobeIcon className="size-3.5" />;
+    case "skill":
+      return <LightbulbIcon className="size-3.5" />;
+    default:
+      return <MessageSquareIcon className="size-3.5" />;
+  }
+}
+
+function formatMentionToken(value: string) {
+  return `@[${value.replaceAll("]", "\\]")}]`;
+}
+
+function decodeMentionTokenValue(value: string) {
+  return value.replace(/\\\]/g, "]");
+}
+
+function findMentionTokenAtCaret(value: string, caret: number) {
+  const mentionTokenRe = /@\[((?:\\.|[^\]])*)\]/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = mentionTokenRe.exec(value)) !== null) {
+    const token = match[0];
+    const start = match.index;
+    const end = start + token.length;
+    if (caret >= start && caret <= end) {
+      return {
+        start,
+        end,
+        token,
+        value: decodeMentionTokenValue(match[1] ?? ""),
+      };
+    }
+  }
+
+  return null;
+}
+
+function getComposerNodeLength(node: Node): number {
+  if (node.nodeType === Node.TEXT_NODE) {
+    return node.textContent?.length ?? 0;
+  }
+
+  if (node instanceof HTMLElement) {
+    const mentionToken = node.dataset.mentionToken;
+    if (mentionToken) {
+      return mentionToken.length;
+    }
+
+    if (node.tagName === "BR") {
+      return 1;
+    }
+  }
+
+  return Array.from(node.childNodes).reduce(
+    (total, child) => total + getComposerNodeLength(child),
+    0,
+  );
+}
+
+function getComposerPointOffset(root: HTMLElement, container: Node, offset: number): number {
+  if (container === root) {
+    return Array.from(root.childNodes)
+      .slice(0, offset)
+      .reduce((total, child) => total + getComposerNodeLength(child), 0);
+  }
+
+  let total = 0;
+  for (const child of Array.from(root.childNodes)) {
+    if (child === container) {
+      if (child.nodeType === Node.TEXT_NODE) {
+        return total + offset;
+      }
+
+      if (child instanceof HTMLElement && child.dataset.mentionToken) {
+        return total + (offset > 0 ? child.dataset.mentionToken.length : 0);
+      }
+    }
+
+    if (child.contains?.(container)) {
+      if (child instanceof HTMLElement && child.dataset.mentionToken) {
+        return total + (offset > 0 ? child.dataset.mentionToken.length : 0);
+      }
+
+      return total + getComposerPointOffset(child as HTMLElement, container, offset);
+    }
+
+    total += getComposerNodeLength(child);
+  }
+
+  return total;
+}
+
+function getComposerSelectionOffsets(
+  root: HTMLElement,
+): ComposerSelectionOffsets | null {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0) return null;
+
+  const range = selection.getRangeAt(0);
+  if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) {
+    return null;
+  }
+
+  return {
+    start: getComposerPointOffset(root, range.startContainer, range.startOffset),
+    end: getComposerPointOffset(root, range.endContainer, range.endOffset),
+  };
+}
+
+function resolveComposerOffsetToPoint(root: HTMLElement, offset: number) {
+  let total = 0;
+  const children = Array.from(root.childNodes);
+
+  for (let index = 0; index < children.length; index += 1) {
+    const child = children[index];
+    const childLength = getComposerNodeLength(child);
+
+    if (offset <= total + childLength) {
+      if (child.nodeType === Node.TEXT_NODE) {
+        return {
+          container: child,
+          offset: Math.max(0, Math.min(offset - total, childLength)),
+        };
+      }
+
+      if (child instanceof HTMLElement && child.dataset.mentionToken) {
+        return offset <= total + childLength / 2
+          ? { container: root, offset: index }
+          : { container: root, offset: index + 1 };
+      }
+    }
+
+    total += childLength;
+  }
+
+  return { container: root, offset: root.childNodes.length };
+}
+
+function setComposerSelectionOffsets(
+  root: HTMLElement,
+  start: number,
+  end = start,
+) {
+  const selection = window.getSelection();
+  if (!selection) return;
+
+  const range = document.createRange();
+  const startPoint = resolveComposerOffsetToPoint(root, start);
+  const endPoint = resolveComposerOffsetToPoint(root, end);
+  range.setStart(startPoint.container, startPoint.offset);
+  range.setEnd(endPoint.container, endPoint.offset);
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
+function serializeComposerContent(root: HTMLElement) {
+  return Array.from(root.childNodes)
+    .map((child) => {
+      if (child.nodeType === Node.TEXT_NODE) {
+        return child.textContent?.replace(/\u00a0/g, " ") ?? "";
+      }
+
+      if (child instanceof HTMLElement) {
+        if (child.dataset.mentionToken) {
+          return child.dataset.mentionToken;
+        }
+
+        if (child.tagName === "BR") {
+          return "\n";
+        }
+      }
+
+      return child.textContent?.replace(/\u00a0/g, " ") ?? "";
+    })
+    .join("");
+}
+
+function buildMentionRenderSegments(
+  value: string,
+  suggestionByToken: Map<string, MentionSuggestion>,
+): MentionRenderSegment[] {
+  const segments: MentionRenderSegment[] = [];
+  const mentionTokenRe = /@\[((?:\\.|[^\]])*)\]/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = mentionTokenRe.exec(value)) !== null) {
+    if (match.index > lastIndex) {
+      segments.push({
+        type: "text",
+        value: value.slice(lastIndex, match.index),
+      });
+    }
+
+    const rawValue = match[1] ?? "";
+    const tokenValue = match[0];
+    const mentionValue = decodeMentionTokenValue(rawValue);
+    const suggestion = suggestionByToken.get(tokenValue);
+    segments.push({
+      type: "mention",
+      token: tokenValue,
+      value: mentionValue,
+      label: suggestion?.label ?? getPathLeaf(mentionValue),
+      kind: suggestion?.kind,
+    });
+    lastIndex = match.index + tokenValue.length;
+  }
+
+  if (lastIndex < value.length) {
+    segments.push({
+      type: "text",
+      value: value.slice(lastIndex),
+    });
+  }
+
+  return segments;
+}
+
+const MENTION_KIND_ICON_COLORS: Record<MentionSuggestion["kind"], string> = {
+  workspace: "text-amber-600 bg-amber-50 dark:text-amber-400 dark:bg-amber-950/60",
+  file: "text-blue-600 bg-blue-50 dark:text-blue-400 dark:bg-blue-950/60",
+  change: "text-emerald-600 bg-emerald-50 dark:text-emerald-400 dark:bg-emerald-950/60",
+  element: "text-violet-600 bg-violet-50 dark:text-violet-400 dark:bg-violet-950/60",
+};
+
+const MENTION_KIND_BADGE_STYLES: Record<MentionSuggestion["kind"], string> = {
+  workspace:
+    "border-amber-200/80 bg-amber-50/95 text-amber-950 dark:border-amber-900/80 dark:bg-amber-950/70 dark:text-amber-100",
+  file:
+    "border-blue-200/80 bg-blue-50/95 text-blue-950 dark:border-blue-900/80 dark:bg-blue-950/70 dark:text-blue-100",
+  change:
+    "border-emerald-200/80 bg-emerald-50/95 text-emerald-950 dark:border-emerald-900/80 dark:bg-emerald-950/70 dark:text-emerald-100",
+  element:
+    "border-violet-200/80 bg-violet-50/95 text-violet-950 dark:border-violet-900/80 dark:bg-violet-950/70 dark:text-violet-100",
+};
+
+function focusComposerAtOffset(composerId: string, start: number, end = start) {
+  window.requestAnimationFrame(() => {
+    const composer = document.getElementById(composerId);
+    if (!(composer instanceof HTMLElement)) return;
+    composer.focus({ preventScroll: true });
+    setComposerSelectionOffsets(composer, start, end);
+  });
+}
+
+function normalizeMentionCaret(value: string, caret: number) {
+  const token = findMentionTokenAtCaret(value, caret);
+  if (!token) return caret;
+  if (caret === token.start || caret === token.end) return caret;
+  return caret - token.start < token.end - caret ? token.start : token.end;
 }
 
 export function ChatPanel({
@@ -2375,6 +2954,8 @@ export function ChatPanel({
   model,
   reasoningEffort,
   modelOptions,
+  availableSkills,
+  fileTree,
   onContextOpenChange,
   onInputChange,
   onKeyDown,
@@ -2395,10 +2976,25 @@ export function ChatPanel({
   onRemoveElementAttachment,
 }: ChatPanelProps) {
   const planSteps = contextData?.planSteps ?? [];
+  const composerRef = useRef<HTMLDivElement>(null);
   const [isFocused, setIsFocused] = useState(false);
   const [attachmentFiles, setAttachmentFiles] = useState<AttachmentData[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const composerInputRef = useRef<HTMLDivElement>(null);
+  const composerInputId = useId();
   const [isModelSelectorOpen, setIsModelSelectorOpen] = useState(false);
+  const [composerSelection, setComposerSelection] = useState<ComposerSelectionOffsets>({
+    start: 0,
+    end: 0,
+  });
+  const [mentionNavigation, setMentionNavigation] = useState<{
+    key: string | null;
+    index: number;
+  }>({
+    key: null,
+    index: 0,
+  });
+  const [dismissedMentionKey, setDismissedMentionKey] = useState<string | null>(null);
 
   useCompletionNotification(isLoading, messages.length > 0);
 
@@ -2435,6 +3031,137 @@ export function ChatPanel({
   const selectedModel =
     modelOptions.find((m) => m.id === model) ?? modelOptions[0];
   const selectedReasoningEffort = reasoningEffort ?? "default";
+  const mentionSuggestions = useMemo(() => {
+    const items: MentionSuggestion[] = [];
+    const seen = new Set<string>();
+    const pushSuggestion = (suggestion: MentionSuggestion) => {
+      const normalizedKey = suggestion.insertValue.toLowerCase();
+      if (seen.has(normalizedKey)) return;
+      seen.add(normalizedKey);
+      items.push(suggestion);
+    };
+
+    for (const skill of availableSkills) {
+      pushSuggestion({
+        id: `skill:${skill.id}`,
+        kind: "skill",
+        label: skill.name,
+        description: `${skill.scope === "builtin" ? "内置" : "工作区"} skill · ${skill.description}`,
+        insertValue: formatMentionToken(`skill:${skill.id}`),
+      });
+    }
+
+    if (contextData?.workspace) {
+      pushSuggestion({
+        id: `workspace:${contextData.workspace}`,
+        kind: "workspace",
+        label: getPathLeaf(contextData.workspace),
+        description: contextData.workspace,
+        insertValue: formatMentionToken(contextData.workspace),
+      });
+    }
+
+    for (const filePath of contextData?.openFiles ?? []) {
+      pushSuggestion({
+        id: `file:${filePath}`,
+        kind: "file",
+        label: getPathLeaf(filePath),
+        description: filePath,
+        insertValue: formatMentionToken(filePath),
+      });
+    }
+
+    const flattenFileTree = (nodes: FileTreeNode[]) => {
+      for (const node of nodes) {
+        if (node.type === "file") {
+          pushSuggestion({
+            id: `file:${node.path}`,
+            kind: "file",
+            label: node.name,
+            description: node.path,
+            insertValue: formatMentionToken(node.path),
+          });
+        }
+        if (node.children) {
+          flattenFileTree(node.children);
+        }
+      }
+    };
+    flattenFileTree(fileTree);
+
+    const recentChangePaths = [
+      ...codeChanges.map((change) => change.path),
+      ...(contextData?.recentCodeChanges ?? []).map((change) => change.path),
+    ];
+    for (const path of recentChangePaths) {
+      if (!path) continue;
+      pushSuggestion({
+        id: `change:${path}`,
+        kind: "change",
+        label: getPathLeaf(path),
+        description: `最近改动 · ${path}`,
+        insertValue: formatMentionToken(path),
+      });
+    }
+
+    for (const element of elementAttachments) {
+      pushSuggestion({
+        id: `element:${element.id}`,
+        kind: "element",
+        label: element.selector,
+        description: element.sourceUrl
+          ? `${element.sourceUrl.replace(/^https?:\/\//, "")}`
+          : "已附加页面元素",
+        insertValue: formatMentionToken(element.selector),
+      });
+    }
+
+    return items;
+  }, [availableSkills, codeChanges, contextData, elementAttachments, fileTree]);
+  const mentionSuggestionByToken = useMemo(() => {
+    const map = new Map<string, MentionSuggestion>();
+    for (const suggestion of mentionSuggestions) {
+      map.set(suggestion.insertValue, suggestion);
+    }
+    return map;
+  }, [mentionSuggestions]);
+  const mentionRenderSegments = useMemo(
+    () => buildMentionRenderSegments(input, mentionSuggestionByToken),
+    [input, mentionSuggestionByToken],
+  );
+
+  const activeMention = useMemo(
+    () => getActiveMentionAtCaret(input, composerSelection.start),
+    [composerSelection.start, input],
+  );
+  const activeMentionKey = activeMention
+    ? `${activeMention.start}:${activeMention.query}`
+    : null;
+  const filteredMentionSuggestions = useMemo(() => {
+    if (!activeMention) return [];
+
+    const normalizedQuery = activeMention.query.trim().toLowerCase();
+    if (!normalizedQuery) {
+      return mentionSuggestions;
+    }
+
+    return mentionSuggestions.filter((suggestion) =>
+      [
+        suggestion.label,
+        suggestion.description,
+        suggestion.insertValue,
+      ].some((value) => value.toLowerCase().includes(normalizedQuery)),
+    );
+  }, [activeMention, mentionSuggestions]);
+  const mentionSelectedIndex =
+    activeMentionKey && mentionNavigation.key === activeMentionKey
+      ? Math.min(
+          mentionNavigation.index,
+          Math.max(filteredMentionSuggestions.length - 1, 0),
+        )
+      : 0;
+  const isMentionMenuOpen =
+    Boolean(activeMention) && dismissedMentionKey !== activeMentionKey;
 
   const lastAssistantMessage = useMemo(() => {
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -2478,75 +3205,296 @@ export function ChatPanel({
     isLoading,
   ]);
 
+  useEffect(() => {
+    if (!isMentionMenuOpen) return;
+    const frame = window.requestAnimationFrame(() => {
+      composerInputRef.current?.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [isMentionMenuOpen]);
+
+  useLayoutEffect(() => {
+    const composer = composerInputRef.current;
+    if (!composer || document.activeElement !== composer) return;
+    setComposerSelectionOffsets(
+      composer,
+      composerSelection.start,
+      composerSelection.end,
+    );
+  }, [composerSelection, input]);
+
+  const syncComposerSelection = useCallback((target: HTMLElement) => {
+    const selection = getComposerSelectionOffsets(target);
+    if (!selection) return;
+    const normalizedStart = normalizeMentionCaret(input, selection.start);
+    const normalizedEnd = normalizeMentionCaret(input, selection.end);
+    if (
+      normalizedStart !== selection.start ||
+      normalizedEnd !== selection.end
+    ) {
+      setComposerSelectionOffsets(target, normalizedStart, normalizedEnd);
+    }
+    setComposerSelection({
+      start: normalizedStart,
+      end: normalizedEnd,
+    });
+  }, [input]);
+
+  const buildMentionInsertion = useCallback(
+    (suggestion: MentionSuggestion) => {
+      if (!activeMention) return null;
+
+      const nextValue =
+        input.slice(0, activeMention.start) +
+        `${suggestion.insertValue} ` +
+        input.slice(activeMention.end);
+      const nextCaret = activeMention.start + suggestion.insertValue.length + 1;
+
+      return { nextValue, nextCaret };
+    },
+    [activeMention, input],
+  );
+
+  const removeMentionToken = useCallback(
+    (start: number, end: number) => {
+      const nextValue = input.slice(0, start) + input.slice(end);
+      onInputChange(nextValue);
+      setComposerSelection({ start, end: start });
+      setDismissedMentionKey(null);
+      focusComposerAtOffset(composerInputId, start);
+    },
+    [composerInputId, input, onInputChange],
+  );
+
+  const handleComposerInput = useCallback(
+    (e: React.FormEvent<HTMLDivElement>) => {
+      const nextValue = serializeComposerContent(e.currentTarget);
+      const selection = getComposerSelectionOffsets(e.currentTarget);
+      onInputChange(nextValue);
+      setComposerSelection({
+        start: normalizeMentionCaret(nextValue, selection?.start ?? nextValue.length),
+        end: normalizeMentionCaret(nextValue, selection?.end ?? nextValue.length),
+      });
+    },
+    [onInputChange],
+  );
+
+  const handleComposerPaste = useCallback(
+    (e: React.ClipboardEvent<HTMLDivElement>) => {
+      e.preventDefault();
+      const pastedText = e.clipboardData.getData("text/plain");
+      if (!pastedText) return;
+
+      const nextValue =
+        input.slice(0, composerSelection.start) +
+        pastedText +
+        input.slice(composerSelection.end);
+      const nextCaret = composerSelection.start + pastedText.length;
+      onInputChange(nextValue);
+      setComposerSelection({ start: nextCaret, end: nextCaret });
+      focusComposerAtOffset(composerInputId, nextCaret);
+    },
+    [composerInputId, composerSelection.end, composerSelection.start, input, onInputChange],
+  );
+
+  const handleComposerKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLDivElement>) => {
+      const caretStart = composerSelection.start;
+      const caretEnd = composerSelection.end;
+      const suggestionCount = filteredMentionSuggestions.length;
+
+      if (caretStart === caretEnd) {
+        if (e.key === "Backspace") {
+          const activeToken =
+            findMentionTokenAtCaret(input, caretStart) ??
+            findMentionTokenAtCaret(input, Math.max(caretStart - 1, 0));
+          if (activeToken && caretStart > activeToken.start) {
+            e.preventDefault();
+            removeMentionToken(activeToken.start, activeToken.end);
+            return;
+          }
+        }
+
+        if (e.key === "Delete") {
+          const activeToken = findMentionTokenAtCaret(input, caretStart);
+          if (activeToken && caretStart < activeToken.end) {
+            e.preventDefault();
+            removeMentionToken(activeToken.start, activeToken.end);
+            return;
+          }
+        }
+      }
+
+      if (isMentionMenuOpen && suggestionCount > 0) {
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          setMentionNavigation((prev) => ({
+            key: activeMentionKey,
+            index:
+              prev.key === activeMentionKey
+                ? (prev.index + 1) % suggestionCount
+                : 0,
+          }));
+          return;
+        }
+
+        if (e.key === "ArrowUp") {
+          e.preventDefault();
+          setMentionNavigation((prev) => ({
+            key: activeMentionKey,
+            index:
+              prev.key === activeMentionKey
+                ? (prev.index - 1 + suggestionCount) % suggestionCount
+                : suggestionCount - 1,
+          }));
+          return;
+        }
+
+        if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+          e.preventDefault();
+          const insertion = buildMentionInsertion(
+            filteredMentionSuggestions[
+              Math.min(mentionSelectedIndex, suggestionCount - 1)
+            ],
+          );
+          if (insertion) {
+            onInputChange(insertion.nextValue);
+            setComposerSelection({
+              start: insertion.nextCaret,
+              end: insertion.nextCaret,
+            });
+            setDismissedMentionKey(null);
+            focusComposerAtOffset(composerInputId, insertion.nextCaret);
+          }
+          return;
+        }
+      }
+
+      if (e.key === "Enter" && e.shiftKey) {
+        e.preventDefault();
+        const nextValue = input.slice(0, caretStart) + "\n" + input.slice(caretEnd);
+        const nextCaret = caretStart + 1;
+        onInputChange(nextValue);
+        setComposerSelection({ start: nextCaret, end: nextCaret });
+        focusComposerAtOffset(composerInputId, nextCaret);
+        return;
+      }
+
+      if (isMentionMenuOpen && (e.key === "Escape" || e.key === "Tab")) {
+        setDismissedMentionKey(activeMentionKey);
+      }
+
+      onKeyDown(e);
+      window.requestAnimationFrame(() => {
+        if (composerInputRef.current) {
+          syncComposerSelection(composerInputRef.current);
+        }
+      });
+    },
+    [
+      activeMentionKey,
+      buildMentionInsertion,
+      composerInputId,
+      composerSelection.end,
+      composerSelection.start,
+      filteredMentionSuggestions,
+      input,
+      isMentionMenuOpen,
+      mentionSelectedIndex,
+      onKeyDown,
+      onInputChange,
+      removeMentionToken,
+      syncComposerSelection,
+    ],
+  );
+
+  const handleMentionInteractOutside = useCallback(
+    (event: Event) => {
+      const target = event.target;
+      if (target instanceof Node && composerRef.current?.contains(target)) {
+        return;
+      }
+      setDismissedMentionKey(activeMentionKey);
+    },
+    [activeMentionKey],
+  );
+
   return (
     <div className="h-full flex flex-col min-w-0 border-r">
-      <Conversation className="flex-1">
-        <ConversationContent className="gap-4 pb-4 max-w-[720px] mx-auto w-full">
-          <ChatStreamBody
-            sessionId={sessionId}
-            isLoading={isLoading}
-            messages={messages}
-            onResolveDeleteConfirmation={onResolveDeleteConfirmation}
-            onResolveGitConfirmation={onResolveGitConfirmation}
-            onResolveConnectInput={onResolveConnectInput}
-            onResolvePlanQuestionsInput={onResolvePlanQuestionsInput}
-            onViewPlan={onViewPlan}
-            personaState={personaState}
-            onCompletionAction={onCompletionAction}
-            activeCompletionAction={activeCompletionAction}
-            canCompress={canCompress}
-          />
-        </ConversationContent>
-      </Conversation>
-
-      <div className="shrink-0 border-t bg-background">
-        <div className="max-w-[720px] mx-auto w-full">
-          <PlanToggle planSteps={planSteps} isStreaming={isLoading} />
-          <div className="px-3 pb-1">
-            <CodeChangePanel
-              changes={codeChanges}
-              title="本次会话代码追踪"
-              emptyMessage="本轮对话还没有发生新增、修改或删除代码。"
-              collapsible
-              compact
-              defaultOpen={false}
+      <div className="flex-1 relative min-h-0">
+        <Conversation className="absolute inset-0">
+          <ConversationContent className="gap-4 pb-4 max-w-[720px] mx-auto w-full">
+            <ChatStreamBody
+              sessionId={sessionId}
+              isLoading={isLoading}
+              messages={messages}
+              onResolveDeleteConfirmation={onResolveDeleteConfirmation}
+              onResolveGitConfirmation={onResolveGitConfirmation}
+              onResolveConnectInput={onResolveConnectInput}
+              onResolvePlanQuestionsInput={onResolvePlanQuestionsInput}
+              onViewPlan={onViewPlan}
+              personaState={personaState}
+              onCompletionAction={onCompletionAction}
+              activeCompletionAction={activeCompletionAction}
+              canCompress={canCompress}
             />
+          </ConversationContent>
+        </Conversation>
+        <div className="absolute right-2 top-0 bottom-0 flex items-center pointer-events-none z-10">
+          <div className="pointer-events-auto">
+            <MessageOutline messages={messages} isLoading={isLoading} />
           </div>
+        </div>
+      </div>
 
-          <div className="p-3 pt-2">
-            <div className="flex flex-col rounded-lg border bg-muted/30 p-2 shadow-sm focus-within:ring-1 focus-within:ring-ring">
-              <input
-                ref={fileInputRef}
-                type="file"
-                className="hidden"
-                multiple
-                onChange={handleFileInputChange}
+        <div className="shrink-0 border-t bg-background">
+          <div className="max-w-[720px] mx-auto w-full">
+            <PlanToggle planSteps={planSteps} isStreaming={isLoading} />
+            <div className="px-3 pb-1">
+              <CodeChangePanel
+                changes={codeChanges}
+                title="本次会话代码追踪"
+                emptyMessage="本轮对话还没有发生新增、修改或删除代码。"
+                collapsible
+                compact
+                defaultOpen={false}
               />
+            </div>
 
-              {attachmentFiles.length > 0 && (
-                <div className="pb-2">
-                  <Attachments variant="inline">
-                    {attachmentFiles.map((file) => (
-                      <Attachment
-                        key={file.id}
-                        data={file}
-                        onRemove={() => handleRemoveAttachment(file.id)}
-                      >
-                        <AttachmentPreview />
-                        <AttachmentInfo />
-                        <AttachmentRemove />
-                      </Attachment>
-                    ))}
-                  </Attachments>
-                </div>
-              )}
+            <div className="p-3 pt-2">
+              <div className="flex flex-col rounded-lg border bg-muted/30 p-2 shadow-sm focus-within:ring-1 focus-within:ring-ring">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  className="hidden"
+                  multiple
+                  onChange={handleFileInputChange}
+                />
 
-              {elementAttachments.length > 0 && (
-                <div className="pb-2 flex flex-wrap gap-1.5">
-                  {elementAttachments.map((el) => (
-                    <div
-                      key={el.id}
-                      className="group relative flex h-16 items-center gap-1.5 rounded-md border border-border px-1.5 py-1 transition-all hover:bg-accent/50"
+                {attachmentFiles.length > 0 && (
+                  <div className="pb-2">
+                    <Attachments variant="inline">
+                      {attachmentFiles.map((file) => (
+                        <Attachment
+                          key={file.id}
+                          data={file}
+                          onRemove={() => handleRemoveAttachment(file.id)}
+                        >
+                          <AttachmentPreview />
+                          <AttachmentInfo />
+                          <AttachmentRemove />
+                        </Attachment>
+                      ))}
+                    </Attachments>
+                  </div>
+                )}
+
+                {elementAttachments.length > 0 && (
+                  <div className="pb-2 flex flex-wrap gap-1.5">
+                    {elementAttachments.map((el) => (
+                      <div
+                        key={el.id}
+                        className="group relative flex h-16 items-center gap-1.5 rounded-md border border-border px-1.5 py-1 transition-all hover:bg-accent/50"
                     >
                       <div className="size-12 shrink-0 overflow-hidden rounded bg-white">
                         <iframe
@@ -2579,16 +3527,27 @@ export function ChatPanel({
                 </div>
               )}
 
-              <Textarea
-                value={input}
-                onChange={(e) => onInputChange(e.target.value)}
-                onKeyDown={onKeyDown}
-                onFocus={() => setIsFocused(true)}
-                onBlur={() => setIsFocused(false)}
-                placeholder="告诉我想实现什么，或粘贴代码、截图、提问..."
-                className="min-h-[80px] resize-none border-0 bg-transparent px-1 py-1.5 shadow-none focus-visible:ring-0"
-                rows={3}
-              />
+              <div
+                ref={composerRef}
+                className="relative"
+                onFocusCapture={() => setIsFocused(true)}
+                onBlurCapture={(event) => {
+                  if (
+                    event.relatedTarget instanceof Node &&
+                    event.currentTarget.contains(event.relatedTarget)
+                  ) {
+                    return;
+                  }
+                  setIsFocused(false);
+                }}
+              >
+                <ChatComposerEditor
+                  value={input}
+                  suggestions={mentionSuggestions}
+                  onChange={onInputChange}
+                  onSubmit={onSendMessage}
+                />
+              </div>
               <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2 border-t border-border/50 pt-2">
                 <div className="flex min-w-0 flex-wrap items-center gap-1">
                   <Button

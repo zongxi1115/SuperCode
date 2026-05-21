@@ -7,8 +7,8 @@ from unittest.mock import patch
 from agent import ChatSession
 from agent.tools import ToolContext
 from fastapi_app import main as api_main
-from fastapi_app.api_models import PlanSubmitRequest, ToolInputSubmitRequest
-from plan_agent.tools import AskPlanQuestionsTool, SavePlanTool, SearchWebTool
+from fastapi_app.api_models import PlanDraftUpdateRequest, PlanSubmitRequest, ToolInputSubmitRequest
+from plan_agent.tools import AskPlanQuestionsTool, ReadCurrentPlanTool, SavePlanTool, SearchWebTool
 
 
 class _FakeHTTPResponse:
@@ -78,6 +78,22 @@ class PlanAgentToolsTests(unittest.TestCase):
         self.assertEqual(set(output["plan"].keys()), {"title", "summary", "overview", "keySteps", "markdown"})
         self.assertEqual(output["data_parts"][0]["type"], "data-plan-draft")
 
+    def test_save_plan_tool_generates_markdown_when_missing(self) -> None:
+        output = SavePlanTool().run(
+            {
+                "title": "后台 MVP",
+                "summary": "先做登录和仪表盘",
+                "overview": "先完成最小可用后台闭环，再补扩展能力。",
+                "key_steps": ["搭登录页", "接鉴权", "做仪表盘"],
+            },
+            self.context,
+        )
+
+        markdown = output["plan"]["markdown"]
+        self.assertIn("# 后台 MVP", markdown)
+        self.assertIn("## 总览", markdown)
+        self.assertIn("1. 搭登录页", markdown)
+
     def test_search_web_tool_parses_tinyfish_results(self) -> None:
         tool = SearchWebTool()
         with patch("plan_agent.tools.urlopen", return_value=_FakeHTTPResponse({
@@ -95,6 +111,29 @@ class PlanAgentToolsTests(unittest.TestCase):
         self.assertEqual(output["count"], 1)
         self.assertEqual(output["results"][0]["title"], "Tinyfish Docs")
         self.assertEqual(output["results"][0]["url"], "https://docs.tinyfish.ai")
+
+    def test_read_current_plan_tool_returns_latest_plan(self) -> None:
+        tool = ReadCurrentPlanTool()
+        context = ToolContext(
+            workspace=self.workspace,
+            metadata={
+                "backend_base_url": "http://localhost:8000",
+                "session_id": "session-1",
+            },
+        )
+        with patch("plan_agent.tools.urlopen", return_value=_FakeHTTPResponse({
+            "plan": {
+                "title": "后台 MVP",
+                "markdown": "# 后台 MVP\n\n- 登录",
+            },
+            "planState": {
+                "status": "draft_ready",
+            },
+        })):
+            output = tool.run({}, context)
+
+        self.assertEqual(output["plan"]["title"], "后台 MVP")
+        self.assertEqual(output["planState"]["status"], "draft_ready")
 
 
 class PlanAgentEndpointsTests(unittest.IsolatedAsyncioTestCase):
@@ -204,6 +243,22 @@ class PlanAgentEndpointsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("总览", payload["codingInput"])
         self.assertIn("关键步骤", payload["codingInput"])
         self.assertIn("仪表盘", payload["codingInput"])
+
+    async def test_save_current_plan_draft_updates_session_plan_state(self) -> None:
+        response = await api_main.save_current_plan_draft(
+            self.session.session_id,
+            PlanDraftUpdateRequest(
+                title="后台 MVP v2",
+                markdown="# 后台 MVP v2\n\n## 新计划\n\n- 登录\n- 仪表盘\n- 审计日志",
+            ),
+        )
+
+        payload = json.loads(response.body.decode("utf-8"))
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["plan"]["title"], "后台 MVP v2")
+        self.assertIn("审计日志", payload["plan"]["markdown"])
+        self.assertEqual(self.session.plan_state["draft"]["title"], "后台 MVP v2")
+        self.assertEqual(self.session.plan_state["status"], "awaiting_user_input")
 
 
 if __name__ == "__main__":

@@ -107,6 +107,21 @@ export function findDirectoryNode(nodes: DirectoryNode[], targetPath: string): D
 export function getFileLanguage(path: string): string {
   const ext = path.split('.').pop()?.toLowerCase() ?? '';
   const langMap: Record<string, string> = {
+    tsx: 'typescript', jsx: 'javascript', ts: 'typescript', js: 'javascript',
+    py: 'python', json: 'json', css: 'css', scss: 'scss',
+    html: 'html', md: 'markdown', yaml: 'yaml', yml: 'yaml',
+    toml: 'ini', rs: 'rust', go: 'go', sql: 'sql', sh: 'shell',
+    vue: 'html', svelte: 'html', astro: 'html', xml: 'xml',
+    c: 'c', cpp: 'cpp', h: 'c', hpp: 'cpp',
+    java: 'java', rb: 'ruby', php: 'php', swift: 'swift',
+    kt: 'kotlin', lua: 'lua', dockerfile: 'dockerfile',
+  };
+  return langMap[ext] ?? 'plaintext';
+}
+
+export function getShikiLanguage(path: string): string {
+  const ext = path.split('.').pop()?.toLowerCase() ?? '';
+  const langMap: Record<string, string> = {
     tsx: 'tsx', jsx: 'jsx', ts: 'typescript', js: 'javascript',
     py: 'python', json: 'json', css: 'css', scss: 'scss',
     html: 'html', md: 'markdown', yaml: 'yaml', yml: 'yaml',

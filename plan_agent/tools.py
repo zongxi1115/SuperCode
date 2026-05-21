@@ -395,7 +395,8 @@ class AskPlanQuestionsTool(PlanBaseTool):
 class SavePlanTool(PlanBaseTool):
     name = "save_plan"
     description = (
-        "保存当前计划草案到后端。参数：title、summary、overview、key_steps、markdown（必填）。"
+        "保存当前计划草案到后端。参数：title、summary、overview、key_steps（必填），"
+        "markdown（可选，缺省时自动生成）。"
     )
     parameters_schema = {
         "type": "object",
@@ -409,9 +410,29 @@ class SavePlanTool(PlanBaseTool):
             },
             "markdown": {"type": "string"},
         },
-        "required": ["title", "summary", "overview", "key_steps", "markdown"],
+        "required": ["title", "summary", "overview", "key_steps"],
         "additionalProperties": False,
     }
+
+    def _build_markdown(
+        self,
+        *,
+        title: str,
+        summary: str,
+        overview: str,
+        key_steps: list[str],
+    ) -> str:
+        sections = [f"# {title}", "", summary, "", "## 总览", "", overview]
+        if key_steps:
+            sections.extend(
+                [
+                    "",
+                    "## 关键步骤",
+                    "",
+                    *[f"{index + 1}. {step}" for index, step in enumerate(key_steps)],
+                ]
+            )
+        return "\n".join(section for section in sections if section is not None).strip()
 
     def run(self, arguments: dict[str, object], context: ToolContext) -> dict[str, Any]:
         del context
@@ -429,7 +450,12 @@ class SavePlanTool(PlanBaseTool):
         if not key_steps:
             raise ValueError("key_steps 不能为空。")
         if not markdown:
-            raise ValueError("markdown 不能为空。")
+            markdown = self._build_markdown(
+                title=title,
+                summary=summary,
+                overview=overview,
+                key_steps=key_steps,
+            )
 
         plan = {
             "title": title,
@@ -450,6 +476,40 @@ class SavePlanTool(PlanBaseTool):
         }
 
 
+class ReadCurrentPlanTool(PlanBaseTool):
+    name = "read_current_plan"
+    description = (
+        "读取当前会话里最新的计划草案/当前计划正文。"
+        "当用户在前端手动编辑过计划后，用它获取最新 markdown 和结构化内容。"
+    )
+    parameters_schema = {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    }
+
+    def run(self, arguments: dict[str, object], context: ToolContext) -> dict[str, Any]:
+        del arguments
+        backend_base_url = str(context.metadata.get("backend_base_url") or "").rstrip("/")
+        session_id = str(context.metadata.get("session_id") or "").strip()
+        if not backend_base_url or not session_id:
+            raise RuntimeError("缺少 backend_base_url 或 session_id，无法读取当前计划。")
+
+        payload = self._request_json(
+            method="GET",
+            url=f"{backend_base_url}/api/sessions/{session_id}/plan-draft/current",
+            api_key="local-session",
+            timeout=10,
+        )
+        plan = payload.get("plan")
+        if not isinstance(plan, dict):
+            raise RuntimeError("当前会话没有可读取的计划草案。")
+        return {
+            "plan": plan,
+            "planState": payload.get("planState"),
+        }
+
+
 def build_plan_tools() -> list[BaseTool]:
     return [
         ListFileTool(),
@@ -460,4 +520,5 @@ def build_plan_tools() -> list[BaseTool]:
         FetchUrlContentTool(),
         AskPlanQuestionsTool(),
         SavePlanTool(),
+        ReadCurrentPlanTool(),
     ]

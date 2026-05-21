@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlparse
+from urllib.request import Request, urlopen
 
 from agent.tools import BaseTool, ToolContext
 
@@ -2183,6 +2184,50 @@ class GreepToolCompat(GrepFileTool):
     """保留一个兼容类名，避免以后手滑拼错导入。"""
 
 
+class ReadCurrentPlanTool(CodingBaseTool):
+    """读取当前会话里最新的计划草案。"""
+
+    name = "read_current_plan"
+    description = (
+        "读取当前会话中最新的计划草案/计划正文。"
+        "当用户在前端手动编辑过计划后，用它获取最新 markdown 和结构化内容。"
+    )
+    parameters_schema = {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    }
+
+    def run(self, arguments: dict[str, object], context: ToolContext) -> dict[str, Any]:
+        del arguments
+        backend_base_url = str(context.metadata.get("backend_base_url") or "").rstrip("/")
+        session_id = str(context.metadata.get("session_id") or "").strip()
+        if not backend_base_url or not session_id:
+            raise RuntimeError("缺少 backend_base_url 或 session_id，无法读取当前计划。")
+
+        request = Request(
+            f"{backend_base_url}/api/sessions/{session_id}/plan-draft/current",
+            method="GET",
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "SuperCode/1.0",
+            },
+        )
+        try:
+            with urlopen(request, timeout=10) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except Exception as exc:
+            raise RuntimeError(f"读取当前计划失败：{exc}") from exc
+
+        plan = payload.get("plan")
+        if not isinstance(plan, dict):
+            raise RuntimeError("当前会话没有可读取的计划草案。")
+        return {
+            "plan": plan,
+            "planState": payload.get("planState"),
+        }
+
+
 class GitCommitTool(CodingBaseTool):
 
     name = "git_commit"
@@ -2472,6 +2517,7 @@ def build_coding_tools() -> list[BaseTool]:
         TerminalInputTool(),
         TerminalWaitTool(),
         OpenBrowserTool(),
+        ReadCurrentPlanTool(),
         ExcecuteTool(),
         ExecuteTool(),
         GitCommitTool(),

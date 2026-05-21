@@ -51,6 +51,7 @@ from fastapi_app.api_models import (
     GitTagRequest,
     ModelConfigPayload,
     PlanSubmitRequest,
+    PlanDraftUpdateRequest,
     SessionContextMessage,
     SessionContextCompressionRequest,
     SessionContextCompressionResponse,
@@ -71,6 +72,10 @@ from fastapi_app.api_models import (
 from fastapi_app.settings_store import (
     load_settings,
     save_settings,
+)
+from fastapi_app.skills import (
+    list_available_skill_summaries,
+    resolve_message_skills,
 )
 from fastapi_app.model_config_store import (
     build_agent_config,
@@ -250,6 +255,7 @@ class UISession:
             selectedFilePath=self.selected_file_path,
             selectedFileContent=read_text_file(self.selected_file_path, self.workspace),
             openFiles=self.open_files,
+            availableSkills=list_available_skill_summaries(self.workspace),
             codeChanges=self.code_changes,
             planSteps=self.plan_steps,
         )
@@ -349,6 +355,7 @@ class UISession:
             recentTools=recent_tools,
             codeChangeCount=len(self.code_changes),
             recentCodeChanges=self.code_changes[-8:],
+            availableSkills=list_available_skill_summaries(self.workspace),
             planSteps=self.plan_steps,
         )
 
@@ -812,6 +819,7 @@ def sync_session_runtime_state_for_agent(session: UISession) -> None:
     if not isinstance(data, dict):
         return
     data["runtime_state"] = build_agent_runtime_state(session)
+    data["available_skills"] = list_available_skill_summaries(session.workspace)
 
 
 def set_session_phase(session: UISession, phase: str) -> None:
@@ -1432,6 +1440,7 @@ async def create_session(request: CreateSessionRequest) -> JSONResponse:
             selectedFilePath=session.selected_file_path,
             selectedFileContent="",
             openFiles=session.open_files,
+            availableSkills=list_available_skill_summaries(session.workspace),
             codeChanges=session.code_changes,
             planSteps=session.plan_steps,
         )
@@ -1472,6 +1481,7 @@ async def get_session_snapshot(session_id: str) -> JSONResponse:
             selectedFilePath=session.selected_file_path,
             selectedFileContent="",
             openFiles=session.open_files,
+            availableSkills=list_available_skill_summaries(session.workspace),
             codeChanges=session.code_changes,
             planSteps=session.plan_steps,
         )
@@ -2395,6 +2405,62 @@ def _resolve_plan_payload(
     }
 
 
+def _derive_plan_title_from_markdown(markdown: str, fallback: str = "计划草案") -> str:
+    for line in markdown.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#"):
+            title = stripped.lstrip("#").strip()
+            if title:
+                return title
+        break
+    return fallback
+
+
+def update_current_plan_draft(
+    session: UISession,
+    *,
+    title: str | None,
+    markdown: str,
+) -> dict[str, Any]:
+    normalized_markdown = str(markdown or "").strip()
+    if not normalized_markdown:
+        raise HTTPException(status_code=400, detail="markdown 不能为空。")
+
+    plan_state = normalize_plan_state(session.plan_state)
+    base_plan = (
+        plan_state.get("draft")
+        if isinstance(plan_state.get("draft"), dict)
+        else plan_state.get("last_submitted_plan")
+        if isinstance(plan_state.get("last_submitted_plan"), dict)
+        else {}
+    )
+    next_plan = dict(base_plan) if isinstance(base_plan, dict) else {}
+    resolved_title = str(title or next_plan.get("title") or "").strip() or _derive_plan_title_from_markdown(normalized_markdown)
+
+    next_plan["title"] = resolved_title
+    next_plan["markdown"] = normalized_markdown
+    next_plan["summary"] = str(next_plan.get("summary") or "").strip()
+    next_plan["overview"] = str(next_plan.get("overview") or "").strip()
+    raw_key_steps = next_plan.get("keySteps")
+    next_plan["keySteps"] = (
+        [str(item).strip() for item in raw_key_steps if str(item).strip()]
+        if isinstance(raw_key_steps, list)
+        else []
+    )
+
+    status = str(plan_state.get("status") or "idle").strip().lower()
+    update_plan_state(
+        session,
+        draft=next_plan,
+        status="draft_ready" if status != "submitted" else status,
+    )
+    sync_session_runtime_state_for_agent(session)
+    session.touch()
+    return next_plan
+
+
 def _build_coding_input_from_plan(plan: dict[str, Any]) -> str:
     lines = [
         "请根据下面这份已经确认的计划开始进入编码实现阶段。",
@@ -2447,6 +2513,49 @@ def activate_plan_for_coding(session: UISession, request: PlanSubmitRequest) -> 
     sync_session_runtime_state_for_agent(session)
     session.touch()
     return plan, coding_input
+
+
+@app.get("/api/sessions/{session_id}/plan-draft/current")
+async def get_current_plan_draft(session_id: str) -> JSONResponse:
+    session = require_session(session_id)
+    plan_state = normalize_plan_state(session.plan_state)
+    plan = (
+        plan_state.get("draft")
+        if isinstance(plan_state.get("draft"), dict)
+        else plan_state.get("last_submitted_plan")
+        if isinstance(plan_state.get("last_submitted_plan"), dict)
+        else None
+    )
+    if not isinstance(plan, dict):
+        raise HTTPException(status_code=404, detail="当前会话没有可读取的计划草案。")
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "plan": plan,
+            "planState": session.plan_state,
+        }
+    )
+
+
+@app.post("/api/sessions/{session_id}/plan-draft")
+async def save_current_plan_draft(
+    session_id: str,
+    request: PlanDraftUpdateRequest,
+) -> JSONResponse:
+    session = require_session(session_id)
+    plan = update_current_plan_draft(
+        session,
+        title=request.title,
+        markdown=request.markdown,
+    )
+    return JSONResponse(
+        {
+            "ok": True,
+            "plan": plan,
+            "planState": session.plan_state,
+        }
+    )
 
 
 @app.post("/api/sessions/{session_id}/tools/{tool_id}/input")
@@ -2659,14 +2768,23 @@ async def chat_stream(
 ) -> StreamingResponse:
     session = require_session(request.session_id)
     session.cancel_event.clear()
-    user_message = request.message.strip()
-    if not user_message:
+    original_user_message = request.message.strip()
+    if not original_user_message:
         raise HTTPException(status_code=400, detail="message 不能为空")
+    user_message, active_skills = resolve_message_skills(
+        session.workspace,
+        original_user_message,
+        request.skills,
+    )
+    if not user_message:
+        raise HTTPException(status_code=400, detail="请在选择 skill 后补充具体任务。")
     forced_agent_type = None
     requested_agent_mode = str(request.agent_mode or "").strip().lower()
     if requested_agent_mode and requested_agent_mode != "auto":
         forced_agent_type = normalize_agent_type(requested_agent_mode)
     route_session_for_user_message(session, user_message, forced_agent_type=forced_agent_type)
+    if session.chat_session is not None:
+        session.chat_session.state.data["active_skills"] = active_skills
     if session.agent_type == "coding" and session.plan_state.get("pending_coding_input"):
         update_plan_state(session, pending_coding_input=None)
 
@@ -2680,19 +2798,24 @@ async def chat_stream(
                 "type": "user_message",
                 "payload": {
                     "id": user_message_id,
-                    "content": user_message,
+                    "content": original_user_message,
                 },
             }
         )
         session.history_messages.append(
-            {"id": user_message_id, "role": "user", "content": user_message}
+            {"id": user_message_id, "role": "user", "content": original_user_message}
         )
         session.touch()
 
         producer = asyncio.create_task(
             run_demo_stream(session, user_message, queue)
             if session.chat_session is None
-            else run_agent_stream(session, user_message, queue)
+            else run_agent_stream(
+                session,
+                user_message,
+                queue,
+                history_user_message=original_user_message,
+            )
         )
 
         try:
@@ -2909,6 +3032,7 @@ async def run_agent_stream(
     queue: asyncio.Queue[dict[str, Any] | None],
     assistant_id: str | None = None,
     resume_existing_turn: bool = False,
+    history_user_message: str | None = None,
 ) -> None:
     loop = asyncio.get_running_loop()
     assistant_id = assistant_id or uuid.uuid4().hex
@@ -2918,7 +3042,7 @@ async def run_agent_stream(
     reset_phase_for_new_turn(session)
     sync_session_runtime_state_for_agent(session)
     if user_message is not None:
-        ensure_user_message_recorded(session, user_message)
+        ensure_user_message_recorded(session, history_user_message or user_message)
     set_session_generating(session, True)
 
     await queue.put(
@@ -3518,15 +3642,21 @@ async def run_agent_stream(
         set_session_phase(session, "plan_ready")
         update_plan_state(session, status="draft_ready")
     await queue.put(_session_state_event())
-    replace_assistant_text_part(session, assistant_id, response.final_output)
-    remaining_output = response.final_output
+    final_output = response.final_output
+    has_final_output = bool(final_output)
+    if has_final_output:
+        replace_assistant_text_part(session, assistant_id, final_output)
+    remaining_output = final_output
     should_reset_before_replay = not assistant_stream_started
     if assistant_stream_started:
-        if response.final_output.startswith(streamed_assistant_text):
-            remaining_output = response.final_output[len(streamed_assistant_text) :]
+        if not has_final_output:
+            remaining_output = ""
+            should_reset_before_replay = False
+        elif final_output.startswith(streamed_assistant_text):
+            remaining_output = final_output[len(streamed_assistant_text) :]
         else:
             should_reset_before_replay = True
-            remaining_output = response.final_output
+            remaining_output = final_output
 
     if should_reset_before_replay:
         clear_assistant_text_part(session, assistant_id)

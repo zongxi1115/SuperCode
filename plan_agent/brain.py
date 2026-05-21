@@ -39,6 +39,7 @@ class PlanPromptBrain(CodingPromptBrain):
                 "10. 如果 runtime_state.plan_state 里已经有 draft，用户又提出修改意见，应基于该 draft 更新，而不是重新从零规划。",
                 "11. 最终答复要明确告诉用户：可以继续对话修改计划，或提交计划进入编码模式。",
                 "12. 当回复内容引用了 search_web 或 fetch_url_content 返回的来源时，必须在引用处使用 [[url]] 标注来源，url 填写工具返回的原始链接。例如：「React 19 引入了新 Hooks[[https://react.dev/blog]]」，多个来源可以连续标注如 [[url1]][[url2]]。不要对未经过工具验证的信息使用此标注。",
+                "13. 你会在上下文里看到 [技能目录]，如果其中某个 skill 与当前规划任务高度相关，应主动吸收其摘要或已激活正文，不要等用户先显式 @ skill。",
             ]
         else:
             protocol_lines = [
@@ -64,6 +65,7 @@ class PlanPromptBrain(CodingPromptBrain):
                 "11. 如果 action 是 final，必须提供 final_answer。",
                 "12. 最终答复要明确告诉用户：可以继续对话修改计划，或提交计划进入编码模式。",
                 "13. 当回复内容引用了 search_web 或 fetch_url_content 返回的来源时，必须在引用处使用 [[url]] 标注来源，url 填写工具返回的原始链接。例如：「React 19 引入了新 Hooks[[https://react.dev/blog]]」。不要对未经过工具验证的信息使用此标注。",
+                "14. 你会在上下文里看到 [技能目录]，如果其中某个 skill 与当前规划任务高度相关，应主动吸收其摘要或已激活正文，不要等用户先显式 @ skill。",
             ]
 
         return "\n\n".join(

@@ -121,6 +121,40 @@ class ParseJsonOutputTests(unittest.TestCase):
         self.assertEqual(argument_name, "patch")
         self.assertIn("*** Update File: src/a.ts", streamed_input or "")
 
+    def test_extracts_partial_save_plan_arguments_for_realtime_tool_input(self) -> None:
+        raw_output = (
+            '{"title":"在线 OJ 系统第一期实施计划",'
+            '"summary":"基于 FastAPI + React + go-judge 构建在线判题系统第一期",'
+            '"overview":"本计划将搭建一个完整的在线 OJ 系统",'
+            '"key_steps":["用户系统","题目管理"],'
+            '"markdown":"# 在线 OJ'
+        )
+
+        argument_name, streamed_input = self.brain._extract_partial_streamable_tool_input(
+            raw_output,
+            "save_plan",
+        )
+
+        self.assertEqual(argument_name, "arguments")
+        self.assertIn('"title":"在线 OJ 系统第一期实施计划"', streamed_input or "")
+        self.assertIn('"markdown":"# 在线 OJ', streamed_input or "")
+
+    def test_parse_tool_arguments_text_recovers_invalid_save_plan_json(self) -> None:
+        parsed = self.brain._parse_tool_arguments_text(
+            (
+                '{"title":"SuperDocs AI Coding Agent —— 从零搭建计划",'
+                '"summary":"基于 Python + Anthropic Claude API",'
+                '"overview":"本计划目标是开发一个 CLI 命令行 AI Coding Agent",'
+                '"key_steps":["搭 CLI","接 Claude API"],'
+                '"markdown":"# SuperDocs'
+            ),
+            "save_plan",
+        )
+
+        self.assertEqual(parsed["title"], "SuperDocs AI Coding Agent —— 从零搭建计划")
+        self.assertEqual(parsed["summary"], "基于 Python + Anthropic Claude API")
+        self.assertEqual(parsed["key_steps"], ["搭 CLI", "接 Claude API"])
+
     def test_completion_to_decision_uses_native_tool_calls(self) -> None:
         decision = self.brain._completion_to_decision(
             CompletionResponse(

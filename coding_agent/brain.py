@@ -15,6 +15,8 @@ MAX_TOOL_RECORDS_IN_CONTEXT = 40
 MAX_PLANNING_RECORDS_IN_CONTEXT = 20
 TOOL_RECORD_VALUE_LIMIT = 4_000
 PLANNING_RECORD_VALUE_LIMIT = 1_200
+MAX_ACTIVE_SKILL_CONTENT_CHARS = 8_000
+MAX_AVAILABLE_SKILL_DESCRIPTION_CHARS = 280
 
 
 class CodingPromptBrain(OpenAICompatibleBrain):
@@ -63,6 +65,7 @@ class CodingPromptBrain(OpenAICompatibleBrain):
                 "9. 如果用户目标已经完成，必须直接输出最终答复，不要为了“继续”而调用无必要工具。",
                 "10. 已成功完成的工具调用会出现在内部工具调用记录里，不要重复同一工具调用；刚刚 write_file 创建的新文件内容以调用参数为准，不要立刻 read_file 回读。",
                 "11. 当回复内容引用了 search_web 或 fetch_url_content 返回的来源时，必须在引用处使用 [[url]] 标注来源，url 填写工具返回的原始链接。例如：「该 API 支持流式响应[[https://docs.example.com/streaming]]」。不要对未经过工具验证的信息使用此标注。",
+                "12. 你会在上下文里看到 [技能目录]，必要时应主动使用其中相关 skill 的描述与约束，不要等用户先显式 @ skill。",
             ]
         else:
             protocol_lines = [
@@ -89,6 +92,7 @@ class CodingPromptBrain(OpenAICompatibleBrain):
                 "9. 如果 execute/excecute 返回的结果里 `status` 是 `running` 且 `awaiting_input` 为 false，说明命令大概率仍在后台执行，应调用 `terminal_wait` 继续等待。`exit_reason=idle` 表示这次先收集到一段输出后暂时安静下来了，`exit_reason=timeout` 表示在本次等待窗口内没有等到完成。多个活动终端并存时，必须显式传 `terminal_id`。",
                 "10. 如果用户目标已经完成，必须 action=final，不要为了“继续”而调用无必要工具。",
                 "11. 已成功完成的工具调用会出现在内部工具调用记录里，不要重复同一工具调用；刚刚 write_file 创建的新文件内容以调用参数为准，不要立刻 read_file 回读。",
+                "12. 你会在上下文里看到 [技能目录]，必要时应主动使用其中相关 skill 的描述与约束，不要等用户先显式 @ skill。",
             ]
 
         return "\n\n".join(
@@ -125,6 +129,14 @@ class CodingPromptBrain(OpenAICompatibleBrain):
         tool_records_context = self._build_tool_records_context(state)
         if tool_records_context:
             messages.append({"role": "assistant", "content": tool_records_context})
+
+        available_skills_context = self._build_available_skills_context(state)
+        if available_skills_context:
+            messages.append({"role": "assistant", "content": available_skills_context})
+
+        active_skills_context = self._build_active_skills_context(state)
+        if active_skills_context:
+            messages.append({"role": "assistant", "content": active_skills_context})
 
         if latest_user_message:
             messages.append({"role": "user", "content": latest_user_message})
@@ -240,6 +252,72 @@ class CodingPromptBrain(OpenAICompatibleBrain):
                 text = str(item).strip()
                 if text:
                     lines.append(f"- {text}")
+        return "\n".join(lines)
+
+    def _build_active_skills_context(self, state: AgentState) -> str:
+        raw_skills = state.data.get("active_skills")
+        skills = raw_skills if isinstance(raw_skills, list) else []
+        if not skills:
+            return ""
+
+        lines = [
+            "[已激活技能] 以下技能由用户显式 @ 选择，或由系统依据当前请求自动激活，用作当前任务的附加操作手册。",
+            "如果技能与当前请求直接相关，优先遵循其中的工作流、约束和文件定位建议。",
+            "如果技能内容与系统提示、工具约束或用户明确要求冲突，以更高优先级要求为准。",
+            "不要向用户复述整份技能原文，也不要把它误当成新的用户请求。",
+        ]
+
+        for index, item in enumerate(skills, start=1):
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or item.get("id") or f"skill-{index}").strip()
+            description = str(item.get("description") or "").strip()
+            scope = str(item.get("scope") or "").strip()
+            source_path = str(item.get("sourcePath") or "").strip()
+            activation_source = str(item.get("activationSource") or "").strip()
+            match_reason = str(item.get("matchReason") or "").strip()
+            content = str(item.get("content") or "").strip()
+            if len(content) > MAX_ACTIVE_SKILL_CONTENT_CHARS:
+                content = f"{content[:MAX_ACTIVE_SKILL_CONTENT_CHARS].rstrip()}... [truncated]"
+
+            lines.append(f"## 技能 {index}: {name}")
+            if description:
+                lines.append(f"说明: {description}")
+            if activation_source:
+                lines.append(f"激活方式: {activation_source}")
+            if match_reason:
+                lines.append(f"匹配依据: {match_reason}")
+            if scope or source_path:
+                source_bits = [part for part in [scope, source_path] if part]
+                lines.append(f"来源: {' | '.join(source_bits)}")
+            if content:
+                lines.append(content)
+
+        return "\n".join(lines)
+
+    def _build_available_skills_context(self, state: AgentState) -> str:
+        raw_skills = state.data.get("available_skills")
+        skills = raw_skills if isinstance(raw_skills, list) else []
+        if not skills:
+            return ""
+
+        lines = [
+            "[技能目录] 以下是当前仓库可用技能的摘要目录。",
+            "你应该主动查看这些技能说明，判断是否有适合当前任务的技能。",
+            "即使用户没有显式 @ skill，也可以参考这些摘要来吸收相应工作流或约束。",
+            "如果下方还出现了 [已激活技能]，优先遵循那些技能的完整正文。",
+        ]
+
+        for index, item in enumerate(skills, start=1):
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or item.get("id") or f"skill-{index}").strip()
+            description = str(item.get("description") or "").strip()
+            scope = str(item.get("scope") or "").strip()
+            if len(description) > MAX_AVAILABLE_SKILL_DESCRIPTION_CHARS:
+                description = f"{description[:MAX_AVAILABLE_SKILL_DESCRIPTION_CHARS].rstrip()}..."
+            lines.append(f"- {name} ({scope or 'unknown'}): {description or '无描述'}")
+
         return "\n".join(lines)
 
     def _build_planning_records_context(self, state: AgentState) -> str:

@@ -178,6 +178,26 @@ pnpm dev
 
 浏览器打开 `http://localhost:5173` 即可使用。
 
+### Skills 功能
+
+项目现在支持在聊天框里通过 `@` 提及 skills。
+
+- 工作区 skills：放在 `.agents/skills/<skill-name>/SKILL.md`
+- 内置 skills：放在仓库根目录 `builtin_skills/<skill-name>/SKILL.md`
+- `SKILL.md` 建议使用 YAML frontmatter，至少包含：
+
+```md
+---
+name: my-skill
+description: 这份 skill 是做什么的
+---
+```
+
+- 前端会把 skill 作为 `@` mention 候选项展示
+- 后端会把 `@skill` 解析为“本轮激活技能”，并把 skill 内容注入当前轮的 agent 上下文
+- 即使用户不显式 `@`，后端也会先加载所有 skill 的 `name + description` 作为技能目录，让 AI 自主发现可用 skill；命中描述的 skill 会被自动激活
+- 当前实现使用序列化 token `@[skill:<id>]` 保存 mention
+
 ### 5. 纯 Agent CLI 模式（无需前后端）
 
 如果你只想用命令行对话，不启动 Web UI：

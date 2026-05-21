@@ -22,6 +22,14 @@ class CodeChangeRecord(BaseModel):
     diffPreview: str = ""
 
 
+class SkillSummary(BaseModel):
+    id: str
+    name: str
+    description: str
+    scope: str
+    sourcePath: str | None = None
+
+
 class CreateSessionResponse(BaseModel):
     sessionId: str
     model: str
@@ -46,6 +54,7 @@ class CreateSessionResponse(BaseModel):
     selectedFilePath: str | None
     selectedFileContent: str
     openFiles: list[str]
+    availableSkills: list[SkillSummary] = Field(default_factory=list)
     codeChanges: list[CodeChangeRecord] = Field(default_factory=list)
     planSteps: list[dict[str, str]]
 
@@ -84,6 +93,7 @@ class SessionContextResponse(BaseModel):
     recentTools: list[SessionContextTool]
     codeChangeCount: int = 0
     recentCodeChanges: list[CodeChangeRecord] = Field(default_factory=list)
+    availableSkills: list[SkillSummary] = Field(default_factory=list)
     planSteps: list[dict[str, str]]
 
 
@@ -166,6 +176,7 @@ class ChatStreamRequest(BaseModel):
     session_id: str = Field(alias="session_id")
     message: str
     agent_mode: str | None = None
+    skills: list[str] = Field(default_factory=list)
 
 
 class ContinueChatStreamRequest(BaseModel):
@@ -207,6 +218,11 @@ class PlanSubmitRequest(BaseModel):
     overview: str | None = None
     keySteps: list[str] = Field(default_factory=list)
     markdown: str | None = None
+
+
+class PlanDraftUpdateRequest(BaseModel):
+    title: str | None = None
+    markdown: str
 
 
 class TerminalSnapshotResponse(BaseModel):

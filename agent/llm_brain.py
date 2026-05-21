@@ -25,6 +25,13 @@ class OpenAICompatibleBrain(AgentBrain):
     def __init__(self, client: OpenAICompatibleClient) -> None:
         self.client = client
 
+    _STREAMABLE_TOOL_INPUT_SPECS: dict[str, tuple[str, str, str]] = {
+        "write_file": ("content", "content", "string"),
+        "apply_patch": ("patch", "patch", "string"),
+        "replace_file": ("new_content", "new_content", "string"),
+        "save_plan": ("arguments", "tool_arguments", "object"),
+    }
+
     def decide(
         self,
         state: AgentState,
@@ -449,24 +456,225 @@ class OpenAICompatibleBrain(AgentBrain):
 
         return "".join(buffer) if buffer else None
 
+    def _extract_partial_object_field(self, text: str, field_name: str) -> str | None:
+        marker = f'"{field_name}"'
+        start = text.find(marker)
+        if start == -1:
+            return None
+
+        colon_index = text.find(":", start + len(marker))
+        if colon_index == -1:
+            return None
+
+        cursor = colon_index + 1
+        while cursor < len(text) and text[cursor].isspace():
+            cursor += 1
+        if cursor >= len(text) or text[cursor] != "{":
+            return None
+
+        object_start = cursor
+        depth = 0
+        in_string = False
+        escape = False
+
+        while cursor < len(text):
+            char = text[cursor]
+            if in_string:
+                if escape:
+                    escape = False
+                elif char == "\\":
+                    escape = True
+                elif char == '"':
+                    in_string = False
+                cursor += 1
+                continue
+
+            if char == '"':
+                in_string = True
+                cursor += 1
+                continue
+
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[object_start : cursor + 1]
+
+            cursor += 1
+
+        return text[object_start:] if object_start < len(text) else None
+
+    def _extract_partial_streamable_value(
+        self,
+        text: str,
+        source_field_name: str,
+        value_kind: str,
+    ) -> str | None:
+        if value_kind == "string":
+            return self._extract_partial_string_field(text, source_field_name)
+
+        if value_kind == "object":
+            stripped = text.strip()
+            if stripped.startswith("{"):
+                return stripped
+            return self._extract_partial_object_field(text, source_field_name)
+
+        raise ValueError(f"不支持的流式字段类型：{value_kind}")
+
     def _extract_partial_streamable_tool_input(
         self,
         text: str,
         tool_name: str | None,
     ) -> tuple[str | None, str | None]:
-        if tool_name == "write_file":
-            content = self._extract_partial_string_field(text, "content")
-            return ("content", content) if content is not None else (None, None)
+        if not tool_name:
+            return None, None
 
-        if tool_name == "apply_patch":
-            patch_text = self._extract_partial_string_field(text, "patch")
-            return ("patch", patch_text) if patch_text is not None else (None, None)
+        spec = self._STREAMABLE_TOOL_INPUT_SPECS.get(tool_name)
+        if spec is None:
+            return None, None
 
-        if tool_name == "replace_file":
-            new_content = self._extract_partial_string_field(text, "new_content")
-            return ("new_content", new_content) if new_content is not None else (None, None)
+        argument_name, source_field_name, value_kind = spec
+        extracted = self._extract_partial_streamable_value(
+            text,
+            source_field_name,
+            value_kind,
+        )
+        return (argument_name, extracted) if extracted is not None else (None, None)
 
-        return None, None
+    def _extract_partial_string_array_field(
+        self,
+        text: str,
+        field_name: str,
+    ) -> list[str] | None:
+        marker = f'"{field_name}"'
+        start = text.find(marker)
+        if start == -1:
+            return None
+
+        colon_index = text.find(":", start + len(marker))
+        if colon_index == -1:
+            return None
+
+        cursor = colon_index + 1
+        while cursor < len(text) and text[cursor].isspace():
+            cursor += 1
+        if cursor >= len(text) or text[cursor] != "[":
+            return None
+
+        cursor += 1
+        values: list[str] = []
+        buffer: list[str] = []
+        in_string = False
+        escape = False
+        unicode_digits: str | None = None
+
+        while cursor < len(text):
+            char = text[cursor]
+
+            if not in_string:
+                if char == '"':
+                    in_string = True
+                    buffer = []
+                    escape = False
+                    unicode_digits = None
+                elif char == "]":
+                    return values
+                cursor += 1
+                continue
+
+            if unicode_digits is not None:
+                if char.lower() in "0123456789abcdef":
+                    unicode_digits += char
+                    if len(unicode_digits) == 4:
+                        buffer.append(chr(int(unicode_digits, 16)))
+                        unicode_digits = None
+                        escape = False
+                else:
+                    unicode_digits = None
+                    escape = False
+                cursor += 1
+                continue
+
+            if escape:
+                mapped = {
+                    '"': '"',
+                    "\\": "\\",
+                    "/": "/",
+                    "b": "\b",
+                    "f": "\f",
+                    "n": "\n",
+                    "r": "\r",
+                    "t": "\t",
+                }.get(char)
+                if mapped is not None:
+                    buffer.append(mapped)
+                    escape = False
+                    cursor += 1
+                    continue
+
+                if char == "u":
+                    unicode_digits = ""
+                    cursor += 1
+                    continue
+
+                buffer.append(char)
+                escape = False
+                cursor += 1
+                continue
+
+            if char == "\\":
+                escape = True
+                cursor += 1
+                continue
+
+            if char == '"':
+                values.append("".join(buffer))
+                in_string = False
+                buffer = []
+                cursor += 1
+                continue
+
+            buffer.append(char)
+            cursor += 1
+
+        return values if values else None
+
+    def _recover_save_plan_arguments(self, arguments_text: str) -> dict[str, Any] | None:
+        recovered: dict[str, Any] = {}
+
+        title = self._extract_partial_string_field(arguments_text, "title")
+        if title:
+            recovered["title"] = title
+
+        summary = self._extract_partial_string_field(arguments_text, "summary")
+        if summary:
+            recovered["summary"] = summary
+
+        overview = self._extract_partial_string_field(arguments_text, "overview")
+        if overview:
+            recovered["overview"] = overview
+
+        key_steps = self._extract_partial_string_array_field(arguments_text, "key_steps")
+        if not key_steps:
+            key_steps = self._extract_partial_string_array_field(arguments_text, "keySteps")
+        if key_steps:
+            recovered["key_steps"] = key_steps
+
+        markdown = self._extract_partial_string_field(arguments_text, "markdown")
+        if markdown:
+            recovered["markdown"] = markdown
+
+        return recovered or None
+
+    def _recover_tool_arguments(
+        self,
+        arguments_text: str,
+        tool_name: str,
+    ) -> dict[str, Any] | None:
+        if tool_name == "save_plan":
+            return self._recover_save_plan_arguments(arguments_text)
+        return None
 
     def _completion_to_decision(self, completion: CompletionResponse) -> BrainDecision:
         if completion.tool_calls:
@@ -500,6 +708,9 @@ class OpenAICompatibleBrain(AgentBrain):
         try:
             parsed = json.loads(cleaned)
         except json.JSONDecodeError as exc:
+            recovered = self._recover_tool_arguments(cleaned, tool_name)
+            if recovered is not None:
+                return recovered
             raise ValueError(f"工具 {tool_name} 的 arguments 不是合法 JSON：{arguments_text}") from exc
         if not isinstance(parsed, dict):
             raise ValueError(f"工具 {tool_name} 的 arguments 必须是对象。")

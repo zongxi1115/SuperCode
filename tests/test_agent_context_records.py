@@ -189,6 +189,72 @@ class AgentContextRecordTests(unittest.TestCase):
         self.assertIn("\"phase\": \"connected\"", runtime_state_message)
         self.assertIn("deploy-1", runtime_state_message)
 
+    def test_coding_brain_includes_active_skills_context_before_latest_user_message(self) -> None:
+        brain = CodingPromptBrain(client=object())
+        state = AgentState(task="task", current_input="继续完成聊天框改造")
+        state.conversation_messages = [
+            ConversationMessage(role="user", content="改造聊天框"),
+            ConversationMessage(role="assistant", content="先看一下现有输入链路"),
+            ConversationMessage(role="user", content="继续完成聊天框改造"),
+        ]
+        state.data["active_skills"] = [
+            {
+                "id": "supercode-chat-ui",
+                "name": "supercode-chat-ui",
+                "description": "负责聊天 UI、composer 和 mention 行为。",
+                "scope": "builtin",
+                "sourcePath": "builtin_skills/supercode-chat-ui/SKILL.md",
+                "content": "保持 mention token 稳定，并同时更新 chat-panel.tsx 与 chat-composer-editor.tsx。",
+            }
+        ]
+
+        messages = brain._build_messages(
+            state,
+            tool_definitions={},
+            response_mode="native_tools",
+        )
+
+        self.assertEqual(messages[-1]["content"], "继续完成聊天框改造")
+        skill_context_message = messages[-2]["content"]
+        self.assertIn("[已激活技能]", skill_context_message)
+        self.assertIn("supercode-chat-ui", skill_context_message)
+        self.assertIn("chat-composer-editor.tsx", skill_context_message)
+
+    def test_coding_brain_includes_available_skill_catalog_for_autonomous_discovery(self) -> None:
+        brain = CodingPromptBrain(client=object())
+        state = AgentState(task="task", current_input="继续改造聊天框")
+        state.conversation_messages = [
+            ConversationMessage(role="user", content="改造聊天框"),
+            ConversationMessage(role="assistant", content="先理清输入链路"),
+            ConversationMessage(role="user", content="继续改造聊天框"),
+        ]
+        state.data["available_skills"] = [
+            {
+                "id": "supercode-chat-ui",
+                "name": "supercode-chat-ui",
+                "description": "修改聊天 UI、composer 和 mention 菜单。",
+                "scope": "builtin",
+            },
+            {
+                "id": "supercode-agent-runtime",
+                "name": "supercode-agent-runtime",
+                "description": "处理后端会话运行时与 SSE。",
+                "scope": "builtin",
+            },
+        ]
+
+        messages = brain._build_messages(
+            state,
+            tool_definitions={},
+            response_mode="native_tools",
+        )
+
+        self.assertEqual(messages[-1]["content"], "继续改造聊天框")
+        catalog_message = messages[-2]["content"]
+        self.assertIn("[技能目录]", catalog_message)
+        self.assertIn("supercode-chat-ui", catalog_message)
+        self.assertIn("composer", catalog_message)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -11,7 +11,7 @@ import { cn } from "@/lib/utils";
 import type { LucideIcon } from "lucide-react";
 import { BrainIcon, ChevronDownIcon, DotIcon } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
-import { createContext, memo, useContext, useMemo } from "react";
+import { createContext, memo, useContext, useEffect, useMemo, useRef, useState } from "react";
 
 interface ChainOfThoughtContextValue {
   isOpen: boolean;
@@ -36,6 +36,8 @@ export type ChainOfThoughtProps = ComponentProps<"div"> & {
   open?: boolean;
   defaultOpen?: boolean;
   onOpenChange?: (open: boolean) => void;
+  autoOpen?: boolean;
+  autoCloseDelay?: number;
 };
 
 export const ChainOfThought = memo(
@@ -44,6 +46,8 @@ export const ChainOfThought = memo(
     open,
     defaultOpen = false,
     onOpenChange,
+    autoOpen = false,
+    autoCloseDelay = 0,
     children,
     ...props
   }: ChainOfThoughtProps) => {
@@ -52,6 +56,40 @@ export const ChainOfThought = memo(
       onChange: onOpenChange,
       prop: open,
     });
+    const hasAutoOpenedRef = useRef(autoOpen);
+    const [hasAutoClosed, setHasAutoClosed] = useState(false);
+
+    useEffect(() => {
+      if (!autoOpen) {
+        return;
+      }
+      hasAutoOpenedRef.current = true;
+      setHasAutoClosed(false);
+    }, [autoOpen]);
+
+    useEffect(() => {
+      if (!autoOpen || isOpen) {
+        return;
+      }
+      setIsOpen(true);
+    }, [autoOpen, isOpen, setIsOpen]);
+
+    useEffect(() => {
+      if (
+        autoOpen ||
+        !hasAutoOpenedRef.current ||
+        !isOpen ||
+        hasAutoClosed ||
+        autoCloseDelay <= 0
+      ) {
+        return;
+      }
+      const timer = window.setTimeout(() => {
+        setIsOpen(false);
+        setHasAutoClosed(true);
+      }, autoCloseDelay);
+      return () => window.clearTimeout(timer);
+    }, [autoCloseDelay, autoOpen, hasAutoClosed, isOpen, setIsOpen]);
 
     const chainOfThoughtContext = useMemo(
       () => ({ isOpen, setIsOpen }),

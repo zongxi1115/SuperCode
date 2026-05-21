@@ -23,6 +23,7 @@ import type {
   SessionContextCompressionPayload,
   SessionHistoryItem,
   SessionPayload,
+  SkillSummary,
   TerminalSnapshotPayload,
   ToolCallRecord,
   UIModelProvider,
@@ -40,6 +41,12 @@ import {
   updateDirectoryNodeTree,
   workspaceOptionsToDirectoryNodes,
 } from '@/lib/app-utils';
+import {
+  buildPlanDraftMarkdown,
+  normalizePlanDraft,
+  parseStreamingPlanDraft,
+  resolvePlanDraftTitle,
+} from '@/lib/plan-draft';
 
 import { PanelRightOpen, PanelRightClose, Settings2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -92,6 +99,32 @@ function resolveSelectedModelId(
 function normalizeReasoningEffort(value?: string | null) {
   const normalized = value?.trim().toLowerCase();
   return normalized ? normalized : null;
+}
+
+function decodeMentionTokenValue(value: string) {
+  return value.replace(/\\\]/g, ']');
+}
+
+function extractSelectedSkillIds(message: string) {
+  const skillIds: string[] = [];
+  const seen = new Set<string>();
+  const mentionTokenRe = /@\[((?:\\.|[^\]])*)\]/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = mentionTokenRe.exec(message)) !== null) {
+    const decoded = decodeMentionTokenValue(match[1] ?? '');
+    if (!decoded.toLowerCase().startsWith('skill:')) {
+      continue;
+    }
+    const skillId = decoded.split(':', 2)[1]?.trim();
+    if (!skillId || seen.has(skillId)) {
+      continue;
+    }
+    seen.add(skillId);
+    skillIds.push(skillId);
+  }
+
+  return skillIds;
 }
 
 function mergeCodeChanges(
@@ -196,6 +229,7 @@ export default function App() {
   const [selectedReasoningEffort, setSelectedReasoningEffort] = useState<string | null>(null);
   const [selectedAgentMode, setSelectedAgentMode] = useState<AgentMode>('auto');
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
+  const [availableSkills, setAvailableSkills] = useState<SkillSummary[]>([]);
   const [isModelConfigOpen, setIsModelConfigOpen] = useState(false);
   const [appSettings, setAppSettings] = useState<AppSettings>({ autoApprove: false });
   const [visualModelProviders, setVisualModelProviders] = useState<UIModelProvider[]>([]);
@@ -212,6 +246,29 @@ export default function App() {
   useEffect(() => {
     currentSessionIdRef.current = sessionId;
   }, [sessionId]);
+
+  const openPlanDraftPanel = useCallback((title: string, markdown: string) => {
+    setPlanData({ title, markdown });
+    setIsRightPanelCollapsed(false);
+  }, []);
+
+  const showStreamingPlanDraft = useCallback(
+    (
+      preview?: {
+        title?: string;
+        summary?: string;
+        overview?: string;
+        keySteps?: string[];
+        markdown?: string;
+      },
+      fallbackTitle = '正在设计计划',
+    ) => {
+      const title = resolvePlanDraftTitle(preview, fallbackTitle);
+      const markdown = buildPlanDraftMarkdown(preview, title);
+      openPlanDraftPanel(title, markdown);
+    },
+    [openPlanDraftPanel],
+  );
 
   const findAssistantIdByToolCallId = useCallback((toolCallId: string) => {
     for (const message of messages) {
@@ -331,6 +388,7 @@ export default function App() {
         }
         const data: SessionContextPayload = await res.json();
         setSessionContext(data);
+        setAvailableSkills(data.availableSkills ?? []);
       } catch (error) {
         console.error(error);
       } finally {
@@ -459,6 +517,7 @@ export default function App() {
     setWebPreviewUrl(data.previewUrl ?? DEFAULT_WEB_PREVIEW_URL);
     setSelectedFilePath(data.selectedFilePath ?? '');
     setSelectedFileContent(data.selectedFileContent ?? '');
+    setAvailableSkills(data.availableSkills ?? []);
     setIsLoading(Boolean(data.isGenerating));
   }, [modelOptions]);
 
@@ -1123,6 +1182,7 @@ export default function App() {
       let buffer = '';
       let currentAssistantId = initialAssistantId ?? '';
       const toolNamesById = new Map<string, string>();
+      const toolInputBuffersById = new Map<string, string>();
       const isVisibleStreamSession = () => currentSessionIdRef.current === streamSessionId;
 
       const updateAssistantMessage = (
@@ -1332,6 +1392,9 @@ export default function App() {
               state: 'running' as const
             };
             toolNamesById.set(toolCallRecord.id, toolCallRecord.name);
+            if (toolCallRecord.name === 'save_plan') {
+              showStreamingPlanDraft(normalizePlanDraft(toolCallRecord.arguments));
+            }
             upsertToolPart(
               assistantId,
               toolCallRecord.id,
@@ -1357,6 +1420,10 @@ export default function App() {
             if (!assistantId || !toolCallId) return;
             const toolName = String(data.toolName ?? toolNamesById.get(toolCallId) ?? 'tool');
             toolNamesById.set(toolCallId, toolName);
+            toolInputBuffersById.set(toolCallId, '');
+            if (toolName === 'save_plan') {
+              showStreamingPlanDraft(undefined);
+            }
             upsertToolPart(
               assistantId,
               toolCallId,
@@ -1374,6 +1441,11 @@ export default function App() {
             if (!assistantId || !toolCallId) return;
             const delta = String(data.inputTextDelta ?? '');
             const toolName = toolNamesById.get(toolCallId) ?? 'tool';
+            const nextBufferedInput = `${toolInputBuffersById.get(toolCallId) ?? ''}${delta}`;
+            toolInputBuffersById.set(toolCallId, nextBufferedInput);
+            if (toolName === 'save_plan') {
+              showStreamingPlanDraft(parseStreamingPlanDraft(nextBufferedInput));
+            }
             upsertToolPart(
               assistantId,
               toolCallId,
@@ -1400,6 +1472,19 @@ export default function App() {
             if (!assistantId || !toolCallId) return;
             const toolName = String(payload.name ?? toolNamesById.get(toolCallId) ?? 'tool');
             toolNamesById.set(toolCallId, toolName);
+            if (
+              toolName === 'save_plan' &&
+              payload.output &&
+              typeof payload.output === 'object' &&
+              !Array.isArray(payload.output)
+            ) {
+              const normalizedDraft = normalizePlanDraft(
+                (payload.output as Record<string, unknown>).plan,
+              );
+              if (normalizedDraft) {
+                showStreamingPlanDraft(normalizedDraft, '计划草案');
+              }
+            }
             handleToolResultSideEffects(payload);
             const nextState: ToolCallRecord['state'] =
               typeof payload.state === 'string' && (payload.state === 'input-requested' || payload.state === 'approval-requested')
@@ -1470,6 +1555,14 @@ export default function App() {
               setWebPreviewUrl(data.data.url);
               setIsWebPreviewOpen(true);
             }
+          } else if (data.type === 'data-plan-draft') {
+            showStreamingPlanDraft(normalizePlanDraft(data.data), '计划草案');
+            const assistantId = currentAssistantId;
+            if (!assistantId) return;
+            updateAssistantMessage(assistantId, (message) => ({
+              ...message,
+              parts: [...(message.parts ?? []), { type: 'data' as const, dataType: data.type, data: data.data }]
+            }));
           } else if (data.type === 'data-assistant-reset') {
             currentAssistantId = data.data?.id || currentAssistantId || Math.random().toString();
             updateAssistantMessage(currentAssistantId, (message) => ({
@@ -1540,6 +1633,9 @@ export default function App() {
             if (!assistantId) return;
             currentAssistantId = assistantId;
             const toolCallRecord = { ...data.payload, state: 'running' as const };
+            if (data.payload.name === 'save_plan') {
+              showStreamingPlanDraft(normalizePlanDraft(data.payload.arguments));
+            }
             updateAssistantMessage(assistantId, (message) => ({
               ...message,
               toolCalls: [...(message.toolCalls ?? []), toolCallRecord],
@@ -1633,11 +1729,12 @@ export default function App() {
       }
       void loadSessionHistory();
     }
-  }, [appendCodeChanges, applyTerminalSnapshot, isContextOpen, isLoading, isTerminalOpen, loadFile, loadSessionContext, loadSessionHistory, refreshFileTreeAfterTerminalActivity, refreshTerminalState]);
+  }, [appendCodeChanges, applyTerminalSnapshot, isContextOpen, isLoading, isTerminalOpen, loadFile, loadSessionContext, loadSessionHistory, refreshFileTreeAfterTerminalActivity, refreshTerminalState, showStreamingPlanDraft]);
 
   const sendMessage = async (msg: string, elements?: { selector: string; html: string; sourceUrl?: string }[]) => {
     if ((!msg.trim() && (!elements || elements.length === 0)) || !sessionId || isLoading) return;
 
+    const selectedSkills = extractSelectedSkillIds(msg);
     let finalMsg = msg.trim() || '请修改这个元素';
     if (elements && elements.length > 0) {
       const elementContext = elements.map((el, i) => {
@@ -1649,7 +1746,12 @@ export default function App() {
 
     await streamAssistantResponse({
       url: 'http://localhost:8000/api/chat/stream',
-      body: { session_id: sessionId, message: finalMsg, agent_mode: selectedAgentMode },
+      body: {
+        session_id: sessionId,
+        message: finalMsg,
+        agent_mode: selectedAgentMode,
+        skills: selectedSkills,
+      },
       streamSessionId: sessionId,
       userVisibleMessage: finalMsg,
       clearComposer: true,
@@ -1668,7 +1770,7 @@ export default function App() {
     });
   }, [sessionId, streamAssistantResponse]);
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       sendMessage(input, elementAttachments.length > 0 ? elementAttachments : undefined);
@@ -2240,18 +2342,20 @@ export default function App() {
         model={selectedModelId}
         reasoningEffort={selectedReasoningEffort}
         modelOptions={modelOptions}
+        fileTree={fileTree}
         onModelChange={handleModelChange}
         onReasoningEffortChange={handleReasoningEffortChange}
         onContextOpenChange={handleContextOpenChange}
         onInputChange={setInput}
         onKeyDown={handleKeyDown}
         onSendMessage={() => void sendMessage(input, elementAttachments.length > 0 ? elementAttachments : undefined)}
+        availableSkills={availableSkills}
         onStopMessage={stopMessage}
         onResolveDeleteConfirmation={resolveDeleteConfirmation}
         onResolveGitConfirmation={resolveGitConfirmation}
         onResolveConnectInput={resolveConnectInput}
         onResolvePlanQuestionsInput={resolvePlanQuestionsInput}
-        onViewPlan={(title, markdown) => setPlanData({ title, markdown })}
+        onViewPlan={openPlanDraftPanel}
         agentMode={selectedAgentMode}
         onAgentModeChange={setSelectedAgentMode}
         elementAttachments={elementAttachments}
@@ -2287,8 +2391,38 @@ export default function App() {
             ]);
           }}
           planData={planData}
-          onPlanSave={(markdown) => {
-            if (planData) setPlanData({ ...planData, markdown });
+          onPlanSave={async (markdown) => {
+            if (!planData) return;
+            const nextPlan = { ...planData, markdown };
+            setPlanData(nextPlan);
+
+            if (!sessionId) return;
+            try {
+              const response = await fetch(`http://localhost:8000/api/sessions/${sessionId}/plan-draft`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  title: nextPlan.title,
+                  markdown: nextPlan.markdown,
+                }),
+              });
+              const payload = await response.json();
+              if (!response.ok) {
+                throw new Error(String(payload.detail ?? '保存计划草案失败'));
+              }
+              if (payload.planState && typeof payload.planState === 'object') {
+                setSessionContext((prev) =>
+                  prev
+                    ? {
+                        ...prev,
+                        planState: payload.planState,
+                      }
+                    : prev,
+                );
+              }
+            } catch (error) {
+              console.error('保存计划草案失败:', error);
+            }
           }}
           onClosePlan={() => setPlanData(null)}
         />

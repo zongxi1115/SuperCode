@@ -88,6 +88,39 @@ class _FakeTracedChatSession:
         return AgentResponse(task=user_message, final_output="结论")
 
 
+class _FakeToolAfterPartialTextChatSession:
+    def ask(self, user_message: str, on_event=None) -> AgentResponse:
+        tool_call = ToolCall(
+            id="step-1-tool-1-read_file",
+            name="read_file",
+            arguments={"filename": "README.md"},
+        )
+        if on_event is not None:
+            on_event(
+                AgentEvent(
+                    type="final_answer_delta",
+                    step_index=1,
+                    delta="先说明一下",
+                    final_answer="先说明一下",
+                )
+            )
+            on_event(AgentEvent(type="tool_call", step_index=1, tool_call=tool_call))
+            on_event(
+                AgentEvent(
+                    type="tool_result",
+                    step_index=1,
+                    tool_call=tool_call,
+                    tool_result=ToolResult(
+                        name="read_file",
+                        tool_call_id=tool_call.id,
+                        output="README content",
+                        success=True,
+                    ),
+                )
+            )
+        return AgentResponse(task=user_message, final_output="")
+
+
 class StreamPersistenceTests(unittest.IsolatedAsyncioTestCase):
     async def test_stream_does_not_apply_five_minute_backend_timeout(self) -> None:
         workspace = Path(tempfile.mkdtemp(prefix="supercode-stream-no-timeout-")).resolve()
@@ -191,6 +224,27 @@ class StreamPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(parts[1].get("toolCall", {}).get("name"), "read_file")
         self.assertEqual(parts[2].get("text"), "结论")
         self.assertEqual(session.thoughts, ["先看 README"])
+
+    async def test_tool_round_does_not_clear_streamed_partial_text_when_final_output_is_empty(self) -> None:
+        workspace = Path(tempfile.mkdtemp(prefix="supercode-stream-tool-text-")).resolve()
+        session = api_main.UISession(
+            session_id="session-stream-5",
+            model="test-model",
+            workspace=str(workspace),
+            chat_session=_FakeToolAfterPartialTextChatSession(),
+        )
+        queue: asyncio.Queue[dict[str, object] | None] = asyncio.Queue()
+
+        await api_main.run_agent_stream(session, "你好", queue)
+
+        assistant_message = session.history_messages[1]
+        self.assertEqual(assistant_message["content"], "先说明一下")
+        parts = assistant_message.get("parts")
+        self.assertIsInstance(parts, list)
+        assert isinstance(parts, list)
+        self.assertEqual([part.get("type") for part in parts], ["text", "tool_call"])
+        self.assertEqual(parts[0].get("text"), "先说明一下")
+        self.assertEqual(parts[1].get("toolCall", {}).get("name"), "read_file")
 
 
 if __name__ == "__main__":

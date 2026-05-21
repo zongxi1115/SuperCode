@@ -112,6 +112,14 @@ export type SessionContextTool = {
   success?: boolean | null;
 };
 
+export type SkillSummary = {
+  id: string;
+  name: string;
+  description: string;
+  scope: 'builtin' | 'workspace' | string;
+  sourcePath?: string | null;
+};
+
 export type SessionContextPayload = {
   sessionId: string;
   workspace: string;
@@ -134,6 +142,7 @@ export type SessionContextPayload = {
   recentTools: SessionContextTool[];
   codeChangeCount: number;
   recentCodeChanges: CodeChangeRecord[];
+  availableSkills: SkillSummary[];
   planSteps: PlanStep[];
 };
 
@@ -178,6 +187,7 @@ export type SessionPayload = {
   fileTree?: FileTreeNode[];
   selectedFilePath?: string | null;
   selectedFileContent?: string;
+  availableSkills?: SkillSummary[];
   codeChanges?: CodeChangeRecord[];
   planSteps?: PlanStep[];
 };

@@ -1,7 +1,7 @@
-import { CodeBlock } from '@/components/ai-elements/code-block';
+import Editor from '@monaco-editor/react';
 import { FileTree } from '@/components/ai-elements/file-tree';
-import { MessageResponse } from '@/components/ai-elements/message';
 import { EditorSidebar } from '@/components/app/editor-sidebar';
+import { PlanRichTextEditor } from '@/components/app/plan-rich-text-editor';
 import { EditorTools, type EditorTarget } from '@/components/app/editor-tools';
 import { renderFileTreeNodes } from '@/components/app/file-tree-renderers';
 import { ResizableHandle } from '@/components/app/resizable-handle';
@@ -12,7 +12,8 @@ import { getFileLanguage } from '@/lib/app-utils';
 import type { FileTreeNode } from '@/lib/app-types';
 import { SiJetbrains, SiSublimetext, SiVscodium, SiZedindustries } from '@icons-pack/react-simple-icons';
 import { motion } from 'motion/react';
-import { CircleAlert, FileCode, FolderTree, PanelsTopLeft, PencilIcon, SquareTerminal } from 'lucide-react';
+import { CircleAlert, FileCode, FolderTree, PanelsTopLeft, SquareTerminal } from 'lucide-react';
+import type { editor as MonacoEditor } from 'monaco-editor';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 export type PlanData = {
@@ -37,7 +38,6 @@ type EditorPanelProps = {
   onClosePlan?: () => void;
 };
 
-const EDITOR_FONT = 'font-mono text-[13px] leading-[20px]';
 const DEFAULT_FILE_TREE_WIDTH = 200;
 const MIN_FILE_TREE_WIDTH = 180;
 const MAX_FILE_TREE_WIDTH = 420;
@@ -73,12 +73,15 @@ export function EditorPanel({
   const [fileTreeWidth, setFileTreeWidth] = useState(DEFAULT_FILE_TREE_WIDTH);
   const [isFileTreeVisible, setIsFileTreeVisible] = useState(true);
   const [editorLaunchError, setEditorLaunchError] = useState<string | null>(null);
-  const [isPlanEditing, setIsPlanEditing] = useState(false);
   const [planEditContent, setPlanEditContent] = useState('');
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const monacoRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null);
+  const isEditingRef = useRef(false);
+  const editContentRef = useRef('');
 
   const isPlanMode = Boolean(planData);
+
+  useEffect(() => { isEditingRef.current = isEditing; }, [isEditing]);
+  useEffect(() => { editContentRef.current = editContent; }, [editContent]);
 
   useEffect(() => {
     setIsEditing(false);
@@ -87,8 +90,7 @@ export function EditorPanel({
 
   useEffect(() => {
     if (planData) {
-      setIsPlanEditing(false);
-      setPlanEditContent('');
+      setPlanEditContent(planData.markdown);
     }
   }, [planData]);
 
@@ -102,7 +104,7 @@ export function EditorPanel({
     if (!selectedFilePath) return;
     setEditContent(selectedFileContent);
     setIsEditing(true);
-    setTimeout(() => textareaRef.current?.focus(), 50);
+    setTimeout(() => monacoRef.current?.focus(), 50);
   }, [selectedFileContent, selectedFilePath]);
 
   const handleCancelEdit = useCallback(() => {
@@ -143,74 +145,33 @@ export function EditorPanel({
   }, [editContent, onLoadFile, onSaveFile, selectedFilePath, sessionId]);
 
   useEffect(() => {
-    if (!isEditing) return;
+    if (!isEditing && !isPlanMode) return;
     const handler = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 's') {
         e.preventDefault();
-        void handleSave();
+        if (isPlanMode) {
+          onPlanSave?.(planEditContent);
+        }
       }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [handleSave, isEditing]);
-
-  const handleStartPlanEdit = useCallback(() => {
-    if (!planData) return;
-    setPlanEditContent(planData.markdown);
-    setIsPlanEditing(true);
-    setTimeout(() => textareaRef.current?.focus(), 50);
-  }, [planData]);
-
-  const handleCancelPlanEdit = useCallback(() => {
-    setIsPlanEditing(false);
-    setPlanEditContent('');
-  }, []);
-
-  const handleSavePlanEdit = useCallback(() => {
-    onPlanSave?.(planEditContent);
-    setIsPlanEditing(false);
-    setPlanEditContent('');
-  }, [onPlanSave, planEditContent]);
-
-  useEffect(() => {
-    if (!isPlanEditing) return;
-    const handler = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 's') {
-        e.preventDefault();
-        handleSavePlanEdit();
-      }
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [handleSavePlanEdit, isPlanEditing]);
-
-  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Tab') {
-      e.preventDefault();
-      const textarea = e.currentTarget;
-      const start = textarea.selectionStart;
-      const end = textarea.selectionEnd;
-      const value = textarea.value;
-      const next = value.substring(0, start) + '  ' + value.substring(end);
-      if (isPlanEditing) {
-        setPlanEditContent(next);
-      } else {
-        setEditContent(next);
-      }
-      requestAnimationFrame(() => {
-        textarea.selectionStart = textarea.selectionEnd = start + 2;
-      });
-    }
-  }, [isPlanEditing]);
-
-  const syncScroll = useCallback(() => {
-    if (!textareaRef.current || !scrollRef.current) return;
-    scrollRef.current.scrollTop = textareaRef.current.scrollTop;
-    scrollRef.current.scrollLeft = textareaRef.current.scrollLeft;
-  }, []);
+  }, [isEditing, isPlanMode, onPlanSave, planEditContent]);
 
   const handleFileTreeResize = useCallback((delta: number) => {
     setFileTreeWidth((prev) => Math.min(Math.max(prev + delta, MIN_FILE_TREE_WIDTH), MAX_FILE_TREE_WIDTH));
+  }, []);
+
+  const handleSaveRef = useRef(handleSave);
+  useEffect(() => { handleSaveRef.current = handleSave; }, [handleSave]);
+
+  const handleEditorMount = useCallback((editor: MonacoEditor.IStandaloneCodeEditor) => {
+    monacoRef.current = editor;
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
+      if (isEditingRef.current) {
+        void handleSaveRef.current();
+      }
+    });
   }, []);
 
   const openInEditor = useCallback(async (command: string) => {
@@ -240,7 +201,6 @@ export function EditorPanel({
     }
   }, [selectedFilePath, sessionId]);
 
-  const lineCount = isEditing ? editContent.split('\n').length : selectedFileContent.split('\n').length;
   const hasSelectedFile = Boolean(selectedFilePath);
   const shouldShowFileTree = !isWebPreviewOpen && isFileTreeVisible;
 
@@ -270,21 +230,6 @@ export function EditorPanel({
                       <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">计划</span>
                     </div>
                     <div className="flex items-center gap-1.5">
-                      {!isPlanEditing ? (
-                        <Button size="sm" variant="outline" className="h-7 gap-1.5 text-xs" onClick={handleStartPlanEdit}>
-                          <PencilIcon className="size-3" />
-                          编辑
-                        </Button>
-                      ) : (
-                        <>
-                          <Button size="sm" variant="outline" className="h-7 gap-1.5 text-xs" onClick={handleCancelPlanEdit}>
-                            取消
-                          </Button>
-                          <Button size="sm" className="h-7 gap-1.5 text-xs" onClick={handleSavePlanEdit}>
-                            保存
-                          </Button>
-                        </>
-                      )}
                       <Button size="sm" variant="ghost" className="h-7 gap-1.5 text-xs" onClick={onClosePlan}>
                         返回编辑器
                       </Button>
@@ -292,37 +237,11 @@ export function EditorPanel({
                   </div>
 
                   <div className="flex-1 min-h-0 overflow-hidden">
-                    {isPlanEditing ? (
-                      <div className="relative h-full min-h-0 overflow-hidden bg-background">
-                        <div
-                          ref={scrollRef}
-                          className="absolute inset-y-0 left-0 w-[52px] overflow-hidden border-r bg-muted/20 pointer-events-none"
-                          aria-hidden="true"
-                        >
-                          <div className={`px-2 py-4 ${EDITOR_FONT} text-right text-muted-foreground/60`}>
-                            {Array.from({ length: planEditContent.split('\n').length }, (_, i) => (
-                              <div key={i + 1} className="h-[20px] leading-[20px]">{i + 1}</div>
-                            ))}
-                          </div>
-                        </div>
-                        <textarea
-                          ref={textareaRef}
-                          value={planEditContent}
-                          onChange={(e) => setPlanEditContent(e.target.value)}
-                          onScroll={syncScroll}
-                          onKeyDown={handleKeyDown}
-                          wrap="off"
-                          className={`absolute inset-0 h-full w-full resize-none bg-transparent py-4 pr-4 pl-[68px] ${EDITOR_FONT} text-foreground outline-none whitespace-pre overflow-auto`}
-                          spellCheck={false}
-                          autoCapitalize="off"
-                          autoCorrect="off"
-                        />
-                      </div>
-                    ) : (
-                      <div className="h-full overflow-auto p-6">
-                        <MessageResponse>{planData?.markdown || ''}</MessageResponse>
-                      </div>
-                    )}
+                    <PlanRichTextEditor
+                      value={planEditContent || planData?.markdown || ''}
+                      onChange={setPlanEditContent}
+                      autoFocus
+                    />
                   </div>
                 </div>
               ) : (
@@ -350,42 +269,30 @@ export function EditorPanel({
 
                     <div className="flex-1 min-w-0 min-h-0 overflow-hidden">
                       {hasSelectedFile ? (
-                        isEditing ? (
-                          <div className="relative h-full min-h-0 overflow-hidden bg-background">
-                            <div
-                              ref={scrollRef}
-                              className="absolute inset-y-0 left-0 w-[52px] overflow-hidden border-r bg-muted/20 pointer-events-none"
-                              aria-hidden="true"
-                            >
-                              <div className={`px-2 py-4 ${EDITOR_FONT} text-right text-muted-foreground/60`}>
-                                {Array.from({ length: lineCount }, (_, index) => (
-                                  <div key={index + 1} className="h-[20px] leading-[20px]">
-                                    {index + 1}
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                            <textarea
-                              value={editContent}
-                              onChange={(e) => setEditContent(e.target.value)}
-                              onScroll={syncScroll}
-                              onKeyDown={handleKeyDown}
-                              wrap="off"
-                              className={`absolute inset-0 h-full w-full resize-none bg-transparent py-4 pr-4 pl-[68px] ${EDITOR_FONT} text-foreground outline-none whitespace-pre overflow-auto`}
-                              spellCheck={false}
-                              autoCapitalize="off"
-                              autoCorrect="off"
-                            />
-                          </div>
-                        ) : (
-                          <CodeBlock
-                            code={selectedFileContent}
-                            language={getFileLanguage(selectedFilePath) as 'tsx'}
-                            showLineNumbers
-                            className="h-full w-full rounded-none border-0 text-sm"
-                            viewportClassName="flex-1 min-h-0 overflow-auto"
-                          />
-                        )
+                        <Editor
+                          height="100%"
+                          language={getFileLanguage(selectedFilePath)}
+                          value={isEditing ? editContent : selectedFileContent}
+                          onChange={isEditing ? ((v) => setEditContent(v ?? '')) : undefined}
+                          onMount={handleEditorMount}
+                          theme="vs"
+                          path={selectedFilePath}
+                          options={{
+                            readOnly: !isEditing,
+                            minimap: { enabled: false },
+                            fontSize: 13,
+                            lineNumbers: 'on',
+                            scrollBeyondLastLine: false,
+                            automaticLayout: true,
+                            padding: { top: 16 },
+                            renderLineHighlight: isEditing ? 'line' : 'none',
+                            overviewRulerBorder: false,
+                            hideCursorInOverviewRuler: true,
+                            overviewRulerLanes: 0,
+                            scrollbar: { verticalScrollbarSize: 8, horizontalScrollbarSize: 8 },
+                            domReadOnly: !isEditing,
+                          }}
+                        />
                       ) : (
                         <div className="flex h-full items-center justify-center text-muted-foreground">
                           <div className="space-y-2 text-center">
