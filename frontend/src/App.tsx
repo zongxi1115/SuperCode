@@ -18,6 +18,7 @@ import type {
   ManagedProcessPayload,
   ModelConfigPayload,
   ModelOption,
+  PlanStep,
   RecentProject,
   SessionContextPayload,
   SessionContextCompressionPayload,
@@ -1567,7 +1568,16 @@ export default function App() {
             }
           } else if (data.type === 'data-plan-steps') {
             const steps = data.data?.steps;
-            void steps;
+            if (Array.isArray(steps)) {
+              setSessionContext((prev) =>
+                prev
+                  ? {
+                      ...prev,
+                      planSteps: steps as PlanStep[],
+                    }
+                  : prev
+              );
+            }
           } else if (data.type === 'data-session-state') {
             const payload = (
               data.data &&
@@ -1592,6 +1602,7 @@ export default function App() {
                     cumulativeUsage: payload.cumulativeUsage ?? prev.cumulativeUsage,
                     codeChangeCount: payload.codeChangeCount ?? prev.codeChangeCount,
                     recentCodeChanges: payload.recentCodeChanges ?? prev.recentCodeChanges,
+                    planSteps: Array.isArray(payload.planSteps) ? payload.planSteps as PlanStep[] : prev.planSteps,
                   }
                 : prev
             );

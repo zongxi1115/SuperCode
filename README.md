@@ -154,6 +154,57 @@ copy .env.example .env
 
 > 如果不配置 `.env`，后端仍可启动，但会进入 **demo 模式**（模拟回复，不调用真实模型），方便前端联调。
 
+### 2.5 快速准备脚本
+
+如果你的机器已经有基础环境（`Python 3.10+`、`Node 18+`、`pnpm`），可以直接在仓库根目录执行：
+
+```powershell
+conda activate base
+powershell -ExecutionPolicy Bypass -File .\scripts\quick-start.ps1
+```
+
+这个脚本会帮你：
+
+- 检查 Python / Node / pnpm 是否可用
+- 自动把 `.env.example` 复制成 `.env`（如果你还没有 `.env`）
+- 安装后端依赖 `fastapi_app/requirements.txt`
+- 安装前端依赖 `frontend/package.json`
+- 输出后端、前端和 CLI demo 的启动命令
+
+常用参数：
+
+```powershell
+# 只安装依赖
+powershell -ExecutionPolicy Bypass -File .\scripts\quick-start.ps1 -InstallOnly
+
+# 只准备后端
+powershell -ExecutionPolicy Bypass -File .\scripts\quick-start.ps1 -BackendOnly
+
+# 只准备前端
+powershell -ExecutionPolicy Bypass -File .\scripts\quick-start.ps1 -FrontendOnly
+
+# 安装完成后自动拉起后端和前端
+powershell -ExecutionPolicy Bypass -File .\scripts\quick-start.ps1 -StartBackend -StartFrontend
+
+# 如果缺少 Python / Node / pnpm，尝试自动安装基础工具后再继续
+powershell -ExecutionPolicy Bypass -File .\scripts\quick-start.ps1 -AutoInstallTools
+```
+
+说明：
+
+- `-AutoInstallTools` 会在缺少基础工具时尝试自动补齐
+- `Python` 和 `Node` 优先通过 `winget` 安装
+- `pnpm` 会优先尝试 `npm install -g pnpm`，不行再退回 `winget`
+- 如果 `winget` 刚装完工具但当前终端还没刷新 PATH，重新打开终端再跑一次脚本即可
+
+如果你不想记参数，也可以直接双击仓库根目录的 [start.bat](D:/vibe_projs/SuperCode/start.bat)。
+它会弹出交互菜单，让你选择：
+
+- 只安装依赖
+- 安装后直接启动前后端
+- 只准备前端或后端
+- 先自动补基础工具，再安装或启动
+
 ### 3. 启动后端
 
 ```powershell

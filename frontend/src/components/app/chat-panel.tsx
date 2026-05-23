@@ -2143,6 +2143,7 @@ const PersonaShell = memo(function PersonaShell({
 }) {
   return (
     <motion.div
+      layout
       layoutId={PERSONA_LAYOUT_ID}
       transition={{ type: "spring", stiffness: 320, damping: 30 }}
       aria-label={`AI status: ${personaLabels[state]}`}

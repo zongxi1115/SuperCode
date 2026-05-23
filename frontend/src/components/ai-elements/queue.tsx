@@ -23,6 +23,20 @@ const useQueue = () => {
   return context;
 };
 
+interface QueueItemContextValue {
+  status: QueueStatus;
+}
+
+const QueueItemContext = createContext<QueueItemContextValue | null>(null);
+
+const useQueueItem = () => {
+  const context = useContext(QueueItemContext);
+  if (!context) {
+    throw new Error("QueueItem components must be used within QueueItem");
+  }
+  return context;
+};
+
 export type QueueProps = ComponentProps<"div"> & {
   isStreaming?: boolean;
 };
@@ -57,20 +71,26 @@ export const QueueItem = ({
   status,
   children,
   ...props
-}: QueueItemProps) => (
-  <div
-    data-slot="queue-item"
-    data-status={status}
-    className={cn("group/item relative flex gap-3", className)}
-    {...props}
-  >
-    <div className="flex flex-col items-center">
-      <QueueItemIndicator status={status} />
-      <QueueItemSeparator />
-    </div>
-    <div className="flex-1 min-w-0 pb-4">{children}</div>
-  </div>
-);
+}: QueueItemProps) => {
+  const itemContextValue = useMemo(() => ({ status }), [status]);
+
+  return (
+    <QueueItemContext.Provider value={itemContextValue}>
+      <div
+        data-slot="queue-item"
+        data-status={status}
+        className={cn("group/item relative flex gap-3", className)}
+        {...props}
+      >
+        <div className="flex flex-col items-center">
+          <QueueItemIndicator status={status} />
+          <QueueItemSeparator />
+        </div>
+        <div className="flex-1 min-w-0 pb-4">{children}</div>
+      </div>
+    </QueueItemContext.Provider>
+  );
+};
 
 export type QueueItemIndicatorProps = ComponentProps<"div"> & {
   status: QueueStatus;
@@ -142,6 +162,9 @@ export const QueueItemTitle = ({
   ...props
 }: QueueItemTitleProps) => {
   const { isStreaming } = useQueue();
+  const { status } = useQueueItem();
+
+  const shouldShimmer = isStreaming && status === "running";
 
   return (
     <p
@@ -149,7 +172,7 @@ export const QueueItemTitle = ({
       className={cn("text-sm font-medium leading-none", className)}
       {...props}
     >
-      {isStreaming ? <Shimmer as="span">{children}</Shimmer> : children}
+      {shouldShimmer ? <Shimmer as="span">{children}</Shimmer> : children}
     </p>
   );
 };
@@ -164,6 +187,9 @@ export const QueueItemDescription = ({
   ...props
 }: QueueItemDescriptionProps) => {
   const { isStreaming } = useQueue();
+  const { status } = useQueueItem();
+
+  const shouldShimmer = isStreaming && status === "running";
 
   return (
     <p
@@ -171,7 +197,7 @@ export const QueueItemDescription = ({
       className={cn("mt-1 text-xs text-muted-foreground", className)}
       {...props}
     >
-      {isStreaming ? <Shimmer as="span">{children}</Shimmer> : children}
+      {shouldShimmer ? <Shimmer as="span">{children}</Shimmer> : children}
     </p>
   );
 };
