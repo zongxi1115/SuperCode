@@ -281,8 +281,12 @@ class OpenAICompatibleBrain(AgentBrain):
         if not step_records:
             return "暂无历史步骤。"
 
-        lines: list[str] = []
-        for step in step_records:
+        recent_records = step_records[-8:]
+        if len(step_records) > 8:
+            lines: list[str] = [f"... (省略前面 {len(step_records) - 8} 步) ..."]
+        else:
+            lines: list[str] = []
+        for step in recent_records:
             step_prefix = f"第 {step.turn_index} 轮 步骤 {step.index}"
             if include_thoughts and step.thought:
                 lines.append(f"{step_prefix} 思考：{step.thought}")
@@ -328,9 +332,12 @@ class OpenAICompatibleBrain(AgentBrain):
         return lines
 
     def _stringify_tool_output(self, value: object) -> str:
-        """把工具输出稳定转成文本，不做静默截断。"""
+        """把工具输出稳定转成文本，对过长内容进行截断。"""
         text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-        return text.strip()
+        text = text.strip()
+        if len(text) > 1000:
+            return f"{text[:1000]}\n... [已截断，输出过长]"
+        return text
 
     def _parse_json_output(self, raw_output: str) -> dict[str, object]:
         """解析模型返回的 JSON 文本。"""

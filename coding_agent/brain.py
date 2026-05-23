@@ -111,52 +111,49 @@ class CodingPromptBrain(OpenAICompatibleBrain):
         tool_definitions: dict[str, dict[str, object]],
         response_mode: str = "legacy_json",
     ) -> list[dict[str, str]]:
+        system_content = [self._build_system_prompt(tool_definitions, response_mode=response_mode)]
+
+        runtime_state_context = self._build_runtime_state_context(state)
+        if runtime_state_context:
+            system_content.append(runtime_state_context)
+
+        planning_records_context = self._build_planning_records_context(state)
+        if planning_records_context:
+            system_content.append(planning_records_context)
+
+        tool_records_context = self._build_tool_records_context(state)
+        if tool_records_context:
+            system_content.append(tool_records_context)
+
+        available_skills_context = self._build_available_skills_context(state)
+        if available_skills_context:
+            system_content.append(available_skills_context)
+
+        active_skills_context = self._build_active_skills_context(state)
+        if active_skills_context:
+            system_content.append(active_skills_context)
+
         messages: list[dict[str, str]] = [
-            {"role": "system", "content": self._build_system_prompt(tool_definitions, response_mode=response_mode)}
+            {"role": "system", "content": "\n\n".join(system_content)}
         ]
 
         previous_messages, latest_user_message = self._split_latest_user_message(state)
         messages.extend(self._conversation_messages_for_model(previous_messages))
 
-        runtime_state_context = self._build_runtime_state_context(state)
-        if runtime_state_context:
-            messages.append({"role": "assistant", "content": runtime_state_context})
-
-        planning_records_context = self._build_planning_records_context(state)
-        if planning_records_context:
-            messages.append({"role": "assistant", "content": planning_records_context})
-
-        tool_records_context = self._build_tool_records_context(state)
-        if tool_records_context:
-            messages.append({"role": "assistant", "content": tool_records_context})
-
-        available_skills_context = self._build_available_skills_context(state)
-        if available_skills_context:
-            messages.append({"role": "assistant", "content": available_skills_context})
-
-        active_skills_context = self._build_active_skills_context(state)
-        if active_skills_context:
-            messages.append({"role": "assistant", "content": active_skills_context})
-
+        user_content = []
         if latest_user_message:
-            messages.append({"role": "user", "content": latest_user_message})
+            user_content.append(latest_user_message)
         elif state.current_input.strip():
-            messages.append({"role": "user", "content": state.current_input.strip()})
+            user_content.append(state.current_input.strip())
 
         current_turn_history = self._build_current_turn_history(state)
         if current_turn_history:
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": current_turn_history,
-                }
-            )
-            messages.append(
-                {
-                    "role": "user",
-                    "content": self._build_continuation_instruction(response_mode),
-                }
-            )
+            user_content.append("")
+            user_content.append(current_turn_history)
+            user_content.append(self._build_continuation_instruction(response_mode))
+
+        if user_content:
+            messages.append({"role": "user", "content": "\n".join(user_content)})
 
         return messages
 
