@@ -281,6 +281,9 @@ const TOOL_ICONS: Record<string, React.ReactNode> = {
   git_tag: <Tag className="size-4" />,
   ask_plan_questions: <FileText className="size-4" />,
   save_plan: <FileText className="size-4" />,
+  create_task: <ListChecks className="size-4" />,
+  get_task_status: <ListChecks className="size-4" />,
+  finish_task: <ListChecks className="size-4" />,
 };
 
 const TOOL_TITLES: Record<string, (args: Record<string, unknown>) => string> = {
@@ -327,6 +330,9 @@ const TOOL_TITLES: Record<string, (args: Record<string, unknown>) => string> = {
   git_tag: () => "正在创建标签",
   ask_plan_questions: () => "正在生成澄清问题",
   save_plan: () => "正在设计计划",
+  create_task: () => "正在创建任务",
+  get_task_status: () => "正在读取任务状态",
+  finish_task: () => "正在完成步骤",
 };
 
 function getToolTitle(name: string, args: Record<string, unknown>): string {
@@ -954,6 +960,38 @@ function ToolBody({
       : typeof output === "string"
         ? output
         : undefined;
+  const asTaskObject = (
+    value: unknown,
+  ): { title?: string; summary?: string; steps?: Array<Record<string, unknown>> } | undefined =>
+    value && typeof value === "object" && !Array.isArray(value)
+      ? (value as { title?: string; summary?: string; steps?: Array<Record<string, unknown>> })
+      : undefined;
+  const normalizeQueueStatus = (
+    status: unknown,
+  ): "pending" | "running" | "completed" | "error" => {
+    if (status === "completed") return "completed";
+    if (status === "error") return "error";
+    if (status === "running") return "running";
+    return "pending";
+  };
+  const renderStepQueue = (steps: Array<Record<string, unknown>> | undefined) => {
+    if (!steps || steps.length === 0) return null;
+    return (
+      <Queue isStreaming={isStreaming}>
+        {steps.map((step, index) => (
+          <QueueItem
+            key={String(step.id ?? index)}
+            status={normalizeQueueStatus(step.status)}
+          >
+            <QueueItemTitle>{String(step.title ?? `Step ${index + 1}`)}</QueueItemTitle>
+            <QueueItemDescription>
+              {String(step.summary ?? step.description ?? "")}
+            </QueueItemDescription>
+          </QueueItem>
+        ))}
+      </Queue>
+    );
+  };
 
   if (toolCall.name === "connect") {
     if (toolCall.inputRequest && toolCall.state === "input-requested") {
@@ -1065,6 +1103,66 @@ function ToolBody({
         onViewPlan={onViewPlan}
         isStreaming={isStreaming}
       />
+    );
+  }
+
+  if (toolCall.name === "create_task") {
+    const taskPayload =
+      output && typeof output === "object" && !Array.isArray(output)
+        ? (output as Record<string, unknown>)
+        : undefined;
+    const task = asTaskObject(taskPayload?.task);
+    const stepIds = Array.isArray(taskPayload?.step_ids) ? taskPayload.step_ids : [];
+
+    return (
+      <div className="space-y-3 rounded-md bg-muted/40 p-3 text-xs">
+        <div>
+          <p className="font-medium text-foreground">
+            {String(task?.title ?? args.title ?? "Task")}
+          </p>
+          <p className="mt-1 text-muted-foreground">
+            {String(task?.summary ?? args.summary ?? "")}
+          </p>
+        </div>
+        {renderStepQueue(task?.steps)}
+        {stepIds.length > 0 ? (
+          <p className="text-muted-foreground">已创建 {stepIds.length} 个 steps。</p>
+        ) : null}
+      </div>
+    );
+  }
+
+  if (toolCall.name === "get_task_status" || toolCall.name === "finish_task") {
+    const taskPayload =
+      output && typeof output === "object" && !Array.isArray(output)
+        ? (output as Record<string, unknown>)
+        : undefined;
+    const activeTask = asTaskObject(taskPayload?.active_task);
+    const planSteps = Array.isArray(taskPayload?.planSteps)
+      ? (taskPayload.planSteps as Array<Record<string, unknown>>)
+      : undefined;
+    const nextStepId =
+      typeof taskPayload?.next_step_id === "string"
+        ? taskPayload.next_step_id
+        : undefined;
+
+    return (
+      <div className="space-y-3 rounded-md bg-muted/40 p-3 text-xs">
+        <div>
+          <p className="font-medium text-foreground">
+            {String(activeTask?.title ?? "当前 Task 状态")}
+          </p>
+          <p className="mt-1 text-muted-foreground">
+            {String(activeTask?.summary ?? "")}
+          </p>
+        </div>
+        {activeTask?.steps ? renderStepQueue(activeTask.steps) : renderStepQueue(planSteps)}
+        {toolCall.name === "finish_task" ? (
+          <p className="text-muted-foreground">
+            {nextStepId ? `已推进到下一步：${nextStepId}` : "当前 task 已完成。"}
+          </p>
+        ) : null}
+      </div>
     );
   }
 
@@ -1578,7 +1676,7 @@ function PlanToggle({
         className="flex items-center gap-2 w-full rounded-md px-2 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
       >
         <ListChecks className="size-3.5 shrink-0" />
-        <span className="flex-1 text-left">计划</span>
+        <span className="flex-1 text-left">步骤</span>
         <span className="text-[10px] tabular-nums">
           {completedCount}/{planSteps.length}
         </span>

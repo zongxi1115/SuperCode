@@ -12,7 +12,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlparse
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from agent.tools import BaseTool, ToolContext
@@ -826,6 +827,44 @@ class InteractiveCommandSession:
 
 class CodingBaseTool(BaseTool):
     """编码场景工具基类。"""
+
+    def _request_backend_json(
+        self,
+        *,
+        method: str,
+        url: str,
+        payload: dict[str, Any] | None = None,
+        timeout: int = 10,
+    ) -> dict[str, Any]:
+        body = json.dumps(payload).encode("utf-8") if payload is not None else None
+        request = Request(
+            url,
+            method=method,
+            data=body,
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "User-Agent": "SuperCode/1.0",
+            },
+        )
+        try:
+            with urlopen(request, timeout=timeout) as response:
+                raw_body = response.read().decode("utf-8")
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace").strip()
+            raise RuntimeError(detail or f"请求失败：HTTP {exc.code}") from exc
+        except URLError as exc:
+            raise RuntimeError(f"请求失败：{exc.reason}") from exc
+        except TimeoutError as exc:
+            raise RuntimeError("请求超时。") from exc
+
+        try:
+            parsed = json.loads(raw_body)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"返回了无法解析的 JSON：{raw_body[:300]}") from exc
+        if not isinstance(parsed, dict):
+            raise RuntimeError("返回格式不正确。")
+        return parsed
 
     def _resolve_path(self, raw_path: str, context: ToolContext) -> Path:
         """把相对路径限制在当前工作区内。"""
@@ -2205,19 +2244,10 @@ class ReadCurrentPlanTool(CodingBaseTool):
         if not backend_base_url or not session_id:
             raise RuntimeError("缺少 backend_base_url 或 session_id，无法读取当前计划。")
 
-        request = Request(
-            f"{backend_base_url}/api/sessions/{session_id}/plan-draft/current",
+        payload = self._request_backend_json(
             method="GET",
-            headers={
-                "Accept": "application/json",
-                "User-Agent": "SuperCode/1.0",
-            },
+            url=f"{backend_base_url}/api/sessions/{session_id}/plan-draft/current",
         )
-        try:
-            with urlopen(request, timeout=10) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        except Exception as exc:
-            raise RuntimeError(f"读取当前计划失败：{exc}") from exc
 
         plan = payload.get("plan")
         if not isinstance(plan, dict):
@@ -2225,6 +2255,144 @@ class ReadCurrentPlanTool(CodingBaseTool):
         return {
             "plan": plan,
             "planState": payload.get("planState"),
+        }
+
+
+class CreateTaskTool(CodingBaseTool):
+    name = "create_task"
+    description = (
+        "创建一个结构化 task。参数：title、summary、steps。"
+        "steps 是数组，每项都需要 title 和 summary。"
+    )
+    parameters_schema = {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "summary": {"type": "string"},
+            "steps": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "summary": {"type": "string"},
+                    },
+                    "required": ["title", "summary"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["title", "summary", "steps"],
+        "additionalProperties": False,
+    }
+
+    def run(self, arguments: dict[str, object], context: ToolContext) -> dict[str, Any]:
+        backend_base_url = str(context.metadata.get("backend_base_url") or "").rstrip("/")
+        session_id = str(context.metadata.get("session_id") or "").strip()
+        if not backend_base_url or not session_id:
+            raise RuntimeError("缺少 backend_base_url 或 session_id，无法创建 task。")
+
+        title = str(arguments.get("title") or "").strip()
+        summary = str(arguments.get("summary") or "").strip()
+        raw_steps = arguments.get("steps")
+        if not title:
+            raise ValueError("title 不能为空。")
+        if not summary:
+            raise ValueError("summary 不能为空。")
+        if not isinstance(raw_steps, list) or not raw_steps:
+            raise ValueError("steps 不能为空。")
+
+        steps: list[dict[str, str]] = []
+        for raw_step in raw_steps:
+            if not isinstance(raw_step, dict):
+                raise ValueError("steps 里的每一项都必须是对象。")
+            step_title = str(raw_step.get("title") or "").strip()
+            step_summary = str(raw_step.get("summary") or "").strip()
+            if not step_title or not step_summary:
+                raise ValueError("每个 step 都必须包含 title 和 summary。")
+            steps.append({"title": step_title, "summary": step_summary})
+
+        payload = self._request_backend_json(
+            method="POST",
+            url=f"{backend_base_url}/api/sessions/{session_id}/tasks",
+            payload={"title": title, "summary": summary, "steps": steps},
+        )
+        return {
+            "task_id": payload.get("task_id"),
+            "step_ids": payload.get("step_ids"),
+            "task": payload.get("task"),
+            "planState": payload.get("planState"),
+            "planSteps": payload.get("planSteps"),
+        }
+
+
+class FinishTaskTool(CodingBaseTool):
+    name = "finish_task"
+    description = "完成当前正在执行的 step。参数：step_id。"
+    parameters_schema = {
+        "type": "object",
+        "properties": {
+            "step_id": {"type": "string"},
+        },
+        "required": ["step_id"],
+        "additionalProperties": False,
+    }
+
+    def run(self, arguments: dict[str, object], context: ToolContext) -> dict[str, Any]:
+        backend_base_url = str(context.metadata.get("backend_base_url") or "").rstrip("/")
+        session_id = str(context.metadata.get("session_id") or "").strip()
+        if not backend_base_url or not session_id:
+            raise RuntimeError("缺少 backend_base_url 或 session_id，无法完成 step。")
+
+        step_id = str(arguments.get("step_id") or "").strip()
+        if not step_id:
+            raise ValueError("step_id 不能为空。")
+
+        payload = self._request_backend_json(
+            method="POST",
+            url=f"{backend_base_url}/api/sessions/{session_id}/tasks/finish",
+            payload={"step_id": step_id},
+        )
+        return {
+            "task_id": payload.get("task_id"),
+            "step_id": payload.get("step_id"),
+            "finished": payload.get("finished"),
+            "next_step_id": payload.get("next_step_id"),
+            "planState": payload.get("planState"),
+            "planSteps": payload.get("planSteps"),
+        }
+
+
+class GetTaskStatusTool(CodingBaseTool):
+    name = "get_task_status"
+    description = "获取当前会话里的 task 状态。参数：task_id 可选。"
+    parameters_schema = {
+        "type": "object",
+        "properties": {
+            "task_id": {"type": "string"},
+        },
+        "additionalProperties": False,
+    }
+
+    def run(self, arguments: dict[str, object], context: ToolContext) -> dict[str, Any]:
+        backend_base_url = str(context.metadata.get("backend_base_url") or "").rstrip("/")
+        session_id = str(context.metadata.get("session_id") or "").strip()
+        if not backend_base_url or not session_id:
+            raise RuntimeError("缺少 backend_base_url 或 session_id，无法读取 task 状态。")
+
+        task_id = str(arguments.get("task_id") or "").strip()
+        query = f"?{urlencode({'task_id': task_id})}" if task_id else ""
+        payload = self._request_backend_json(
+            method="GET",
+            url=f"{backend_base_url}/api/sessions/{session_id}/tasks/status{query}",
+        )
+        return {
+            "active_task_id": payload.get("active_task_id"),
+            "active_step_id": payload.get("active_step_id"),
+            "active_task": payload.get("active_task"),
+            "tasks": payload.get("tasks"),
+            "planState": payload.get("planState"),
+            "planSteps": payload.get("planSteps"),
         }
 
 
@@ -2510,6 +2678,9 @@ def build_coding_tools() -> list[BaseTool]:
         GlobFileTool(),
         ReadFileTool(),
         GrepFileTool(),
+        CreateTaskTool(),
+        GetTaskStatusTool(),
+        FinishTaskTool(),
         ApplyPatchTool(),
         WriteFileTool(),
         ReplaceFileTool(),

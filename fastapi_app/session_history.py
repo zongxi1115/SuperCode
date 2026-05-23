@@ -379,7 +379,7 @@ def update_plan_steps_for_tool(session: Any, step_index: int | None, tool_name: 
             if numeric_id < step_index:
                 step["status"] = "completed"
             elif numeric_id == step_index:
-                step["status"] = "in_progress"
+                step["status"] = "running"
             elif step["status"] != "completed":
                 step["status"] = "pending"
 

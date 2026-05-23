@@ -3,7 +3,9 @@
 from .brain import PlanPromptBrain
 from .tools import (
     AskPlanQuestionsTool,
+    CreateTaskTool,
     FetchUrlContentTool,
+    GetTaskStatusTool,
     ReadCurrentPlanTool,
     SavePlanTool,
     SearchWebTool,
@@ -12,7 +14,9 @@ from .tools import (
 
 __all__ = [
     "AskPlanQuestionsTool",
+    "CreateTaskTool",
     "FetchUrlContentTool",
+    "GetTaskStatusTool",
     "PlanPromptBrain",
     "ReadCurrentPlanTool",
     "SavePlanTool",

@@ -225,6 +225,21 @@ class PlanDraftUpdateRequest(BaseModel):
     markdown: str
 
 
+class TaskStepInput(BaseModel):
+    title: str
+    summary: str
+
+
+class CreateTaskRequest(BaseModel):
+    title: str
+    summary: str
+    steps: list[TaskStepInput] = Field(default_factory=list)
+
+
+class FinishTaskRequest(BaseModel):
+    step_id: str
+
+
 class TerminalSnapshotResponse(BaseModel):
     sessionId: str
     output: str

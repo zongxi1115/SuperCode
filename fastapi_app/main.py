@@ -45,8 +45,10 @@ from fastapi_app.api_models import (
     ChatStreamRequest,
     ConnectToolSubmitRequest,
     ContinueChatStreamRequest,
+    CreateTaskRequest,
     CreateSessionRequest,
     CreateSessionResponse,
+    FinishTaskRequest,
     GitCommitRequest,
     GitTagRequest,
     ModelConfigPayload,
@@ -694,6 +696,267 @@ def build_default_plan_state() -> dict[str, Any]:
         "draft": None,
         "last_submitted_plan": None,
         "pending_coding_input": None,
+        "tasks": [],
+        "active_task_id": None,
+        "active_step_id": None,
+    }
+
+
+def _normalize_step_status(value: object) -> str:
+    normalized = str(value or "pending").strip().lower()
+    return normalized if normalized in {"pending", "running", "completed"} else "pending"
+
+
+def _normalize_task_status(value: object) -> str:
+    normalized = str(value or "pending").strip().lower()
+    return normalized if normalized in {"pending", "running", "completed"} else "pending"
+
+
+def _normalize_plan_tasks(raw_tasks: object) -> list[dict[str, Any]]:
+    if not isinstance(raw_tasks, list):
+        return []
+
+    tasks: list[dict[str, Any]] = []
+    for task_index, raw_task in enumerate(raw_tasks, start=1):
+        if not isinstance(raw_task, dict):
+            continue
+        task_id = str(raw_task.get("id") or "").strip()
+        title = str(raw_task.get("title") or "").strip()
+        summary = str(raw_task.get("summary") or "").strip()
+        source = str(raw_task.get("source") or "").strip() or "coding"
+        raw_steps = raw_task.get("steps")
+        if not task_id or not title or not summary or not isinstance(raw_steps, list):
+            continue
+
+        steps: list[dict[str, Any]] = []
+        for step_index, raw_step in enumerate(raw_steps, start=1):
+            if not isinstance(raw_step, dict):
+                continue
+            step_id = str(raw_step.get("id") or "").strip()
+            step_title = str(raw_step.get("title") or "").strip()
+            step_summary = str(raw_step.get("summary") or "").strip()
+            if not step_id or not step_title or not step_summary:
+                continue
+            steps.append(
+                {
+                    "id": step_id,
+                    "title": step_title,
+                    "summary": step_summary,
+                    "status": _normalize_step_status(raw_step.get("status")),
+                    "order": int(raw_step.get("order") or step_index),
+                }
+            )
+
+        if not steps:
+            continue
+
+        tasks.append(
+            {
+                "id": task_id,
+                "title": title,
+                "summary": summary,
+                "status": _normalize_task_status(raw_task.get("status")),
+                "source": source,
+                "steps": steps,
+                "order": int(raw_task.get("order") or task_index),
+            }
+        )
+
+    return tasks
+
+
+def _find_task_by_id(tasks: list[dict[str, Any]], task_id: str | None) -> dict[str, Any] | None:
+    if not task_id:
+        return None
+    return next((task for task in tasks if str(task.get("id")) == task_id), None)
+
+
+def _find_active_task(tasks: list[dict[str, Any]], active_task_id: str | None) -> dict[str, Any] | None:
+    active_task = _find_task_by_id(tasks, active_task_id)
+    if active_task is not None:
+        return active_task
+    return next((task for task in tasks if str(task.get("status")) == "running"), None)
+
+
+def _derive_plan_steps_from_tasks(plan_state: dict[str, Any]) -> list[dict[str, str]]:
+    tasks = _normalize_plan_tasks(plan_state.get("tasks"))
+    display_task = _find_active_task(tasks, str(plan_state.get("active_task_id") or "").strip() or None)
+    if display_task is None and tasks:
+        display_task = tasks[-1]
+    if display_task is None:
+        return []
+
+    steps = display_task.get("steps")
+    if not isinstance(steps, list):
+        return []
+
+    return [
+        {
+            "id": str(step.get("id") or ""),
+            "title": str(step.get("title") or ""),
+            "description": str(step.get("summary") or ""),
+            "status": _normalize_step_status(step.get("status")),
+        }
+        for step in steps
+        if isinstance(step, dict)
+    ]
+
+
+def _sync_plan_steps_from_tasks(session: UISession) -> None:
+    derived_steps = _derive_plan_steps_from_tasks(session.plan_state)
+    if derived_steps:
+        session.plan_steps = derived_steps
+
+
+def _build_task_payload(
+    *,
+    title: str,
+    summary: str,
+    steps: list[dict[str, str]],
+    source: str,
+    order: int,
+) -> dict[str, Any]:
+    task_id = f"task_{uuid.uuid4().hex[:10]}"
+    normalized_steps = [
+        {
+            "id": f"step_{uuid.uuid4().hex[:10]}",
+            "title": str(step.get("title") or "").strip(),
+            "summary": str(step.get("summary") or "").strip(),
+            "status": "running" if index == 0 else "pending",
+            "order": index + 1,
+        }
+        for index, step in enumerate(steps)
+    ]
+    return {
+        "id": task_id,
+        "title": title,
+        "summary": summary,
+        "status": "running",
+        "source": source,
+        "steps": normalized_steps,
+        "order": order,
+    }
+
+
+def create_task_in_session(
+    session: UISession,
+    *,
+    title: str,
+    summary: str,
+    steps: list[dict[str, str]],
+    source: str,
+) -> dict[str, Any]:
+    normalized_title = str(title or "").strip()
+    normalized_summary = str(summary or "").strip()
+    normalized_steps = [
+        {
+            "title": str(step.get("title") or "").strip(),
+            "summary": str(step.get("summary") or "").strip(),
+        }
+        for step in steps
+        if str(step.get("title") or "").strip() and str(step.get("summary") or "").strip()
+    ]
+    if not normalized_title:
+        raise HTTPException(status_code=400, detail="title 不能为空。")
+    if not normalized_summary:
+        raise HTTPException(status_code=400, detail="summary 不能为空。")
+    if not normalized_steps:
+        raise HTTPException(status_code=400, detail="steps 不能为空。")
+
+    plan_state = normalize_plan_state(session.plan_state)
+    tasks = _normalize_plan_tasks(plan_state.get("tasks"))
+    previous_active_task = _find_active_task(tasks, str(plan_state.get("active_task_id") or "").strip() or None)
+    if previous_active_task is not None:
+        previous_active_task["status"] = "pending"
+        for step in previous_active_task.get("steps", []):
+            if isinstance(step, dict) and str(step.get("status")) == "running":
+                step["status"] = "pending"
+
+    task = _build_task_payload(
+        title=normalized_title,
+        summary=normalized_summary,
+        steps=normalized_steps,
+        source=source,
+        order=len(tasks) + 1,
+    )
+    tasks.append(task)
+    first_step = task["steps"][0]
+    update_plan_state(
+        session,
+        tasks=tasks,
+        active_task_id=task["id"],
+        active_step_id=first_step["id"],
+    )
+    session.touch()
+    return task
+
+
+def finish_task_step_in_session(session: UISession, step_id: str) -> dict[str, Any]:
+    normalized_step_id = str(step_id or "").strip()
+    if not normalized_step_id:
+        raise HTTPException(status_code=400, detail="step_id 不能为空。")
+
+    plan_state = normalize_plan_state(session.plan_state)
+    active_step_id = str(plan_state.get("active_step_id") or "").strip()
+    if active_step_id != normalized_step_id:
+        raise HTTPException(status_code=409, detail="只能完成当前正在执行的 step。")
+
+    tasks = _normalize_plan_tasks(plan_state.get("tasks"))
+    active_task = _find_active_task(tasks, str(plan_state.get("active_task_id") or "").strip() or None)
+    if active_task is None:
+        raise HTTPException(status_code=404, detail="当前没有可完成的 task。")
+
+    steps = active_task.get("steps")
+    if not isinstance(steps, list):
+        raise HTTPException(status_code=404, detail="当前 task 没有 steps。")
+
+    current_index = next(
+        (index for index, step in enumerate(steps) if str(step.get("id")) == normalized_step_id),
+        None,
+    )
+    if current_index is None:
+        raise HTTPException(status_code=404, detail="step_id 不存在。")
+
+    current_step = steps[current_index]
+    current_step["status"] = "completed"
+    next_step_id: str | None = None
+    next_index = current_index + 1
+    if next_index < len(steps):
+        next_step = steps[next_index]
+        next_step["status"] = "running"
+        active_task["status"] = "running"
+        next_step_id = str(next_step.get("id") or "").strip() or None
+    else:
+        active_task["status"] = "completed"
+
+    update_plan_state(
+        session,
+        tasks=tasks,
+        active_task_id=(str(active_task.get("id") or "").strip() if next_step_id else None),
+        active_step_id=next_step_id,
+    )
+    session.touch()
+    return {
+        "task_id": str(active_task.get("id") or ""),
+        "step_id": normalized_step_id,
+        "finished": True,
+        "next_step_id": next_step_id,
+    }
+
+
+def build_task_status_payload(session: UISession, task_id: str | None = None) -> dict[str, Any]:
+    plan_state = normalize_plan_state(session.plan_state)
+    tasks = _normalize_plan_tasks(plan_state.get("tasks"))
+    active_task_id = str(plan_state.get("active_task_id") or "").strip() or None
+    active_step_id = str(plan_state.get("active_step_id") or "").strip() or None
+    active_task = _find_task_by_id(tasks, task_id) if task_id else _find_active_task(tasks, active_task_id)
+    if active_task is None and tasks:
+        active_task = tasks[-1]
+    return {
+        "active_task_id": active_task_id,
+        "active_step_id": active_step_id,
+        "active_task": active_task,
+        "tasks": tasks,
     }
 
 
@@ -711,6 +974,26 @@ def normalize_plan_state(value: object) -> dict[str, Any]:
     state["pending_coding_input"] = (
         str(pending_coding_input).strip() if isinstance(pending_coding_input, str) else None
     )
+    state["tasks"] = _normalize_plan_tasks(state.get("tasks"))
+    active_task = _find_active_task(state["tasks"], str(state.get("active_task_id") or "").strip() or None)
+    state["active_task_id"] = str(active_task.get("id") or "").strip() if active_task else None
+    active_step_id = str(state.get("active_step_id") or "").strip() or None
+    if active_task is None:
+        state["active_step_id"] = None
+    else:
+        steps = active_task.get("steps")
+        if isinstance(steps, list) and any(str(step.get("id")) == active_step_id for step in steps if isinstance(step, dict)):
+            state["active_step_id"] = active_step_id
+        else:
+            running_step = next(
+                (
+                    step
+                    for step in steps
+                    if isinstance(step, dict) and str(step.get("status")) == "running"
+                ),
+                None,
+            )
+            state["active_step_id"] = str(running_step.get("id") or "").strip() if running_step else None
     status = str(state.get("status") or "idle").strip().lower()
     if status not in {"idle", "clarifying", "researching", "planning", "awaiting_user_input", "draft_ready", "submitted"}:
         state["status"] = "idle"
@@ -722,6 +1005,7 @@ def normalize_plan_state(value: object) -> dict[str, Any]:
 def refresh_session_runtime_state(session: UISession) -> None:
     if session.agent_type == "plan":
         session.plan_state = normalize_plan_state(session.plan_state)
+        _sync_plan_steps_from_tasks(session)
         session.deploy_state = normalize_deploy_state(session.deploy_state)
         if session.pending_user_input_requests:
             session.phase = "awaiting_user_input"
@@ -749,12 +1033,14 @@ def refresh_session_runtime_state(session: UISession) -> None:
     if session.agent_type != "deploy":
         session.phase = "idle"
         session.plan_state = normalize_plan_state(session.plan_state)
+        _sync_plan_steps_from_tasks(session)
         session.deploy_state = normalize_deploy_state(session.deploy_state)
         return
 
     session.phase = normalize_session_phase(session.phase)
     deploy_state = normalize_deploy_state(session.deploy_state)
     session.plan_state = normalize_plan_state(session.plan_state)
+    _sync_plan_steps_from_tasks(session)
     manager = session.deploy_connection_manager
     connections = manager.list_connections() if manager is not None else []
     deploy_state["connection_count"] = len(connections)
@@ -1050,7 +1336,7 @@ def build_default_plan_steps(agent_type: str) -> list[dict[str, str]]:
                 "id": "1",
                 "title": "连接部署目标",
                 "description": "向用户收集部署目录或目标环境信息，建立 deploy session。",
-                "status": "in_progress",
+                "status": "running",
             },
             {
                 "id": "2",
@@ -1089,7 +1375,7 @@ def build_default_plan_steps(agent_type: str) -> list[dict[str, str]]:
             "id": "2",
             "title": "设计组件层级和数据流",
             "description": "消息流、工具流、文件流和终端流分层管理。",
-            "status": "in_progress",
+            "status": "running",
         },
         {
             "id": "3",
@@ -2645,6 +2931,64 @@ async def submit_plan(
     )
 
 
+@app.post("/api/sessions/{session_id}/tasks")
+async def create_task_endpoint(
+    session_id: str,
+    request: CreateTaskRequest,
+) -> JSONResponse:
+    session = require_session(session_id)
+    task = create_task_in_session(
+        session,
+        title=request.title,
+        summary=request.summary,
+        steps=[{"title": step.title, "summary": step.summary} for step in request.steps],
+        source=session.agent_type,
+    )
+    return JSONResponse(
+        {
+            "ok": True,
+            "task_id": task["id"],
+            "step_ids": [str(step.get("id") or "") for step in task.get("steps", []) if isinstance(step, dict)],
+            "task": task,
+            "planState": session.plan_state,
+            "planSteps": session.plan_steps,
+        }
+    )
+
+
+@app.post("/api/sessions/{session_id}/tasks/finish")
+async def finish_task_endpoint(
+    session_id: str,
+    request: FinishTaskRequest,
+) -> JSONResponse:
+    session = require_session(session_id)
+    result = finish_task_step_in_session(session, request.step_id)
+    return JSONResponse(
+        {
+            "ok": True,
+            **result,
+            "planState": session.plan_state,
+            "planSteps": session.plan_steps,
+        }
+    )
+
+
+@app.get("/api/sessions/{session_id}/tasks/status")
+async def get_task_status_endpoint(
+    session_id: str,
+    task_id: str | None = Query(None),
+) -> JSONResponse:
+    session = require_session(session_id)
+    return JSONResponse(
+        {
+            "ok": True,
+            **build_task_status_payload(session, task_id=task_id),
+            "planState": session.plan_state,
+            "planSteps": session.plan_steps,
+        }
+    )
+
+
 @app.get("/api/sessions/{session_id}/deploy/connections")
 async def list_deploy_connections(session_id: str) -> JSONResponse:
     session = require_session(session_id)
@@ -3514,6 +3858,16 @@ async def run_agent_stream(
                     },
                 },
             )
+            if event.tool_result.name in {"create_task", "finish_task", "get_task_status"}:
+                loop.call_soon_threadsafe(
+                    queue.put_nowait,
+                    {
+                        "type": "plan_steps",
+                        "payload": {
+                            "steps": session.plan_steps,
+                        },
+                    },
+                )
             loop.call_soon_threadsafe(queue.put_nowait, _session_state_event())
             return
 

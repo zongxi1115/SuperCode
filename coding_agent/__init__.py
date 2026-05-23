@@ -9,11 +9,14 @@
 
 from .brain import CodingPromptBrain
 from .tools import (
+    CreateTaskTool,
     ExcecuteTool,
     ExecuteTool,
+    FinishTaskTool,
     GitCommitTool,
     GitLogTool,
     GitTagTool,
+    GetTaskStatusTool,
     GreepToolCompat,
     GrepFileTool,
     InteractiveCommandSession,
@@ -33,11 +36,14 @@ from .tools import (
 
 __all__ = [
     "CodingPromptBrain",
+    "CreateTaskTool",
     "ExcecuteTool",
     "ExecuteTool",
+    "FinishTaskTool",
     "GitCommitTool",
     "GitLogTool",
     "GitTagTool",
+    "GetTaskStatusTool",
     "GreepToolCompat",
     "GrepFileTool",
     "InteractiveCommandSession",
