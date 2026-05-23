@@ -36,7 +36,7 @@ class ListFileToolTests(unittest.TestCase):
         self.assertNotIn("dist/", visible_output)
 
     def test_list_file_can_include_ignored_directories(self) -> None:
-        output = ListFileTool().run({"include_ignored": True}, self.context)
+        output = ListFileTool().run({"include_ignored": True, "max_depth": 3}, self.context)
 
         self.assertIn("node_modules/", output)
         self.assertIn("node_modules/left-pad/index.js", output)

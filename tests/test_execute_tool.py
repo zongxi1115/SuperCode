@@ -1,14 +1,17 @@
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from agent.tools import ToolContext
 from coding_agent.tools import (
+    CompletedCommandResult,
     ExcecuteTool,
     ExecuteTool,
     InteractiveCommandSession,
+    ManagedCommandProcess,
     TerminalInputTool,
     TerminalWaitTool,
 )
@@ -49,6 +52,12 @@ class ExecuteToolTests(unittest.TestCase):
         self.assertIn("exit_code: 0", output)
         self.assertIn("stdout:\nok", output)
         self.assertEqual(process.communicate.call_args.kwargs["timeout"], 7)
+        invoked_command = mock_popen.call_args.args[0]
+        self.assertEqual(invoked_command[:3], ["powershell", "-NoProfile", "-Command"])
+        self.assertIn("chcp 65001 > $null;", invoked_command[3])
+        self.assertIn("$env:PYTHONIOENCODING = 'utf-8';", invoked_command[3])
+        self.assertIn("$env:PYTHONUTF8 = '1';", invoked_command[3])
+        self.assertIn("Get-Date", invoked_command[3])
 
     def test_execute_kills_process_tree_on_timeout(self) -> None:
         tool = ExecuteTool()
@@ -95,7 +104,21 @@ class ExecuteToolTests(unittest.TestCase):
         )
 
         self.assertEqual(first_result["status"], "running")
+        self.assertEqual(first_result["exit_reason"], "awaiting_input")
+        self.assertTrue(bool(first_result["awaiting_input"]))
+        self.assertTrue(bool(first_result["needs_input"]))
+        self.assertEqual(str(first_result["input_prompt"]), "Name:")
         self.assertIn("Name:", str(first_result["full_output"]))
+        self.assertEqual(
+            first_result["input_request"],
+            {
+                "type": "text",
+                "tool": "terminal_input",
+                "terminal_id": first_result["terminal_id"],
+                "prompt": "Name:",
+                "command": "[Console]::Write('Name: '); $name = [Console]::ReadLine(); Write-Output ('Hello ' + $name)",
+            },
+        )
 
         second_result = terminal_input_tool.run(
             {
@@ -106,7 +129,26 @@ class ExecuteToolTests(unittest.TestCase):
         )
 
         self.assertEqual(second_result["status"], "completed")
+        self.assertEqual(second_result["exit_reason"], "completed")
+        self.assertFalse(bool(second_result["awaiting_input"]))
+        self.assertFalse(bool(second_result["needs_input"]))
+        self.assertIsNone(second_result["input_prompt"])
+        self.assertIsNone(second_result["input_request"])
         self.assertIn("Hello Alice", str(second_result["full_output"]))
+
+    def test_interactive_execute_bootstraps_powershell_utf8(self) -> None:
+        session = InteractiveCommandSession(workspace=self.workspace)
+
+        with patch("coding_agent.tools.subprocess.Popen") as mock_popen:
+            process = mock_popen.return_value
+            session._spawn_process("Get-Date")
+
+        invoked_command = mock_popen.call_args.args[0]
+        self.assertEqual(invoked_command[:3], ["powershell", "-NoProfile", "-Command"])
+        self.assertIn("chcp 65001 > $null;", invoked_command[3])
+        self.assertIn("$env:PYTHONIOENCODING = 'utf-8';", invoked_command[3])
+        self.assertIn("$env:PYTHONUTF8 = '1';", invoked_command[3])
+        self.assertIn("Get-Date", invoked_command[3])
 
     def test_terminal_input_requires_active_command(self) -> None:
         self.interactive_session = InteractiveCommandSession(workspace=self.workspace)
@@ -116,7 +158,7 @@ class ExecuteToolTests(unittest.TestCase):
         )
         terminal_input_tool = TerminalInputTool()
 
-        with self.assertRaisesRegex(RuntimeError, "当前没有可继续输入的终端命令"):
+        with self.assertRaisesRegex(RuntimeError, "当前没有可(继续输入|交互)的终端命令"):
             terminal_input_tool.run({"content": "y", "timeout": 1}, interactive_context)
 
     def test_terminal_wait_can_observe_background_progress(self) -> None:
@@ -131,18 +173,121 @@ class ExecuteToolTests(unittest.TestCase):
         first_result = execute_tool.run(
             {
                 "content": "Write-Output 'Installing'; Start-Sleep -Seconds 2; Write-Output 'Done'",
-                "timeout": 1,
+                "timeout": 3,
             },
             interactive_context,
         )
 
         self.assertEqual(first_result["status"], "running")
+        self.assertEqual(first_result["exit_reason"], "idle")
         self.assertFalse(bool(first_result["awaiting_input"]))
         self.assertIn("Installing", str(first_result["full_output"]))
 
         second_result = wait_tool.run({"timeout": 4}, interactive_context)
 
         self.assertEqual(second_result["status"], "completed")
+        self.assertEqual(second_result["exit_reason"], "completed")
+        self.assertIn("Done", str(second_result["full_output"]))
+
+    def test_terminal_wait_returns_prompt_without_waiting_full_timeout(self) -> None:
+        self.interactive_session = InteractiveCommandSession(workspace=self.workspace)
+        interactive_context = ToolContext(
+            workspace=self.workspace,
+            metadata={"interactive_command_session": self.interactive_session},
+        )
+        execute_tool = ExecuteTool()
+        wait_tool = TerminalWaitTool()
+
+        first_result = execute_tool.run(
+            {
+                "content": "[Console]::Write('Name: '); $name = [Console]::ReadLine(); Write-Output ('Hello ' + $name)",
+                "timeout": 2,
+            },
+            interactive_context,
+        )
+
+        self.assertEqual(first_result["status"], "running")
+        self.assertEqual(first_result["exit_reason"], "awaiting_input")
+
+        started_at = time.monotonic()
+        second_result = wait_tool.run(
+            {"timeout": 5, "terminal_id": str(first_result["terminal_id"])},
+            interactive_context,
+        )
+        elapsed = time.monotonic() - started_at
+
+        self.assertLess(elapsed, 2.0)
+        self.assertEqual(second_result["status"], "running")
+        self.assertEqual(second_result["exit_reason"], "awaiting_input")
+        self.assertTrue(bool(second_result["awaiting_input"]))
+        self.assertEqual(str(second_result["input_prompt"]), "Name:")
+
+    def test_terminal_wait_uses_timeout_window_when_command_is_hung(self) -> None:
+        self.interactive_session = InteractiveCommandSession(workspace=self.workspace)
+        interactive_context = ToolContext(
+            workspace=self.workspace,
+            metadata={"interactive_command_session": self.interactive_session},
+        )
+        execute_tool = ExecuteTool()
+        wait_tool = TerminalWaitTool()
+
+        first_result = execute_tool.run(
+            {
+                "content": "Start-Sleep -Seconds 4",
+                "timeout": 3,
+            },
+            interactive_context,
+        )
+
+        self.assertEqual(first_result["status"], "running")
+        self.assertEqual(first_result["exit_reason"], "idle")
+        self.assertEqual(str(first_result["delta"]), "")
+
+        started_at = time.monotonic()
+        second_result = wait_tool.run(
+            {"timeout": 2, "terminal_id": str(first_result["terminal_id"])},
+            interactive_context,
+        )
+        elapsed = time.monotonic() - started_at
+
+        self.assertGreaterEqual(elapsed, 1.5)
+        self.assertLess(elapsed, 3.5)
+        self.assertEqual(second_result["status"], "running")
+        self.assertEqual(second_result["exit_reason"], "timeout")
+        self.assertEqual(str(second_result["delta"]), "")
+        self.assertFalse(bool(second_result["awaiting_input"]))
+
+    def test_terminal_wait_returns_cached_result_after_command_finishes_early(self) -> None:
+        self.interactive_session = InteractiveCommandSession(workspace=self.workspace)
+        interactive_context = ToolContext(
+            workspace=self.workspace,
+            metadata={"interactive_command_session": self.interactive_session},
+        )
+        execute_tool = ExecuteTool()
+        wait_tool = TerminalWaitTool()
+
+        first_result = execute_tool.run(
+            {
+                "content": "Write-Output 'Installing'; Start-Sleep -Seconds 2; Write-Output 'Done'",
+                "timeout": 3,
+            },
+            interactive_context,
+        )
+
+        self.assertEqual(first_result["status"], "running")
+        terminal_id = str(first_result["terminal_id"])
+
+        time.sleep(2.5)
+
+        second_result = wait_tool.run(
+            {"timeout": 1, "terminal_id": terminal_id},
+            interactive_context,
+        )
+
+        self.assertEqual(second_result["status"], "completed")
+        self.assertEqual(second_result["exit_reason"], "completed")
+        self.assertEqual(second_result["terminal_id"], terminal_id)
+        self.assertIn("Done", str(second_result["delta"]))
         self.assertIn("Done", str(second_result["full_output"]))
 
     def test_prompt_detection_uses_last_visible_line(self) -> None:
@@ -150,6 +295,82 @@ class ExecuteToolTests(unittest.TestCase):
 
         self.assertTrue(self.interactive_session._looks_like_prompt("Question?\n"))
         self.assertFalse(self.interactive_session._looks_like_prompt("Question?\nInstalling dependencies...\n"))
+
+    def test_terminal_input_rejects_completed_terminal_id(self) -> None:
+        self.interactive_session = InteractiveCommandSession(workspace=self.workspace)
+        self.interactive_session.completed_commands["terminal-1"] = CompletedCommandResult(
+            result={
+                "terminal_id": "terminal-1",
+                "status": "completed",
+                "command": "Get-Date",
+                "delta": "done\n",
+                "full_output": "done\n",
+                "return_code": 0,
+                "awaiting_input": False,
+            },
+            delivered=False,
+        )
+        interactive_context = ToolContext(
+            workspace=self.workspace,
+            metadata={"interactive_command_session": self.interactive_session},
+        )
+        terminal_input_tool = TerminalInputTool()
+
+        with self.assertRaisesRegex(RuntimeError, "已完成，无法继续输入"):
+            terminal_input_tool.run(
+                {"content": "y", "timeout": 1, "terminal_id": "terminal-1"},
+                interactive_context,
+            )
+
+    def test_list_managed_processes_marks_orphaned_processes(self) -> None:
+        self.interactive_session = InteractiveCommandSession(workspace=self.workspace)
+        self.interactive_session.managed_processes["terminal-1"] = ManagedCommandProcess(
+            terminal_id="terminal-1",
+            command="pnpm dev",
+            root_pid=100,
+        )
+
+        with patch(
+            "coding_agent.tools._query_process_table",
+            return_value=[
+                {"pid": 100, "parent_pid": 10, "name": "powershell.exe", "command_line": "powershell pnpm dev"},
+                {"pid": 101, "parent_pid": 100, "name": "node.exe", "command_line": "node vite"},
+            ],
+        ):
+            rows = self.interactive_session.list_managed_processes(only_active=True)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["terminalId"], "terminal-1")
+        self.assertEqual(rows[0]["status"], "orphaned")
+        self.assertEqual(rows[0]["processCount"], 2)
+
+    def test_terminate_command_kills_root_and_descendants(self) -> None:
+        self.interactive_session = InteractiveCommandSession(workspace=self.workspace)
+        self.interactive_session.managed_processes["terminal-1"] = ManagedCommandProcess(
+            terminal_id="terminal-1",
+            command="pnpm dev",
+            root_pid=200,
+        )
+
+        with (
+            patch(
+                "coding_agent.tools._query_process_table",
+                side_effect=[
+                    [
+                        {"pid": 200, "parent_pid": 10, "name": "powershell.exe", "command_line": "powershell pnpm dev"},
+                        {"pid": 201, "parent_pid": 200, "name": "node.exe", "command_line": "node vite"},
+                    ],
+                    [],
+                ],
+            ),
+            patch("coding_agent.tools._kill_processes_by_pid") as mock_kill,
+        ):
+            result = self.interactive_session.terminate_command("terminal-1")
+
+        self.assertEqual(result["status"], "terminated")
+        self.assertIsNotNone(result["terminatedAt"])
+        killed_pids = set(mock_kill.call_args.args[0])
+        self.assertEqual(killed_pids, {200, 201})
 
 
 if __name__ == "__main__":

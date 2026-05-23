@@ -82,7 +82,6 @@ def main() -> None:
         brain=CodingPromptBrain(client),
         tools=build_coding_tools(),
         workspace=workspace,
-        max_steps=config.max_steps,
     )
     session = ChatSession(
         agent=agent,

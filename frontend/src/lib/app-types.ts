@@ -5,9 +5,50 @@ export type ToolCallRecord = {
   output?: unknown;
   errorMessage?: string;
   error_message?: string | null;
-  success?: boolean;
+  success?: boolean | null;
   streamedInput?: string;
-  state: 'running' | 'completed' | 'error';
+  approval?: {
+    id: string;
+    approved?: boolean;
+    reason?: string;
+  };
+  inputRequest?: {
+    id: string;
+    kind: string;
+    title: string;
+    message: string;
+    fields: { name: string; label: string; type: string; required: boolean; default?: string; placeholder?: string }[];
+    questions?: {
+      id: string;
+      type: 'single_choice' | 'multi_choice' | 'short_text' | string;
+      prompt: string;
+      required: boolean;
+      placeholder?: string;
+      options?: {
+        id: string;
+        label: string;
+        description?: string;
+      }[];
+    }[];
+  };
+  state: 'running' | 'completed' | 'error' | 'approval-requested' | 'input-requested' | 'output-available' | 'output-denied';
+};
+
+export type CodeChangeRecord = {
+  id: string;
+  action: 'added' | 'modified' | 'deleted' | string;
+  path: string;
+  absolutePath?: string | null;
+  source?: string;
+  toolCallId?: string | null;
+  assistantId?: string | null;
+  turnIndex?: number | null;
+  stepIndex?: number | null;
+  timestamp: number;
+  linesAdded: number;
+  linesDeleted: number;
+  summary: string;
+  diffPreview: string;
 };
 
 export type ContentBlock =
@@ -24,6 +65,14 @@ export type ChatMessage = {
   toolCalls?: ToolCallRecord[];
   parts?: ContentBlock[];
 };
+
+export type CompletionActionKey =
+  | 'copy'
+  | 'view-changes'
+  | 'compress'
+  | 'fork'
+  | 'restore'
+  | 'publish';
 
 export type FileTreeNode = {
   path: string;
@@ -48,7 +97,27 @@ export type PlanStep = {
   id: string;
   title: string;
   description: string;
-  status: 'pending' | 'running' | 'completed' | 'error';
+  status: 'pending' | 'running' | 'blocked' | 'completed' | 'error';
+};
+
+export type TaskRecord = {
+  id: string;
+  title: string;
+  description: string;
+  status: 'pending' | 'running' | 'blocked' | 'completed';
+  dependsOn: string[];
+  acceptanceCriteria: string[];
+  needsSplit: boolean;
+  createdBy: 'plan_agent' | 'coding_agent' | 'system' | string;
+  parentTaskId?: string | null;
+};
+
+export type TaskState = {
+  strictMode: boolean;
+  autoCreateEnabled: boolean;
+  source: 'plan' | 'coding-seeded' | string;
+  activeTaskId?: string | null;
+  tasks: TaskRecord[];
 };
 
 export type SessionContextMessage = {
@@ -63,11 +132,33 @@ export type SessionContextTool = {
   success?: boolean | null;
 };
 
+export type SkillSummary = {
+  id: string;
+  name: string;
+  description: string;
+  scope: 'builtin' | 'workspace' | string;
+  sourcePath?: string | null;
+};
+
+export type SessionTokenUsage = {
+  inputTokens: number;
+  outputTokens: number;
+  reasoningTokens: number;
+  cachedInputTokens: number;
+  totalTokens: number;
+};
+
 export type SessionContextPayload = {
   sessionId: string;
   workspace: string;
   mode: 'agent' | 'demo' | string;
   model: string;
+  reasoningEffort?: string | null;
+  agentType?: string;
+  phase?: string;
+  deployState?: Record<string, unknown>;
+  planState?: Record<string, unknown>;
+  taskState?: TaskState;
   selectedFilePath?: string | null;
   openFiles: string[];
   messageCount: number;
@@ -75,16 +166,46 @@ export type SessionContextPayload = {
   thoughtCount: number;
   estimatedTokens: number;
   maxTokens: number;
+  usage: SessionTokenUsage;
+  cumulativeUsage: SessionTokenUsage;
   recentMessages: SessionContextMessage[];
   recentThoughts: string[];
   recentTools: SessionContextTool[];
+  codeChangeCount: number;
+  recentCodeChanges: CodeChangeRecord[];
+  availableSkills: SkillSummary[];
   planSteps: PlanStep[];
+};
+
+export type SessionContextCompressionPayload = {
+  sessionId: string;
+  mode: 'preview' | 'apply';
+  applied: boolean;
+  summary: string;
+  usageRatio: number;
+  usageThreshold: number;
+  sourceMessageCount: number;
+  sourceToolCount: number;
+  sourceThoughtCount: number;
+  preservedMessageCount: number;
+  preservedToolCount: number;
+  preservedThoughtCount: number;
+  originalEstimatedTokens: number;
+  maxTokens: number;
+  compressedEstimatedTokens: number;
+  savedEstimatedTokens: number;
+  usedFallback?: boolean;
+  skippedReason?: string | null;
+  updatedContext?: SessionContextPayload | null;
 };
 
 export type SessionPayload = {
   sessionId: string;
   model?: string;
+  modelId?: string | null;
+  reasoningEffort?: string | null;
   mode: 'agent' | 'demo';
+  isGenerating?: boolean;
   startupError?: string | null;
   envFile?: string | null;
   previewUrl?: string;
@@ -97,10 +218,20 @@ export type SessionPayload = {
   fileTree?: FileTreeNode[];
   selectedFilePath?: string | null;
   selectedFileContent?: string;
+  availableSkills?: SkillSummary[];
+  codeChanges?: CodeChangeRecord[];
   planSteps?: PlanStep[];
+  taskState?: TaskState;
 };
 
+export type AgentMode = 'auto' | 'plan' | 'coding' | 'deploy';
+
 export interface LastSession {
+  workspace: string;
+  timestamp: number;
+}
+
+export interface RecentProject {
   workspace: string;
   timestamp: number;
 }
@@ -124,12 +255,96 @@ export type TerminalSnapshotPayload = {
   revision: number;
   isAlive: boolean;
   shell: string;
+  backend?: string;
+  cwd?: string | null;
+  supportsInterrupt?: boolean;
+  supportsRawInput?: boolean;
+  fileTree?: FileTreeNode[] | null;
+  processes?: ManagedProcessPayload[] | null;
+};
+
+export type ManagedProcessInfo = {
+  pid: number;
+  parent_pid: number;
+  name: string;
+  command_line: string;
+  is_root: boolean;
+};
+
+export type ManagedProcessPayload = {
+  terminalId: string;
+  command: string;
+  rootPid: number;
+  status: 'running' | 'orphaned' | 'terminated' | 'completed' | 'unknown' | string;
+  returnCode?: number | null;
+  startedAt: number;
+  terminatedAt?: number | null;
+  processCount: number;
+  processes: ManagedProcessInfo[];
 };
 
 export type ModelOption = {
   id: string;
   name: string;
+  model?: string;
   provider: string;
   envFile: string;
   label: string;
+  sourceType?: 'env' | 'ui' | string;
+  sourceLabel?: string;
+  readOnly?: boolean;
+};
+
+export type UIModelProvider = {
+  id?: string | null;
+  name: string;
+  baseUrl: string;
+  apiKey: string;
+  models: string[];
+  provider?: string | null;
+};
+
+export type ModelConfigPayload = {
+  providers: UIModelProvider[];
+  envConfigs: ModelOption[];
+  configPath: string;
+};
+
+export type AppSettings = {
+  autoApprove: boolean;
+  thinkingRendering: "text" | "markdown";
+};
+
+export type GitCommitInfo = {
+  hash: string;
+  author: string;
+  date: string;
+  message: string;
+};
+
+export type GitTagInfo = {
+  name: string;
+  date: string;
+  message: string;
+};
+
+export type GitLogPayload = {
+  commits: GitCommitInfo[];
+  isRepo: boolean;
+  changedFiles?: string[];
+  branch?: string;
+  error?: string;
+};
+
+export type GitStatusPayload = {
+  isRepo: boolean;
+  changedFiles: string[];
+  branch: string;
+  error?: string;
+};
+
+export type GitTagsPayload = {
+  tags: GitTagInfo[];
+  isRepo: boolean;
+  error?: string;
 };

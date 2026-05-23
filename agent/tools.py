@@ -32,6 +32,7 @@ class BaseTool(ABC):
     name: str = ""
     description: str = ""
     supports_parallel: bool = False
+    parameters_schema: dict[str, Any] | None = None
 
     @abstractmethod
     def run(self, arguments: dict[str, Any], context: ToolContext) -> Any:

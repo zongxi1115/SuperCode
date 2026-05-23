@@ -25,11 +25,13 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import type { SessionContextPayload } from '@/lib/app-types';
-import { Bot, LoaderCircle, MessageSquare, Sparkles, Wrench } from 'lucide-react';
+import { CodeChangePanel } from '@/components/app/code-change-panel';
+import type { CodeChangeRecord, SessionContextPayload } from '@/lib/app-types';
+import { Bot, Code2Icon, LoaderCircle, MessageSquare, Sparkles, Wrench } from 'lucide-react';
 
 type ContextViewerProps = {
   contextData: SessionContextPayload | null;
+  codeChanges?: CodeChangeRecord[];
   isLoading: boolean;
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -50,18 +52,41 @@ function isMeaningfulThought(value: string) {
 
 export function ContextViewer({
   contextData,
+  codeChanges = [],
   isLoading,
   open,
   onOpenChange,
 }: ContextViewerProps) {
   const recentThoughts = (contextData?.recentThoughts ?? []).filter(isMeaningfulThought);
+  const recentCodeChanges = codeChanges.length
+    ? codeChanges
+    : (contextData?.recentCodeChanges ?? []);
   const usedTokens = contextData?.estimatedTokens ?? 0;
   const maxTokens = Math.max(contextData?.maxTokens ?? 1, 1);
-  const usage = {
-    inputTokens: Math.max(Math.round(usedTokens * 0.65), 0),
-    outputTokens: Math.max(Math.round(usedTokens * 0.25), 0),
-    reasoningTokens: Math.max(Math.round(usedTokens * 0.1), 0),
-  };
+  const usage = contextData?.usage
+    ? {
+        inputTokens: contextData.usage.inputTokens,
+        outputTokens: contextData.usage.outputTokens,
+        reasoningTokens: contextData.usage.reasoningTokens,
+        cachedInputTokens: contextData.usage.cachedInputTokens,
+        totalTokens: contextData.usage.totalTokens,
+        inputTokenDetails: {
+          noCacheTokens: Math.max(
+            contextData.usage.inputTokens - contextData.usage.cachedInputTokens,
+            0,
+          ),
+          cacheReadTokens: contextData.usage.cachedInputTokens,
+          cacheWriteTokens: undefined,
+        },
+        outputTokenDetails: {
+          textTokens: Math.max(
+            contextData.usage.outputTokens - contextData.usage.reasoningTokens,
+            0,
+          ),
+          reasoningTokens: contextData.usage.reasoningTokens,
+        },
+      }
+    : undefined;
 
   return (
     <>
@@ -88,6 +113,10 @@ export function ContextViewer({
               <span className="text-muted-foreground">工具调用</span>
               <span>{contextData?.toolCallCount ?? 0}</span>
             </div>
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-muted-foreground">代码变更</span>
+              <span>{contextData?.codeChangeCount ?? recentCodeChanges.length}</span>
+            </div>
           </ContextContentBody>
           <ContextContentFooter>
             <span className="text-muted-foreground">模型</span>
@@ -101,7 +130,7 @@ export function ContextViewer({
           <DialogHeader className="border-b px-6 py-4">
             <DialogTitle>会话上下文</DialogTitle>
             <DialogDescription>
-              查看当前会话已累积的消息、工具调用、思考片段和当前工作区信息。
+              查看当前会话已累积的消息、工具调用、代码变更、思考片段和当前工作区信息。
             </DialogDescription>
           </DialogHeader>
 
@@ -129,6 +158,10 @@ export function ContextViewer({
                       <Sparkles className="size-3" />
                       {contextData.thoughtCount} 段思考
                     </Badge>
+                    <Badge variant="secondary">
+                      <Code2Icon className="size-3" />
+                      {contextData.codeChangeCount} 条代码变更
+                    </Badge>
                     <Badge variant="outline">
                       约 {contextData.estimatedTokens} / {contextData.maxTokens} tokens
                     </Badge>
@@ -138,10 +171,15 @@ export function ContextViewer({
                     <h3 className="text-sm font-medium">基础信息</h3>
                     <div className="rounded-lg border bg-muted/20 p-3 text-xs leading-6">
                       <div>模型：{contextData.model}</div>
+                      <div>思考程度：{contextData.reasoningEffort || '默认'}</div>
                       <div>模式：{contextData.mode}</div>
                       <div>工作区：{contextData.workspace}</div>
                       <div>当前文件：{contextData.selectedFilePath || '暂无'}</div>
                       <div>打开标签：{contextData.openFiles.join('、') || '暂无'}</div>
+                      <div>
+                        累计消耗：
+                        {` ${contextData.cumulativeUsage?.totalTokens ?? 0} tokens`}
+                      </div>
                     </div>
                   </section>
 
@@ -184,6 +222,14 @@ export function ContextViewer({
                   </section>
 
                   <section className="space-y-2">
+                    <CodeChangePanel
+                      changes={recentCodeChanges}
+                      title="代码变更"
+                      emptyMessage="当前还没有代码变更记录。"
+                    />
+                  </section>
+
+                  <section className="space-y-2">
                     <h3 className="text-sm font-medium">最近思考</h3>
                     <div className="space-y-2">
                       {recentThoughts.length ? (
@@ -202,7 +248,16 @@ export function ContextViewer({
                     <h3 className="text-sm font-medium">当前计划</h3>
                     <Queue>
                       {contextData.planSteps.map((step) => {
-                        const status = step.status === 'completed' ? 'completed' : step.status === 'error' ? 'error' : step.status === 'running' ? 'running' : 'pending';
+                        const status =
+                          step.status === 'completed'
+                            ? 'completed'
+                            : step.status === 'error'
+                              ? 'error'
+                              : step.status === 'blocked'
+                                ? 'blocked'
+                                : step.status === 'running'
+                                  ? 'running'
+                                  : 'pending';
                         return (
                           <QueueItem key={step.id} status={status}>
                             <QueueItemTitle>{step.title}</QueueItemTitle>

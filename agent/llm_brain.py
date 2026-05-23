@@ -5,7 +5,13 @@ from typing import Any
 from collections.abc import Callable
 
 from .brain import AgentBrain, BrainDecision, BrainStreamingUpdate
-from .llm_client import OpenAICompatibleClient
+from .llm_client import (
+    CompletionResponse,
+    CompletionToolCall,
+    CompletionToolCallDelta,
+    OpenAICompatibleClient,
+    UnsupportedToolCallingError,
+)
 from .schema import AgentState, ConversationMessage, StepRecord
 
 
@@ -19,15 +25,94 @@ class OpenAICompatibleBrain(AgentBrain):
     def __init__(self, client: OpenAICompatibleClient) -> None:
         self.client = client
 
+    _STREAMABLE_TOOL_INPUT_SPECS: dict[str, tuple[str, str, str]] = {
+        "write_file": ("content", "content", "string"),
+        "apply_patch": ("new_content", "new_content", "string"),
+        "replace_file": ("new_content", "new_content", "string"),
+        "save_plan": ("arguments", "tool_arguments", "object"),
+    }
+
     def decide(
         self,
         state: AgentState,
-        tool_descriptions: dict[str, str],
+        tool_definitions: dict[str, dict[str, Any]],
         on_stream: Callable[[BrainStreamingUpdate], None] | None = None,
     ) -> BrainDecision:
         """调用真实模型，决定下一步动作。"""
+        native_messages = self._build_messages(state, tool_definitions, response_mode="native_tools")
+        native_tools = self._build_native_tool_specs(tool_definitions)
 
-        messages = self._build_messages(state, tool_descriptions)
+        try:
+            if on_stream is None:
+                completion = self.client.chat_completion_messages(
+                    native_messages,
+                    tools=native_tools,
+                )
+            else:
+                streamed_text = ""
+                streamed_reasoning = ""
+                streamed_text_emitted = ""
+
+                def handle_text_delta(delta: str) -> None:
+                    nonlocal streamed_text
+                    streamed_text += delta
+
+                def handle_reasoning_delta(delta: str) -> None:
+                    nonlocal streamed_reasoning
+                    streamed_reasoning += delta
+                    on_stream(
+                        BrainStreamingUpdate(
+                            raw_output=streamed_reasoning,
+                            thought=streamed_reasoning,
+                        )
+                    )
+
+                def handle_tool_delta(delta_update: CompletionToolCallDelta) -> None:
+                    tool_name = delta_update.name
+                    streamed_tool_argument_name, streamed_tool_input = (
+                        self._extract_partial_streamable_tool_input(
+                            delta_update.arguments,
+                            tool_name,
+                        )
+                    )
+                    on_stream(
+                        BrainStreamingUpdate(
+                            raw_output=delta_update.arguments,
+                            tool_name=tool_name,
+                            streamed_tool_name=tool_name,
+                            streamed_tool_argument_name=streamed_tool_argument_name,
+                            streamed_tool_input=streamed_tool_input,
+                        )
+                    )
+
+                completion = self.client.chat_stream_completion_messages(
+                    native_messages,
+                    tools=native_tools,
+                    on_text_delta=handle_text_delta,
+                    on_reasoning_delta=handle_reasoning_delta,
+                    on_tool_call_delta=handle_tool_delta,
+                )
+
+                if not completion.tool_calls:
+                    final_text = completion.text or streamed_text
+                    if final_text and final_text != streamed_text_emitted:
+                        streamed_text_emitted = final_text
+                        on_stream(
+                            BrainStreamingUpdate(
+                                raw_output=final_text,
+                                action="final",
+                                final_answer=final_text,
+                            )
+                        )
+
+            return self._completion_to_decision(completion)
+        except UnsupportedToolCallingError:
+            pass
+        except ValueError as exc:
+            if "既没有返回 tool_calls，也没有返回可用文本内容" not in str(exc):
+                raise
+
+        messages = self._build_messages(state, tool_definitions, response_mode="legacy_json")
         if on_stream is None:
             raw_output = self.client.chat_messages(messages)
         else:
@@ -57,24 +142,51 @@ class OpenAICompatibleBrain(AgentBrain):
         payload = self._parse_json_output(raw_output)
         return self._to_decision(payload)
 
+    def latest_usage(self) -> dict[str, int] | None:
+        return self.client.last_usage
+
     def _build_messages(
         self,
         state: AgentState,
-        tool_descriptions: dict[str, str],
-    ) -> list[dict[str, str]]:
-        system_prompt = self._build_system_prompt(tool_descriptions)
+        tool_definitions: dict[str, dict[str, Any]],
+        response_mode: str = "legacy_json",
+    ) -> list[dict[str, object]]:
+        system_prompt = self._build_system_prompt(tool_definitions, response_mode=response_mode)
         user_prompt = self._build_user_prompt(state)
         return [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
 
-    def _build_system_prompt(self, tool_descriptions: dict[str, str]) -> str:
+    def _build_system_prompt(
+        self,
+        tool_definitions: dict[str, dict[str, Any]],
+        response_mode: str = "legacy_json",
+    ) -> str:
         """构造系统提示词。"""
 
         tool_lines = []
-        for tool_name, description in tool_descriptions.items():
+        for tool_name, metadata in tool_definitions.items():
+            description = str(metadata.get("description", "")).strip()
             tool_lines.append(f"- {tool_name}: {description}")
+
+        if response_mode == "native_tools":
+            return "\n".join(
+                [
+                    "你是一个支持多轮对话的编码智能体大脑，负责决定下一步要调用哪个工具，或者直接给出最终答案。",
+                    "当前接口已启用原生 tool calling。",
+                    "如果需要调用工具，必须使用原生 tool calling，不要在文本内容里输出 JSON，不要解释将要调用什么。",
+                    "如果不需要调用工具，直接输出给用户的最终答复文本。",
+                    "可用工具如下：",
+                    *tool_lines,
+                    "规则：",
+                    "1. 多个互不依赖的只读探索动作可以一次返回多个 tool calls 并行执行。",
+                    "2. 涉及写文件、替换内容、删除文件或执行命令时，除非你非常确定互不影响，否则一次只调用一个工具。",
+                    "3. 调用工具时，参数名必须与工具参数定义保持一致。",
+                    "4. 如果还不了解项目结构，先调用目录或文件浏览类工具。",
+                    "5. 这是一个对话式助手，必须结合历史上下文回答用户的追问。",
+                ]
+            )
 
         return "\n".join(
             [
@@ -102,12 +214,42 @@ class OpenAICompatibleBrain(AgentBrain):
             ]
         )
 
+    def _build_native_tool_specs(
+        self,
+        tool_definitions: dict[str, dict[str, Any]],
+    ) -> list[dict[str, object]]:
+        tool_specs: list[dict[str, object]] = []
+        for tool_name, metadata in tool_definitions.items():
+            description = str(metadata.get("description", "")).strip()
+            parameters_schema = metadata.get("parameters_schema")
+            if not isinstance(parameters_schema, dict):
+                parameters_schema = {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": True,
+                }
+            tool_specs.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "description": description,
+                        "parameters": parameters_schema,
+                    },
+                }
+            )
+        return tool_specs
+
     def _build_user_prompt(self, state: AgentState) -> str:
         """构造用户提示词。"""
 
         step_records = state.data.get("step_records", [])
         conversation_text = self._format_conversation(state.conversation_messages)
-        history_text = self._format_history(step_records)
+        include_thoughts = bool(state.data.get("include_thoughts_in_context", False))
+        history_text = self._format_history(
+            step_records,
+            include_thoughts=include_thoughts,
+        )
 
         return "\n".join(
             [
@@ -138,16 +280,25 @@ class OpenAICompatibleBrain(AgentBrain):
             lines.append(f"{role_name}: {message.content}")
         return "\n".join(lines)
 
-    def _format_history(self, step_records: list[StepRecord]) -> str:
+    def _format_history(
+        self,
+        step_records: list[StepRecord],
+        include_thoughts: bool = False,
+    ) -> str:
         """把历史步骤压缩成适合喂给模型的文本。"""
 
         if not step_records:
             return "暂无历史步骤。"
 
-        lines: list[str] = []
-        for step in step_records:
+        recent_records = step_records[-8:]
+        if len(step_records) > 8:
+            lines: list[str] = [f"... (省略前面 {len(step_records) - 8} 步) ..."]
+        else:
+            lines: list[str] = []
+        for step in recent_records:
             step_prefix = f"第 {step.turn_index} 轮 步骤 {step.index}"
-            lines.append(f"{step_prefix} 思考：{step.thought}")
+            if include_thoughts and step.thought:
+                lines.append(f"{step_prefix} 思考：{step.thought}")
             if step.tool_call:
                 lines.append(
                     f"{step_prefix} 工具调用：{step.tool_call.name} "
@@ -190,9 +341,12 @@ class OpenAICompatibleBrain(AgentBrain):
         return lines
 
     def _stringify_tool_output(self, value: object) -> str:
-        """把工具输出稳定转成文本，不做静默截断。"""
+        """把工具输出稳定转成文本，对过长内容进行截断。"""
         text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-        return text.strip()
+        text = text.strip()
+        if len(text) > 1000:
+            return f"{text[:1000]}\n... [已截断，输出过长]"
+        return text
 
     def _parse_json_output(self, raw_output: str) -> dict[str, object]:
         """解析模型返回的 JSON 文本。"""
@@ -213,7 +367,10 @@ class OpenAICompatibleBrain(AgentBrain):
             try:
                 payload, _ = decoder.raw_decode(cleaned[start_index:])
             except json.JSONDecodeError:
-                continue
+                try:
+                    payload = self._repair_and_parse_json(cleaned[start_index:])
+                except Exception:
+                    continue
 
             if not isinstance(payload, dict):
                 continue
@@ -235,7 +392,7 @@ class OpenAICompatibleBrain(AgentBrain):
         if action in {"tool", "final"}:
             return True
 
-        if "tool_calls" in payload or "tool_name" in payload:
+        if "tool_calls" in payload or "tool_name" in payload or "tool" in payload:
             return True
         if "final_answer" in payload:
             return True
@@ -318,20 +475,481 @@ class OpenAICompatibleBrain(AgentBrain):
 
         return "".join(buffer) if buffer else None
 
+    def _extract_partial_object_field(self, text: str, field_name: str) -> str | None:
+        marker = f'"{field_name}"'
+        start = text.find(marker)
+        if start == -1:
+            return None
+
+        colon_index = text.find(":", start + len(marker))
+        if colon_index == -1:
+            return None
+
+        cursor = colon_index + 1
+        while cursor < len(text) and text[cursor].isspace():
+            cursor += 1
+        if cursor >= len(text) or text[cursor] != "{":
+            return None
+
+        object_start = cursor
+        depth = 0
+        in_string = False
+        escape = False
+
+        while cursor < len(text):
+            char = text[cursor]
+            if in_string:
+                if escape:
+                    escape = False
+                elif char == "\\":
+                    escape = True
+                elif char == '"':
+                    in_string = False
+                cursor += 1
+                continue
+
+            if char == '"':
+                in_string = True
+                cursor += 1
+                continue
+
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[object_start : cursor + 1]
+
+            cursor += 1
+
+        return text[object_start:] if object_start < len(text) else None
+
+    def _extract_partial_streamable_value(
+        self,
+        text: str,
+        source_field_name: str,
+        value_kind: str,
+    ) -> str | None:
+        if value_kind == "string":
+            return self._extract_partial_string_field(text, source_field_name)
+
+        if value_kind == "object":
+            stripped = text.strip()
+            if stripped.startswith("{"):
+                return stripped
+            return self._extract_partial_object_field(text, source_field_name)
+
+        raise ValueError(f"不支持的流式字段类型：{value_kind}")
+
     def _extract_partial_streamable_tool_input(
         self,
         text: str,
         tool_name: str | None,
     ) -> tuple[str | None, str | None]:
-        if tool_name == "write_file":
-            content = self._extract_partial_string_field(text, "content")
-            return ("content", content) if content is not None else (None, None)
+        if not tool_name:
+            return None, None
 
-        if tool_name == "replace_file":
-            new_content = self._extract_partial_string_field(text, "new_content")
-            return ("new_content", new_content) if new_content is not None else (None, None)
+        spec = self._STREAMABLE_TOOL_INPUT_SPECS.get(tool_name)
+        if spec is None:
+            return None, None
 
-        return None, None
+        argument_name, source_field_name, value_kind = spec
+        extracted = self._extract_partial_streamable_value(
+            text,
+            source_field_name,
+            value_kind,
+        )
+        return (argument_name, extracted) if extracted is not None else (None, None)
+
+    def _extract_partial_string_array_field(
+        self,
+        text: str,
+        field_name: str,
+    ) -> list[str] | None:
+        marker = f'"{field_name}"'
+        start = text.find(marker)
+        if start == -1:
+            return None
+
+        colon_index = text.find(":", start + len(marker))
+        if colon_index == -1:
+            return None
+
+        cursor = colon_index + 1
+        while cursor < len(text) and text[cursor].isspace():
+            cursor += 1
+        if cursor >= len(text) or text[cursor] != "[":
+            return None
+
+        cursor += 1
+        values: list[str] = []
+        buffer: list[str] = []
+        in_string = False
+        escape = False
+        unicode_digits: str | None = None
+
+        while cursor < len(text):
+            char = text[cursor]
+
+            if not in_string:
+                if char == '"':
+                    in_string = True
+                    buffer = []
+                    escape = False
+                    unicode_digits = None
+                elif char == "]":
+                    return values
+                cursor += 1
+                continue
+
+            if unicode_digits is not None:
+                if char.lower() in "0123456789abcdef":
+                    unicode_digits += char
+                    if len(unicode_digits) == 4:
+                        buffer.append(chr(int(unicode_digits, 16)))
+                        unicode_digits = None
+                        escape = False
+                else:
+                    unicode_digits = None
+                    escape = False
+                cursor += 1
+                continue
+
+            if escape:
+                mapped = {
+                    '"': '"',
+                    "\\": "\\",
+                    "/": "/",
+                    "b": "\b",
+                    "f": "\f",
+                    "n": "\n",
+                    "r": "\r",
+                    "t": "\t",
+                }.get(char)
+                if mapped is not None:
+                    buffer.append(mapped)
+                    escape = False
+                    cursor += 1
+                    continue
+
+                if char == "u":
+                    unicode_digits = ""
+                    cursor += 1
+                    continue
+
+                buffer.append(char)
+                escape = False
+                cursor += 1
+                continue
+
+            if char == "\\":
+                escape = True
+                cursor += 1
+                continue
+
+            if char == '"':
+                values.append("".join(buffer))
+                in_string = False
+                buffer = []
+                cursor += 1
+                continue
+
+            buffer.append(char)
+            cursor += 1
+
+        return values if values else None
+
+    def _recover_save_plan_arguments(self, arguments_text: str) -> dict[str, Any] | None:
+        recovered: dict[str, Any] = {}
+
+        title = self._extract_partial_string_field(arguments_text, "title")
+        if title:
+            recovered["title"] = title
+
+        summary = self._extract_partial_string_field(arguments_text, "summary")
+        if summary:
+            recovered["summary"] = summary
+
+        overview = self._extract_partial_string_field(arguments_text, "overview")
+        if overview:
+            recovered["overview"] = overview
+
+        key_steps = self._extract_partial_string_array_field(arguments_text, "key_steps")
+        if not key_steps:
+            key_steps = self._extract_partial_string_array_field(arguments_text, "keySteps")
+        if key_steps:
+            recovered["key_steps"] = key_steps
+
+        markdown = self._extract_partial_string_field(arguments_text, "markdown")
+        if markdown:
+            recovered["markdown"] = markdown
+
+        return recovered or None
+
+    def _recover_tool_arguments(
+        self,
+        arguments_text: str,
+        tool_name: str,
+    ) -> dict[str, Any] | None:
+        if tool_name == "save_plan":
+            return self._recover_save_plan_arguments(arguments_text)
+        return None
+
+    def _completion_to_decision(self, completion: CompletionResponse) -> BrainDecision:
+        if completion.tool_calls:
+            normalized_calls: list[dict[str, Any]] = []
+            for tool_call in completion.tool_calls:
+                normalized_calls.append(
+                    {
+                        "tool_name": tool_call.name,
+                        "tool_arguments": self._parse_tool_arguments_text(
+                            tool_call.arguments,
+                            tool_call.name,
+                        ),
+                    }
+                )
+            return BrainDecision.call_tools(thought=completion.reasoning_text, tool_calls=normalized_calls)
+
+        final_text = completion.text.strip()
+        if final_text:
+            return BrainDecision.finish(thought=completion.reasoning_text, final_answer=final_text)
+
+        raise ValueError("模型接口既没有返回 tool_calls，也没有返回可用文本内容。")
+
+    def _parse_tool_arguments_text(
+        self,
+        arguments_text: str,
+        tool_name: str,
+    ) -> dict[str, Any]:
+        cleaned = arguments_text.strip()
+        if not cleaned:
+            return {}
+        try:
+            parsed = json.loads(cleaned, strict=False)
+        except json.JSONDecodeError as exc:
+            recovered = self._recover_tool_arguments(cleaned, tool_name)
+            if recovered is not None:
+                return recovered
+            try:
+                parsed = self._repair_and_parse_json(cleaned)
+            except Exception as inner_exc:
+                raise ValueError(f"工具 {tool_name} 的 arguments 不是合法 JSON：{arguments_text}") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError(f"工具 {tool_name} 的 arguments 必须是对象。")
+        return parsed
+
+    def _skip_json_whitespace(self, text: str, cursor: int) -> int:
+        while cursor < len(text) and text[cursor].isspace():
+            cursor += 1
+        return cursor
+
+    def _string_may_terminate(
+        self,
+        text: str,
+        cursor: int,
+        terminators: set[str],
+    ) -> bool:
+        cursor = self._skip_json_whitespace(text, cursor)
+        if cursor >= len(text):
+            return True
+        candidate = text[cursor]
+        if candidate not in terminators:
+            return False
+        if candidate == "}":
+            follow = self._skip_json_whitespace(text, cursor + 1)
+            return follow >= len(text) or text[follow] in {",", "}", "]"}
+        return True
+
+    def _parse_relaxed_json_string(
+        self,
+        text: str,
+        cursor: int,
+        terminators: set[str],
+    ) -> tuple[str, int]:
+        if cursor >= len(text) or text[cursor] != '"':
+            raise ValueError("字符串必须以双引号开头")
+
+        cursor += 1
+        buffer: list[str] = []
+        escape = False
+        unicode_digits: list[str] | None = None
+
+        while cursor < len(text):
+            char = text[cursor]
+
+            if unicode_digits is not None:
+                if char.lower() in "0123456789abcdef":
+                    unicode_digits.append(char)
+                    if len(unicode_digits) == 4:
+                        buffer.append(chr(int("".join(unicode_digits), 16)))
+                        unicode_digits = None
+                        escape = False
+                else:
+                    buffer.append("\\u" + "".join(unicode_digits))
+                    buffer.append(char)
+                    unicode_digits = None
+                    escape = False
+                cursor += 1
+                continue
+
+            if escape:
+                mapped = {
+                    '"': '"',
+                    "\\": "\\",
+                    "/": "/",
+                    "b": "\b",
+                    "f": "\f",
+                    "n": "\n",
+                    "r": "\r",
+                    "t": "\t",
+                }.get(char)
+                if mapped is not None:
+                    buffer.append(mapped)
+                    escape = False
+                    cursor += 1
+                    continue
+
+                if char == "u":
+                    unicode_digits = []
+                    cursor += 1
+                    continue
+
+                buffer.append(char)
+                escape = False
+                cursor += 1
+                continue
+
+            if char == "\\":
+                escape = True
+                cursor += 1
+                continue
+
+            if char == '"':
+                if self._string_may_terminate(text, cursor + 1, terminators):
+                    return "".join(buffer), cursor + 1
+                buffer.append(char)
+                cursor += 1
+                continue
+
+            buffer.append(char)
+            cursor += 1
+
+        if escape:
+            buffer.append("\\")
+        if unicode_digits is not None:
+            buffer.append("\\u" + "".join(unicode_digits))
+        return "".join(buffer), cursor
+
+    def _parse_relaxed_json_literal(self, text: str, cursor: int) -> tuple[Any, int]:
+        end = cursor
+        while end < len(text) and text[end] not in ",}]":
+            end += 1
+
+        raw_literal = text[cursor:end].strip()
+        if raw_literal == "true":
+            return True, end
+        if raw_literal == "false":
+            return False, end
+        if raw_literal == "null":
+            return None, end
+        if not raw_literal:
+            return "", end
+        try:
+            return json.loads(raw_literal), end
+        except Exception:
+            return raw_literal, end
+
+    def _parse_relaxed_json_array(self, text: str, cursor: int) -> tuple[list[Any], int]:
+        if cursor >= len(text) or text[cursor] != "[":
+            raise ValueError("数组必须以 [ 开头")
+
+        cursor += 1
+        values: list[Any] = []
+
+        while True:
+            cursor = self._skip_json_whitespace(text, cursor)
+            if cursor >= len(text):
+                return values, cursor
+            if text[cursor] == "]":
+                return values, cursor + 1
+
+            value, cursor = self._parse_relaxed_json_value(text, cursor, {",", "]"})
+            values.append(value)
+
+            cursor = self._skip_json_whitespace(text, cursor)
+            if cursor >= len(text):
+                return values, cursor
+            if text[cursor] == ",":
+                cursor += 1
+                continue
+            if text[cursor] == "]":
+                return values, cursor + 1
+
+            return values, cursor
+
+    def _parse_relaxed_json_object(self, text: str, cursor: int) -> tuple[dict[str, Any], int]:
+        if cursor >= len(text) or text[cursor] != "{":
+            raise ValueError("对象必须以 { 开头")
+
+        cursor += 1
+        result: dict[str, Any] = {}
+
+        while True:
+            cursor = self._skip_json_whitespace(text, cursor)
+            if cursor >= len(text):
+                return result, cursor
+            if text[cursor] == "}":
+                return result, cursor + 1
+            if text[cursor] != '"':
+                raise ValueError("对象键必须使用双引号包裹")
+
+            key, cursor = self._parse_relaxed_json_string(text, cursor, {":"})
+            cursor = self._skip_json_whitespace(text, cursor)
+            if cursor >= len(text) or text[cursor] != ":":
+                raise ValueError(f"对象键 {key} 缺少冒号")
+
+            cursor += 1
+            value, cursor = self._parse_relaxed_json_value(text, cursor, {",", "}"})
+            result[key] = value
+
+            cursor = self._skip_json_whitespace(text, cursor)
+            if cursor >= len(text):
+                return result, cursor
+            if text[cursor] == ",":
+                cursor += 1
+                continue
+            if text[cursor] == "}":
+                return result, cursor + 1
+
+            return result, cursor
+
+    def _parse_relaxed_json_value(
+        self,
+        text: str,
+        cursor: int,
+        terminators: set[str],
+    ) -> tuple[Any, int]:
+        cursor = self._skip_json_whitespace(text, cursor)
+        if cursor >= len(text):
+            return "", cursor
+
+        char = text[cursor]
+        if char == '"':
+            return self._parse_relaxed_json_string(text, cursor, terminators)
+        if char == "{":
+            return self._parse_relaxed_json_object(text, cursor)
+        if char == "[":
+            return self._parse_relaxed_json_array(text, cursor)
+        return self._parse_relaxed_json_literal(text, cursor)
+
+    def _repair_and_parse_json(self, text: str) -> dict[str, Any]:
+        """宽容模式的 JSON 修复提取器，允许字符串里出现未转义引号和真实换行。"""
+        start = text.find("{")
+        if start == -1:
+            raise ValueError("无法提取任何 JSON 对象")
+
+        parsed, _ = self._parse_relaxed_json_object(text, start)
+        return parsed
 
     def _to_decision(self, payload: dict[str, object]) -> BrainDecision:
         """把 JSON 结构转换成框架里的决策对象。"""
@@ -340,7 +958,7 @@ class OpenAICompatibleBrain(AgentBrain):
         thought = str(payload.get("thought", "")).strip()
 
         if not action:
-            if "tool_calls" in payload or "tool_name" in payload:
+            if "tool_calls" in payload or "tool_name" in payload or "tool" in payload:
                 action = "tool"
             elif "final_answer" in payload:
                 action = "final"
@@ -369,8 +987,8 @@ class OpenAICompatibleBrain(AgentBrain):
                     )
                 return BrainDecision.call_tools(thought=thought, tool_calls=normalized_calls)
 
-            tool_name = str(payload.get("tool_name", "")).strip()
-            tool_arguments = payload.get("tool_arguments", {})
+            tool_name = str(payload.get("tool_name") or payload.get("tool") or "").strip()
+            tool_arguments = payload.get("tool_arguments", payload.get("args", {}))
             if not tool_name:
                 raise ValueError("模型决定调用工具，但没有返回 tool_name。")
             if not isinstance(tool_arguments, dict):

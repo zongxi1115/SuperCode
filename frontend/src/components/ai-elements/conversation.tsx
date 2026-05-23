@@ -6,6 +6,7 @@ import type { UIMessage } from "ai";
 import { ArrowDownIcon, DownloadIcon } from "lucide-react";
 import type { ComponentProps } from "react";
 import { useCallback } from "react";
+import { AnimatePresence, motion } from "motion/react";
 import { StickToBottom, useStickToBottomContext } from "use-stick-to-bottom";
 
 export type ConversationProps = ComponentProps<typeof StickToBottom>;
@@ -15,6 +16,9 @@ export const Conversation = ({ className, ...props }: ConversationProps) => (
     className={cn("relative flex-1 overflow-y-hidden", className)}
     initial="smooth"
     resize="smooth"
+    mass={0.6}
+    damping={0.85}
+    stiffness={0.15}
     role="log"
     {...props}
   />
@@ -82,21 +86,31 @@ export const ConversationScrollButton = ({
   }, [scrollToBottom]);
 
   return (
-    !isAtBottom && (
-      <Button
-        className={cn(
-          "absolute bottom-4 left-[50%] translate-x-[-50%] rounded-full dark:bg-background dark:hover:bg-muted",
-          className
-        )}
-        onClick={handleScrollToBottom}
-        size="icon"
-        type="button"
-        variant="outline"
-        {...props}
-      >
-        <ArrowDownIcon className="size-4" />
-      </Button>
-    )
+    <AnimatePresence>
+      {!isAtBottom && (
+        <motion.div
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: 8 }}
+          transition={{ duration: 0.15 }}
+          className="absolute bottom-4 left-[50%] translate-x-[-50%] z-20"
+        >
+          <Button
+            className={cn(
+              "rounded-full dark:bg-background dark:hover:bg-muted",
+              className
+            )}
+            onClick={handleScrollToBottom}
+            size="icon"
+            type="button"
+            variant="outline"
+            {...props}
+          >
+            <ArrowDownIcon className="size-4" />
+          </Button>
+        </motion.div>
+      )}
+    </AnimatePresence>
   );
 };
 

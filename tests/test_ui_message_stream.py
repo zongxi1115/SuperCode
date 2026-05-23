@@ -155,6 +155,30 @@ class UIMessageStreamAdapterTests(unittest.TestCase):
         self.assertIn("tool-input-available", part_types)
         self.assertNotIn("tool-input-delta", part_types)
 
+    def test_apply_patch_tool_call_exposes_new_content_as_streamable_input(self) -> None:
+        adapter = UIMessageStreamAdapter()
+
+        parts = adapter.convert(
+            {
+                "type": "tool_call",
+                "payload": {
+                    "assistant_id": "m_1",
+                    "id": "call_1",
+                    "name": "apply_patch",
+                    "arguments": {
+                        "filename": "src/a.ts",
+                        "start_line": 1,
+                        "end_line": 1,
+                        "new_content": "const after = 1;\n",
+                    },
+                },
+            }
+        )
+
+        tool_input = next(part for part in parts if part["type"] == "tool-input-available")
+        self.assertEqual(tool_input["toolName"], "apply_patch")
+        self.assertEqual(tool_input["input"]["new_content"], "const after = 1;\n")
+
     def test_forwards_custom_data_parts_from_tool_output(self) -> None:
         adapter = UIMessageStreamAdapter()
 
@@ -176,6 +200,30 @@ class UIMessageStreamAdapterTests(unittest.TestCase):
 
         chart_part = next(part for part in parts if part["type"] == "data-chart")
         self.assertEqual(chart_part["data"]["title"], "销售趋势")
+
+    def test_forwards_session_state_data_parts(self) -> None:
+        adapter = UIMessageStreamAdapter()
+
+        parts = adapter.convert(
+            {
+                "type": "data-session-state",
+                "payload": {
+                    "assistant_id": "m_1",
+                    "data": {
+                        "agentType": "deploy",
+                        "phase": "connected",
+                        "deployState": {"active_session_id": "deploy-1"},
+                    },
+                },
+            }
+        )
+
+        session_state_part = next(part for part in parts if part["type"] == "data-session-state")
+        self.assertEqual(session_state_part["data"]["phase"], "connected")
+        self.assertEqual(
+            session_state_part["data"]["deployState"]["active_session_id"],
+            "deploy-1",
+        )
 
 
 if __name__ == "__main__":

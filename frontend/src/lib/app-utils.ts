@@ -1,6 +1,8 @@
-import type { ChatMessage, ContentBlock, DirectoryNode, FileTreeNode, ToolCallRecord, WorkspaceOption } from '@/lib/app-types';
+import type { ChatMessage, ContentBlock, DirectoryNode, FileTreeNode, RecentProject, ToolCallRecord, WorkspaceOption } from '@/lib/app-types';
 
 export const LAST_SESSION_KEY = 'supercode_last_session';
+export const RECENT_PROJECTS_KEY = 'supercode_recent_projects';
+export const MAX_RECENT_PROJECTS = 10;
 export const FILE_TREE_POLL_INTERVAL = 5000;
 
 export function getLastSession() {
@@ -24,6 +26,36 @@ export function saveLastSession(workspace: string) {
 export function clearLastSession() {
   try {
     localStorage.removeItem(LAST_SESSION_KEY);
+  } catch {
+    // silent fail
+  }
+}
+
+export function getRecentProjects(): RecentProject[] {
+  try {
+    const raw = localStorage.getItem(RECENT_PROJECTS_KEY);
+    if (!raw) return [];
+    return JSON.parse(raw);
+  } catch {
+    return [];
+  }
+}
+
+export function addRecentProject(workspace: string) {
+  try {
+    const projects = getRecentProjects().filter((p) => p.workspace !== workspace);
+    projects.unshift({ workspace, timestamp: Date.now() });
+    const trimmed = projects.slice(0, MAX_RECENT_PROJECTS);
+    localStorage.setItem(RECENT_PROJECTS_KEY, JSON.stringify(trimmed));
+  } catch {
+    // silent fail
+  }
+}
+
+export function removeRecentProject(workspace: string) {
+  try {
+    const projects = getRecentProjects().filter((p) => p.workspace !== workspace);
+    localStorage.setItem(RECENT_PROJECTS_KEY, JSON.stringify(projects));
   } catch {
     // silent fail
   }
@@ -75,12 +107,42 @@ export function findDirectoryNode(nodes: DirectoryNode[], targetPath: string): D
 export function getFileLanguage(path: string): string {
   const ext = path.split('.').pop()?.toLowerCase() ?? '';
   const langMap: Record<string, string> = {
+    tsx: 'typescript', jsx: 'javascript', ts: 'typescript', js: 'javascript',
+    py: 'python', json: 'json', css: 'css', scss: 'scss',
+    html: 'html', md: 'markdown', yaml: 'yaml', yml: 'yaml',
+    toml: 'ini', rs: 'rust', go: 'go', sql: 'sql', sh: 'shell',
+    vue: 'html', svelte: 'html', astro: 'html', xml: 'xml',
+    c: 'c', cpp: 'cpp', h: 'c', hpp: 'cpp',
+    java: 'java', rb: 'ruby', php: 'php', swift: 'swift',
+    kt: 'kotlin', lua: 'lua', dockerfile: 'dockerfile',
+  };
+  return langMap[ext] ?? 'plaintext';
+}
+
+export function getShikiLanguage(path: string): string {
+  const ext = path.split('.').pop()?.toLowerCase() ?? '';
+  const langMap: Record<string, string> = {
     tsx: 'tsx', jsx: 'jsx', ts: 'typescript', js: 'javascript',
     py: 'python', json: 'json', css: 'css', scss: 'scss',
     html: 'html', md: 'markdown', yaml: 'yaml', yml: 'yaml',
     toml: 'toml', rs: 'rust', go: 'go', sql: 'sql', sh: 'bash',
+    vue: 'vue', svelte: 'svelte', astro: 'astro', xml: 'xml',
   };
   return langMap[ext] ?? 'text';
+}
+
+const COMPRESSION_SUMMARY_PREFIX = "[会话压缩摘要]";
+
+function isCompressionSummaryMessage(message: ChatMessage): boolean {
+  if (message.role !== "assistant") return false;
+  const text = message.content ?? "";
+  if (text.startsWith(COMPRESSION_SUMMARY_PREFIX)) return true;
+  if (Array.isArray(message.parts)) {
+    return message.parts.some(
+      (part) => part.type === "text" && part.text.startsWith(COMPRESSION_SUMMARY_PREFIX),
+    );
+  }
+  return false;
 }
 
 export function hydrateMessages(
@@ -88,20 +150,56 @@ export function hydrateMessages(
   thoughts?: string[],
   toolCalls?: ToolCallRecord[]
 ): ChatMessage[] {
-  if (!baseMessages.length) {
-    return baseMessages;
+  const filtered = baseMessages.filter((m) => !isCompressionSummaryMessage(m));
+  if (!filtered.length) {
+    return filtered;
   }
 
-  const lastAssistantIndex = [...baseMessages]
+  const assistantMessages = filtered.filter((message) => message.role === 'assistant');
+  const hasStructuredParts = assistantMessages.some((message) => Array.isArray(message.parts) && message.parts.length > 0);
+
+  if (hasStructuredParts) {
+    return filtered.map((message) => {
+      if (message.role !== 'assistant' || !Array.isArray(message.parts)) {
+        return message;
+      }
+
+      const content = message.parts
+        .filter((part): part is Extract<ContentBlock, { type: 'text' }> => part.type === 'text')
+        .map((part) => part.text)
+        .join('');
+      const mergedThoughts = message.parts
+        .filter((part): part is Extract<ContentBlock, { type: 'thinking' }> => part.type === 'thinking')
+        .map((part) => part.text.trim())
+        .filter(Boolean)
+        .join('\n\n');
+      const mergedToolCalls = message.parts
+        .filter((part): part is Extract<ContentBlock, { type: 'tool_call' }> => part.type === 'tool_call')
+        .map((part) => part.toolCall);
+
+      return {
+        ...message,
+        content,
+        thoughts: mergedThoughts,
+        toolCalls: mergedToolCalls,
+      };
+    });
+  }
+
+  if (assistantMessages.length !== 1) {
+    return filtered;
+  }
+
+  const lastAssistantIndex = [...filtered]
     .map((message, index) => ({ message, index }))
     .reverse()
     .find(({ message }) => message.role === 'assistant')?.index;
 
   if (lastAssistantIndex === undefined) {
-    return baseMessages;
+    return filtered;
   }
 
-  return baseMessages.map((message, index) => {
+  return filtered.map((message, index) => {
     if (index !== lastAssistantIndex) {
       return message;
     }
@@ -133,6 +231,7 @@ export function mapToolState(state: ToolCallRecord['state']) {
   if (state === 'completed') return 'output-available';
   if (state === 'error') return 'output-error';
   if (state === 'running') return 'input-available';
+  if (state === 'input-requested') return 'input-requested';
   return 'input-streaming';
 }
 

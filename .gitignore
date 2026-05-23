@@ -7,3 +7,4 @@ examples/demo_workspace/
 node_modules/
 .agents
 skills-lock.json
+.supercode/

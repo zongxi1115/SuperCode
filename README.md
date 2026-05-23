@@ -60,7 +60,6 @@ agent = CodingAgent(
     brain=CodingPromptBrain(client),
     tools=build_coding_tools(),
     workspace="examples/demo_workspace",
-    max_steps=config.max_steps,
 )
 
 session = ChatSession(agent=agent)
@@ -89,14 +88,35 @@ response = session.ask("先看看项目结构", on_event=on_event)
 
 `coding_agent` 当前提供这些工具名：
 
-- `list_file(path, include_ignored?)`
-- `read_file(filename, start_line, end_line)`
-- `grep_file(regex, search_path)`
+- `list_file(path, include_ignored?, max_depth?, limit?)`
+- `glob_file(pattern, search_path, include_ignored?, limit?)`
+- `read_file(filename, offset?, limit?, start_line?, end_line?)`
+- `grep_file(regex, search_path, output_mode?, glob?, file_type?, include_ignored?, limit?)`
 - `write_file(filename, content)`
 - `replace_file(filename, old_content, new_content)`
 - `excecute(content, timeout)`
 - `terminal_input(content, timeout)`
 - `terminal_wait(timeout)`
+
+说明：
+
+- `list_file(..., include_ignored?)`、`glob_file(..., include_ignored?)` 和 `grep_file(..., include_ignored?)` 默认都会跳过 `node_modules`、`.git`、`dist`、`build`、`__pycache__` 等生成目录。
+- 只有在你明确想查看或搜索这些目录时，才需要传 `include_ignored=true`。
+- `list_file(...)` 默认只做浅层目录浏览；推荐先 `glob_file(...)` 找文件，再 `grep_file(...)` 看内容分布，最后 `read_file(...)` 精读。
+- `glob_file(...)` 最多返回 100 个结果；如果被截断，应该继续缩小 pattern 或 search_path。
+- `grep_file(...)` 支持三种输出模式：
+  - `content`：返回命中的文件、行号和文本
+  - `files_with_matches`：只返回命中文件
+  - `count`：返回每个文件的命中次数和总数
+- `grep_file(...)` 可通过 `glob` 或 `file_type` 限制搜索范围。
+- `read_file(...)` 默认从文件开头读取；返回里会带 `total_lines`、`total_chars` 等元信息；如果返回过长，会在最大输出长度处截断，并明确提示还有内容未读完，继续用更小的 `offset/limit` 或 `start_line/end_line` 分段读取。
+- `execute(...)`、`terminal_input(...)`、`terminal_wait(...)` 的 `timeout` 都是必填秒数。
+- 交互式终端结果会带 `status`、`exit_reason`、`awaiting_input`、`input_prompt`、`input_request` 等字段：
+  - `status=completed`：命令已结束，立即返回最终结果
+  - `status=running` 且 `exit_reason=awaiting_input`：命令正在等输入，应调用 `terminal_input(...)`
+  - `status=running` 且 `exit_reason=idle`：本次已经收集到一段输出，但命令暂时安静下来了
+  - `status=running` 且 `exit_reason=timeout`：在这次等待窗口内没有等到完成，只返回该窗口期间收集到的新增输出
+- `terminal_wait(...)` 如果遇到命令已在下一次等待前完成，会返回缓存的最终结果，而不是因为终端已释放直接报错。
 
 ### 配置项说明
 
@@ -104,7 +124,7 @@ response = session.ask("先看看项目结构", on_event=on_event)
 - `SC_AGENT_BASE_URL`：OpenAI 兼容接口基础地址，例如 `https://api.openai.com/v1`
 - `SC_AGENT_MODEL`：模型名称
 - `SC_AGENT_TIMEOUT`：接口超时时间，单位秒
-- `SC_AGENT_MAX_STEPS`：智能体最大执行步数
+- `SC_AGENT_INCLUDE_THOUGHTS_IN_CONTEXT`：是否把思考内容写入后续模型上下文，默认 `false`；前端仍会实时展示思考过程
 
 ## 部署运行方案
 
@@ -134,6 +154,57 @@ copy .env.example .env
 
 > 如果不配置 `.env`，后端仍可启动，但会进入 **demo 模式**（模拟回复，不调用真实模型），方便前端联调。
 
+### 2.5 快速准备脚本
+
+如果你的机器已经有基础环境（`Python 3.10+`、`Node 18+`、`pnpm`），可以直接在仓库根目录执行：
+
+```powershell
+conda activate base
+powershell -ExecutionPolicy Bypass -File .\scripts\quick-start.ps1
+```
+
+这个脚本会帮你：
+
+- 检查 Python / Node / pnpm 是否可用
+- 自动把 `.env.example` 复制成 `.env`（如果你还没有 `.env`）
+- 安装后端依赖 `fastapi_app/requirements.txt`
+- 安装前端依赖 `frontend/package.json`
+- 输出后端、前端和 CLI demo 的启动命令
+
+常用参数：
+
+```powershell
+# 只安装依赖
+powershell -ExecutionPolicy Bypass -File .\scripts\quick-start.ps1 -InstallOnly
+
+# 只准备后端
+powershell -ExecutionPolicy Bypass -File .\scripts\quick-start.ps1 -BackendOnly
+
+# 只准备前端
+powershell -ExecutionPolicy Bypass -File .\scripts\quick-start.ps1 -FrontendOnly
+
+# 安装完成后自动拉起后端和前端
+powershell -ExecutionPolicy Bypass -File .\scripts\quick-start.ps1 -StartBackend -StartFrontend
+
+# 如果缺少 Python / Node / pnpm，尝试自动安装基础工具后再继续
+powershell -ExecutionPolicy Bypass -File .\scripts\quick-start.ps1 -AutoInstallTools
+```
+
+说明：
+
+- `-AutoInstallTools` 会在缺少基础工具时尝试自动补齐
+- `Python` 和 `Node` 优先通过 `winget` 安装
+- `pnpm` 会优先尝试 `npm install -g pnpm`，不行再退回 `winget`
+- 如果 `winget` 刚装完工具但当前终端还没刷新 PATH，重新打开终端再跑一次脚本即可
+
+如果你不想记参数，也可以直接双击仓库根目录的 [start.bat](D:/vibe_projs/SuperCode/start.bat)。
+它会弹出交互菜单，让你选择：
+
+- 只安装依赖
+- 安装后直接启动前后端
+- 只准备前端或后端
+- 先自动补基础工具，再安装或启动
+
 ### 3. 启动后端
 
 ```powershell
@@ -157,6 +228,26 @@ pnpm dev
 ```
 
 浏览器打开 `http://localhost:5173` 即可使用。
+
+### Skills 功能
+
+项目现在支持在聊天框里通过 `@` 提及 skills。
+
+- 工作区 skills：放在 `.agents/skills/<skill-name>/SKILL.md`
+- 内置 skills：放在仓库根目录 `builtin_skills/<skill-name>/SKILL.md`
+- `SKILL.md` 建议使用 YAML frontmatter，至少包含：
+
+```md
+---
+name: my-skill
+description: 这份 skill 是做什么的
+---
+```
+
+- 前端会把 skill 作为 `@` mention 候选项展示
+- 后端会把 `@skill` 解析为“本轮激活技能”，并把 skill 内容注入当前轮的 agent 上下文
+- 即使用户不显式 `@`，后端也会先加载所有 skill 的 `name + description` 作为技能目录，让 AI 自主发现可用 skill；命中描述的 skill 会被自动激活
+- 当前实现使用序列化 token `@[skill:<id>]` 保存 mention
 
 ### 5. 纯 Agent CLI 模式（无需前后端）
 

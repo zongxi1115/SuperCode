@@ -1,9 +1,11 @@
 import { Button } from '@/components/ui/button';
+import { GitPanel } from '@/components/app/git-panel';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { AnimatePresence, motion } from 'motion/react';
 import type { SessionHistoryItem } from '@/lib/app-types';
 import { cn } from '@/lib/utils';
-import { FileCode, FolderOpen, MessageSquareText, PanelLeftClose, PanelLeftOpen, Plus, Trash2, Wrench } from 'lucide-react';
+import { ChevronRight, FileCode, FolderOpen, GitBranch, PanelLeftClose, PanelLeftOpen, Plus, Trash2 } from 'lucide-react';
+import { useMemo, useState } from 'react';
 
 type SidebarProps = {
   currentSessionId: string | null;
@@ -14,6 +16,8 @@ type SidebarProps = {
   backendMode: 'agent' | 'demo';
   startupError: string | null;
   width: number;
+  isGitPanelOpen: boolean;
+  onGitPanelToggle: () => void;
   onNewSession: () => void;
   onSelectHistory: (sessionId: string) => void;
   onDeleteHistory: (sessionId: string) => void;
@@ -21,16 +25,17 @@ type SidebarProps = {
   onSelectOtherProject: () => void;
 };
 
-function formatHistoryTime(timestamp: number) {
-  const diff = Date.now() - timestamp;
-  const minute = 60 * 1000;
-  const hour = 60 * minute;
-  const day = 24 * hour;
-  if (diff < minute) return '刚刚';
-  if (diff < hour) return `${Math.floor(diff / minute)}分前`;
-  if (diff < day) return `${Math.floor(diff / hour)}时前`;
-  return new Date(timestamp).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' });
+function getFolderName(path: string): string {
+  const normalized = path.replace(/\\/g, '/');
+  const segments = normalized.split('/').filter(Boolean);
+  return segments[segments.length - 1] || path;
 }
+
+type ProjectGroup = {
+  workspace: string;
+  name: string;
+  items: SessionHistoryItem[];
+};
 
 export function Sidebar({
   currentSessionId,
@@ -40,6 +45,8 @@ export function Sidebar({
   selectedWorkspace,
   backendMode,
   startupError,
+  isGitPanelOpen,
+  onGitPanelToggle,
   onNewSession,
   onSelectHistory,
   onDeleteHistory,
@@ -47,6 +54,36 @@ export function Sidebar({
   onSelectOtherProject,
   width,
 }: SidebarProps) {
+  const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(new Set());
+
+  const projectGroups = useMemo<ProjectGroup[]>(() => {
+    const map = new Map<string, SessionHistoryItem[]>();
+    for (const item of historyItems) {
+      const ws = item.workspace || '未知项目';
+      if (!map.has(ws)) map.set(ws, []);
+      map.get(ws)!.push(item);
+    }
+    const groups: ProjectGroup[] = [];
+    const currentWs = selectedWorkspace;
+    if (map.has(currentWs)) {
+      groups.push({ workspace: currentWs, name: getFolderName(currentWs), items: map.get(currentWs)! });
+      map.delete(currentWs);
+    }
+    for (const [ws, items] of map) {
+      groups.push({ workspace: ws, name: getFolderName(ws), items });
+    }
+    return groups;
+  }, [historyItems, selectedWorkspace]);
+
+  const toggleProjectCollapse = (workspace: string) => {
+    setCollapsedProjects((prev) => {
+      const next = new Set(prev);
+      if (next.has(workspace)) next.delete(workspace);
+      else next.add(workspace);
+      return next;
+    });
+  };
+
   return (
     <motion.div
       animate={{ width: isCollapsed ? 48 : width }}
@@ -101,13 +138,8 @@ export function Sidebar({
               )}
             </div>
 
-            <div className="mx-3 flex items-center justify-between py-1.5 border-b border-border/50">
-              <span className="text-[11px] font-medium text-muted-foreground">历史记录</span>
-              <span className="text-[10px] text-muted-foreground/60 tabular-nums">{historyItems.length}</span>
-            </div>
-
             <ScrollArea className="flex-1 px-2 py-1">
-              <div className="space-y-0.5">
+              <div className="space-y-1">
                 {isHistoryLoading ? (
                   <div className="rounded-lg border border-dashed px-3 py-4 text-xs text-muted-foreground text-center">加载中...</div>
                 ) : null}
@@ -116,63 +148,136 @@ export function Sidebar({
                   <div className="rounded-lg border border-dashed px-3 py-4 text-xs text-muted-foreground text-center">暂无历史记录</div>
                 ) : null}
 
-                {historyItems.map((item) => {
-                  const isActive = item.sessionId === currentSessionId;
+                {projectGroups.map((group) => {
+                  const isCollapsedGroup = collapsedProjects.has(group.workspace);
+                  const isCurrentProject = group.workspace === selectedWorkspace;
                   return (
-                    <div
-                      key={item.sessionId}
-                      className={cn(
-                        'group relative rounded-md px-2.5 py-2 transition-colors cursor-pointer',
-                        isActive
-                          ? 'bg-primary/8 border border-primary/20'
-                          : 'border border-transparent hover:bg-muted/40 hover:border-border/60'
-                      )}
-                      onClick={() => onSelectHistory(item.sessionId)}
-                    >
-                      <div className="flex items-center gap-2">
-                        <div className="min-w-0 flex-1">
-                          <div className="truncate text-xs font-medium leading-5">{item.title}</div>
-                          <div className="line-clamp-2 break-words text-[11px] text-muted-foreground/70 leading-4 mt-0.5">{item.preview}</div>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            onDeleteHistory(item.sessionId);
-                          }}
-                          className="shrink-0 self-center rounded-md p-1.5 text-muted-foreground/40 hover:bg-destructive/10 hover:text-destructive transition-colors"
-                          aria-label={`删除 ${item.title}`}
-                          title="删除"
+                    <div key={group.workspace} className="space-y-0.5">
+                      <button
+                        type="button"
+                        onClick={() => toggleProjectCollapse(group.workspace)}
+                        className={cn(
+                          'flex items-center gap-1.5 w-full px-2 py-1.5 rounded-md text-xs font-medium transition-colors',
+                          isCurrentProject ? 'text-foreground' : 'text-muted-foreground hover:text-foreground',
+                          'hover:bg-muted/40'
+                        )}
+                        title={group.workspace}
+                      >
+                        <motion.span
+                          animate={{ rotate: isCollapsedGroup ? 0 : 90 }}
+                          transition={{ duration: 0.15 }}
+                          className="inline-flex shrink-0"
                         >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                      <div className="flex items-center gap-2 mt-1.5 text-[10px] text-muted-foreground/60">
-                        <span className="inline-flex items-center gap-0.5">
-                          <MessageSquareText className="size-2.5" />
-                          {item.messageCount}
-                        </span>
-                        <span className="inline-flex items-center gap-0.5">
-                          <Wrench className="size-2.5" />
-                          {item.toolCallCount}
-                        </span>
-                        <span className="text-[9px] px-1 py-px rounded bg-muted/60">{item.mode === 'agent' ? 'Agent' : 'Demo'}</span>
-                        <span className="ml-auto tabular-nums">{formatHistoryTime(item.updatedAt)}</span>
-                      </div>
+                          <ChevronRight className="w-3 h-3" />
+                        </motion.span>
+                        <FolderOpen className="w-3.5 h-3.5 shrink-0 text-muted-foreground" />
+                        <span className="truncate flex-1 text-left">{group.name}</span>
+                        <span className="text-[10px] text-muted-foreground/50 tabular-nums shrink-0">{group.items.length}</span>
+                      </button>
+
+                      <AnimatePresence initial={false}>
+                        {!isCollapsedGroup && (
+                          <motion.div
+                            initial={{ height: 0, opacity: 0 }}
+                            animate={{ height: 'auto', opacity: 1 }}
+                            exit={{ height: 0, opacity: 0 }}
+                            transition={{ duration: 0.15 }}
+                            className="overflow-hidden"
+                          >
+                            <div className="space-y-px pl-2">
+                              {group.items.map((item) => {
+                                const isActive = item.sessionId === currentSessionId;
+                                return (
+                                  <div
+                                    key={item.sessionId}
+                                    className={cn(
+                                      'group flex items-center gap-1 rounded-md px-2 py-1.5 transition-colors cursor-pointer',
+                                      isActive
+                                        ? 'bg-primary/8 border border-primary/20'
+                                        : 'border border-transparent hover:bg-muted/40 hover:border-border/60'
+                                    )}
+                                    onClick={() => onSelectHistory(item.sessionId)}
+                                  >
+                                    <span className="min-w-0 flex-1 break-all text-left">{item.title}</span>
+                                    <button
+                                      type="button"
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        onDeleteHistory(item.sessionId);
+                                      }}
+                                      className="shrink-0 rounded-md p-1 text-muted-foreground/30 hover:bg-destructive/10 hover:text-destructive transition-colors opacity-0 group-hover:opacity-100"
+                                      aria-label={`删除 ${item.title}`}
+                                      title="删除"
+                                    >
+                                      <Trash2 className="w-3 h-3" />
+                                    </button>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
                     </div>
                   );
                 })}
               </div>
             </ScrollArea>
+
+            <div className="border-t">
+              <button
+                type="button"
+                onClick={onGitPanelToggle}
+                className="flex items-center gap-2 w-full px-3 py-2 text-xs text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-colors"
+              >
+                <GitBranch className="size-3.5 shrink-0" />
+                <span className="flex-1 text-left">Git</span>
+                <motion.span
+                  animate={{ rotate: isGitPanelOpen ? 180 : 0 }}
+                  transition={{ duration: 0.2 }}
+                >
+                  ▾
+                </motion.span>
+              </button>
+              <AnimatePresence>
+                {isGitPanelOpen && (
+                  <motion.div
+                    initial={{ height: 0, opacity: 0 }}
+                    animate={{ height: 320, opacity: 1 }}
+                    exit={{ height: 0, opacity: 0 }}
+                    transition={{ duration: 0.2 }}
+                    className="overflow-hidden border-t"
+                  >
+                    <GitPanel sessionId={currentSessionId} />
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
           </motion.div>
         )}
       </AnimatePresence>
 
       {isCollapsed && (
         <div className="flex-1 flex flex-col items-center pt-3 gap-2">
+          <button
+            type="button"
+            onClick={onNewSession}
+            className="w-7 h-7 rounded-md bg-primary/10 flex items-center justify-center hover:bg-primary/20 transition-colors"
+            title="新建会话"
+          >
+            <Plus className="w-3.5 h-3.5 text-primary" />
+          </button>
           <div className="w-7 h-7 rounded-md bg-muted/80 flex items-center justify-center" title={selectedWorkspace}>
             <FileCode className="w-3.5 h-3.5 text-muted-foreground" />
           </div>
+          <button
+            type="button"
+            onClick={onGitPanelToggle}
+            className="w-7 h-7 rounded-md bg-muted/80 flex items-center justify-center hover:bg-muted transition-colors"
+            title="Git"
+          >
+            <GitBranch className="w-3.5 h-3.5 text-muted-foreground" />
+          </button>
         </div>
       )}
     </motion.div>

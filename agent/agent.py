@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable
 
 from .brain import AgentBrain, BrainStreamingUpdate
 from .schema import AgentEvent, AgentResponse, AgentState, StepRecord, ToolCall, ToolResult
 from .tools import BaseTool, ToolContext
+
+
+DEFAULT_MAX_STEPS = 40
 
 
 class CodingAgent:
@@ -23,7 +26,7 @@ class CodingAgent:
         brain: AgentBrain,
         tools: list[BaseTool],
         workspace: str | Path = ".",
-        max_steps: int = 8,
+        max_steps: int | None = None,
         tool_context_metadata: dict[str, Any] | None = None,
     ) -> None:
         """初始化智能体。
@@ -32,12 +35,12 @@ class CodingAgent:
         - `brain`：负责决定下一步动作的对象
         - `tools`：可供调用的工具列表
         - `workspace`：工具默认操作的工作目录
-        - `max_steps`：最大执行步数，避免死循环
+        - `max_steps`：单轮最大执行步数，防止模型在已完成后仍反复继续
         """
 
         self.brain = brain
         self.workspace = Path(workspace).resolve()
-        self.max_steps = max_steps
+        self.max_steps = max(1, max_steps or DEFAULT_MAX_STEPS)
         self.tools = {tool.name: tool for tool in tools}
         self.tool_context_metadata = tool_context_metadata or {}
 
@@ -59,6 +62,7 @@ class CodingAgent:
         self,
         state: AgentState,
         on_event: Callable[[AgentEvent], None] | None = None,
+        continue_existing_turn: bool = False,
     ) -> AgentResponse:
         """在已有状态上执行当前这一轮。
 
@@ -67,11 +71,23 @@ class CodingAgent:
         """
 
         history_steps = state.data.setdefault("step_records", [])
-        turn_index = int(state.data.get("turn_index", 0)) + 1
+        if continue_existing_turn and state.data.get("turn_index") is not None:
+            turn_index = int(state.data.get("turn_index", 0))
+        else:
+            turn_index = int(state.data.get("turn_index", 0)) + 1
         state.data["turn_index"] = turn_index
+        state.data["include_thoughts_in_context"] = bool(
+            self.tool_context_metadata.get("include_thoughts_in_context")
+        )
         steps: list[StepRecord] = []
         state.tool_results = []
-        tool_descriptions = {name: tool.description for name, tool in self.tools.items()}
+        tool_definitions = {
+            name: {
+                "description": tool.description,
+                "parameters_schema": getattr(tool, "parameters_schema", None),
+            }
+            for name, tool in self.tools.items()
+        }
         context = ToolContext(
             workspace=self.workspace,
             metadata=self.tool_context_metadata,
@@ -84,7 +100,26 @@ class CodingAgent:
             ),
         )
 
-        for index in range(1, self.max_steps + 1):
+        if continue_existing_turn:
+            current_turn_indices = [
+                step.index
+                for step in history_steps
+                if isinstance(step, StepRecord) and step.turn_index == turn_index
+            ]
+            index = (max(current_turn_indices) + 1) if current_turn_indices else 1
+        else:
+            index = 1
+        while index <= self.max_steps:
+            if self._is_cancelled(context):
+                return self._build_cancelled_response(
+                    state=state,
+                    steps=steps,
+                    history_steps=history_steps,
+                    turn_index=turn_index,
+                    step_index=index,
+                    on_event=on_event,
+                )
+
             streamed_final_answer = ""
             streamed_thought = ""
             streamed_tool_input = ""
@@ -190,9 +225,21 @@ class CodingAgent:
 
             decision = self.brain.decide(
                 state=state,
-                tool_descriptions=tool_descriptions,
+                tool_definitions=tool_definitions,
                 on_stream=on_brain_stream,
             )
+            latest_usage_getter = getattr(self.brain, "latest_usage", None)
+            latest_usage = latest_usage_getter() if callable(latest_usage_getter) else None
+            if latest_usage:
+                self._emit_event(
+                    on_event,
+                    AgentEvent(
+                        type="usage",
+                        step_index=index,
+                        message=f"第 {index} 步已更新模型 usage。",
+                        usage=latest_usage,
+                    ),
+                )
             self._emit_event(
                 on_event,
                 AgentEvent(
@@ -202,6 +249,16 @@ class CodingAgent:
                     thought=decision.thought,
                 ),
             )
+
+            if self._is_cancelled(context):
+                return self._build_cancelled_response(
+                    state=state,
+                    steps=steps,
+                    history_steps=history_steps,
+                    turn_index=turn_index,
+                    step_index=index,
+                    on_event=on_event,
+                )
 
             if decision.action == "final":
                 step_record = StepRecord(
@@ -258,9 +315,9 @@ class CodingAgent:
                     ),
                 )
 
-            results = self._execute_tool_calls(tool_calls, context)
             tool_results: list[ToolResult] = []
-            for tool_call, result in results:
+
+            def handle_tool_result(tool_call: ToolCall, result: ToolResult) -> None:
                 state.add_tool_result(result)
                 tool_results.append(result)
                 self._emit_event(
@@ -274,6 +331,12 @@ class CodingAgent:
                     ),
                 )
 
+            self._execute_tool_calls(
+                tool_calls,
+                context,
+                on_result=handle_tool_result,
+            )
+
             step_record = StepRecord(
                 turn_index=turn_index,
                 index=index,
@@ -286,42 +349,49 @@ class CodingAgent:
             steps.append(step_record)
             history_steps.append(step_record)
 
-        final_output = f"任务在 {self.max_steps} 步内未完成，请调整 brain 或增大 max_steps。"
-        step_record = StepRecord(
-            turn_index=turn_index,
-            index=self.max_steps + 1,
-            thought="已达到最大步数限制，停止执行。",
-            final_answer=final_output,
-        )
-        steps.append(step_record)
-        history_steps.append(step_record)
-        response = AgentResponse(
-            task=state.current_input,
-            final_output=final_output,
+            confirmation_pause = self._build_confirmation_pause_response(
+                state=state,
+                steps=steps,
+                turn_index=turn_index,
+                step_index=index,
+                tool_calls=tool_calls,
+                tool_results=tool_results,
+                on_event=on_event,
+            )
+            if confirmation_pause is not None:
+                return confirmation_pause
+
+            if self._is_cancelled(context):
+                return self._build_cancelled_response(
+                    state=state,
+                    steps=steps,
+                    history_steps=history_steps,
+                    turn_index=turn_index,
+                    step_index=index,
+                    on_event=on_event,
+                )
+            index += 1
+
+        return self._build_limit_response(
+            state=state,
             steps=steps,
+            history_steps=history_steps,
+            turn_index=turn_index,
+            step_index=index,
+            on_event=on_event,
         )
-        self._emit_event(
-            on_event,
-            AgentEvent(
-                type="limit_reached",
-                step_index=self.max_steps + 1,
-                message="已达到最大步数限制。",
-                final_answer=final_output,
-            ),
-        )
-        self._emit_event(
-            on_event,
-            AgentEvent(
-                type="turn_finished",
-                step_index=self.max_steps + 1,
-                message="本轮处理结束，但未在限制步数内完成。",
-                final_answer=response.final_output,
-            ),
-        )
-        return response
 
     def _execute_tool(self, tool_call: ToolCall, context: ToolContext) -> ToolResult:
         """执行单个工具调用，并把异常包装成统一结果。"""
+
+        if self._is_cancelled(context):
+            return ToolResult(
+                name=tool_call.name,
+                output=None,
+                tool_call_id=tool_call.id,
+                success=False,
+                error_message="当前任务已被用户停止。",
+            )
 
         tool = self.tools.get(tool_call.name)
         if tool is None:
@@ -380,6 +450,7 @@ class CodingAgent:
         self,
         tool_calls: list[ToolCall],
         context: ToolContext,
+        on_result: Callable[[ToolCall, ToolResult], None] | None = None,
     ) -> list[tuple[ToolCall, ToolResult]]:
         """执行工具调用列表，对只读工具自动并行。"""
 
@@ -393,12 +464,16 @@ class CodingAgent:
 
             worker_count = min(len(parallel_buffer), 4)
             with ThreadPoolExecutor(max_workers=worker_count) as executor:
-                future_results = [
-                    executor.submit(self._execute_tool, tool_call, context)
+                future_by_tool_call = {
+                    executor.submit(self._execute_tool, tool_call, context): tool_call
                     for tool_call in parallel_buffer
-                ]
-                for tool_call, future in zip(parallel_buffer, future_results, strict=True):
-                    results.append((tool_call, future.result()))
+                }
+                for future in as_completed(future_by_tool_call):
+                    tool_call = future_by_tool_call[future]
+                    result = future.result()
+                    results.append((tool_call, result))
+                    if on_result is not None:
+                        on_result(tool_call, result)
             parallel_buffer = []
 
         for tool_call in tool_calls:
@@ -407,7 +482,10 @@ class CodingAgent:
                 continue
 
             flush_parallel_buffer()
-            results.append((tool_call, self._execute_tool(tool_call, context)))
+            result = self._execute_tool(tool_call, context)
+            results.append((tool_call, result))
+            if on_result is not None:
+                on_result(tool_call, result)
 
         flush_parallel_buffer()
         return results
@@ -418,6 +496,39 @@ class CodingAgent:
         tool = self.tools.get(tool_name)
         return bool(tool is not None and getattr(tool, "supports_parallel", False))
 
+    def _build_confirmation_pause_response(
+        self,
+        state: AgentState,
+        steps: list[StepRecord],
+        turn_index: int,
+        step_index: int,
+        tool_calls: list[ToolCall],
+        tool_results: list[ToolResult],
+        on_event: Callable[[AgentEvent], None] | None,
+    ) -> AgentResponse | None:
+        for tool_call, tool_result in zip(tool_calls, tool_results):
+            if not self._requires_user_confirmation(tool_result):
+                continue
+
+            response = AgentResponse(
+                task=state.current_input,
+                final_output="",
+                steps=steps,
+            )
+            return response
+
+        return None
+
+    def _requires_user_confirmation(self, tool_result: ToolResult) -> bool:
+        return bool(
+            tool_result.success
+            and isinstance(tool_result.output, dict)
+            and (
+                tool_result.output.get("requires_confirmation") is True
+                or tool_result.output.get("requires_user_input") is True
+            )
+        )
+
     def _emit_event(
         self,
         on_event: Callable[[AgentEvent], None] | None,
@@ -427,3 +538,96 @@ class CodingAgent:
 
         if on_event is not None:
             on_event(event)
+
+    def _is_cancelled(self, context: ToolContext) -> bool:
+        cancel_event = context.metadata.get("cancel_event")
+        return bool(cancel_event is not None and getattr(cancel_event, "is_set", lambda: False)())
+
+    def _build_cancelled_response(
+        self,
+        state: AgentState,
+        steps: list[StepRecord],
+        history_steps: list[StepRecord],
+        turn_index: int,
+        step_index: int,
+        on_event: Callable[[AgentEvent], None] | None,
+    ) -> AgentResponse:
+        final_output = "已停止当前任务。"
+        step_record = StepRecord(
+            turn_index=turn_index,
+            index=step_index,
+            thought="用户主动停止了当前执行。",
+            final_answer=final_output,
+        )
+        steps.append(step_record)
+        history_steps.append(step_record)
+        response = AgentResponse(
+            task=state.current_input,
+            final_output=final_output,
+            steps=steps,
+        )
+        self._emit_event(
+            on_event,
+            AgentEvent(
+                type="final",
+                step_index=step_index,
+                message="当前任务已停止。",
+                final_answer=final_output,
+            ),
+        )
+        self._emit_event(
+            on_event,
+            AgentEvent(
+                type="turn_finished",
+                step_index=step_index,
+                message="本轮处理已停止。",
+                final_answer=final_output,
+            ),
+        )
+        return response
+
+    def _build_limit_response(
+        self,
+        state: AgentState,
+        steps: list[StepRecord],
+        history_steps: list[StepRecord],
+        turn_index: int,
+        step_index: int,
+        on_event: Callable[[AgentEvent], None] | None,
+    ) -> AgentResponse:
+        final_output = (
+            f"本轮已执行 {self.max_steps} 步仍未收敛，我先停止，避免继续重复调用工具。"
+            "你可以补充更明确的目标后让我继续。"
+        )
+        step_record = StepRecord(
+            turn_index=turn_index,
+            index=step_index,
+            thought="达到单轮安全步数上限，停止继续执行。",
+            final_answer=final_output,
+        )
+        steps.append(step_record)
+        history_steps.append(step_record)
+        response = AgentResponse(
+            task=state.current_input,
+            final_output=final_output,
+            steps=steps,
+        )
+        self._emit_event(
+            on_event,
+            AgentEvent(
+                type="limit_reached",
+                step_index=step_index,
+                message="已达到单轮安全步数上限。",
+                final_answer=final_output,
+            ),
+        )
+        self._emit_event(
+            on_event,
+            AgentEvent(
+                type="turn_finished",
+                step_index=step_index,
+                message="本轮处理结束，但模型没有自然收敛。",
+                final_answer=response.final_output,
+            ),
+        )
+        return response

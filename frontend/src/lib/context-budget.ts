@@ -39,18 +39,30 @@ export function buildContextBudget({
 }: BuildContextBudgetArgs): ContextBudgetSnapshot {
   const maxTokens = Math.max(contextData?.maxTokens ?? DEFAULT_MAX_TOKENS, 1);
   const reserveOutputTokens = getReserveOutputTokens(maxTokens);
-  const workspaceTokens = estimateWorkspaceTokens(contextData);
   const draftTokens = estimateTextTokens(draftInput);
-  const messageTotals = accumulateMessageBudget(messages);
-
-  const inputTokens = workspaceTokens + draftTokens + messageTotals.inputTokens;
-  const outputTokens = messageTotals.outputTokens;
-  const reasoningTokens = messageTotals.reasoningTokens;
-  const conversationTokens = messageTotals.conversationTokens;
-  const toolTokens = messageTotals.toolTokens;
-
-  const usedTokens = inputTokens + outputTokens + reasoningTokens;
   const modelId = resolveBudgetModelId(contextData?.model);
+  const workspaceTokens = contextData ? 0 : estimateWorkspaceTokens(contextData);
+  const messageTotals = contextData ? null : accumulateMessageBudget(messages);
+  const backendUsage = contextData?.usage;
+
+  const inputTokens = contextData
+    ? Math.max((backendUsage?.inputTokens ?? contextData.estimatedTokens) + draftTokens, 0)
+    : workspaceTokens + draftTokens + (messageTotals?.inputTokens ?? 0);
+  const outputTokens = contextData
+    ? Math.max(backendUsage?.outputTokens ?? 0, 0)
+    : (messageTotals?.outputTokens ?? 0);
+  const reasoningTokens = contextData
+    ? Math.max(backendUsage?.reasoningTokens ?? 0, 0)
+    : (messageTotals?.reasoningTokens ?? 0);
+  const conversationTokens = contextData
+    ? Math.max(contextData.estimatedTokens, 0)
+    : (messageTotals?.conversationTokens ?? 0);
+  const toolTokens = contextData
+    ? Math.max(backendUsage?.outputTokens ?? 0, 0)
+    : (messageTotals?.toolTokens ?? 0);
+  const usedTokens = contextData
+    ? Math.max(contextData.estimatedTokens + draftTokens, inputTokens)
+    : inputTokens + outputTokens + reasoningTokens;
   const usage = { inputTokens, outputTokens, reasoningTokens };
   const fallbackRemaining = Math.max(maxTokens - usedTokens - reserveOutputTokens, 0);
 

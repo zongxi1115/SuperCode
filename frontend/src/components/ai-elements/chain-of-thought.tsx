@@ -11,7 +11,7 @@ import { cn } from "@/lib/utils";
 import type { LucideIcon } from "lucide-react";
 import { BrainIcon, ChevronDownIcon, DotIcon } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
-import { createContext, memo, useContext, useMemo } from "react";
+import { createContext, memo, useContext, useEffect, useMemo, useRef, useState } from "react";
 
 interface ChainOfThoughtContextValue {
   isOpen: boolean;
@@ -36,6 +36,8 @@ export type ChainOfThoughtProps = ComponentProps<"div"> & {
   open?: boolean;
   defaultOpen?: boolean;
   onOpenChange?: (open: boolean) => void;
+  autoOpen?: boolean;
+  autoCloseDelay?: number;
 };
 
 export const ChainOfThought = memo(
@@ -44,6 +46,8 @@ export const ChainOfThought = memo(
     open,
     defaultOpen = false,
     onOpenChange,
+    autoOpen = false,
+    autoCloseDelay = 0,
     children,
     ...props
   }: ChainOfThoughtProps) => {
@@ -52,6 +56,40 @@ export const ChainOfThought = memo(
       onChange: onOpenChange,
       prop: open,
     });
+    const hasAutoOpenedRef = useRef(autoOpen);
+    const [hasAutoClosed, setHasAutoClosed] = useState(false);
+
+    useEffect(() => {
+      if (!autoOpen) {
+        return;
+      }
+      hasAutoOpenedRef.current = true;
+      setHasAutoClosed(false);
+    }, [autoOpen]);
+
+    useEffect(() => {
+      if (!autoOpen || isOpen) {
+        return;
+      }
+      setIsOpen(true);
+    }, [autoOpen, isOpen, setIsOpen]);
+
+    useEffect(() => {
+      if (
+        autoOpen ||
+        !hasAutoOpenedRef.current ||
+        !isOpen ||
+        hasAutoClosed ||
+        autoCloseDelay <= 0
+      ) {
+        return;
+      }
+      const timer = window.setTimeout(() => {
+        setIsOpen(false);
+        setHasAutoClosed(true);
+      }, autoCloseDelay);
+      return () => window.clearTimeout(timer);
+    }, [autoCloseDelay, autoOpen, hasAutoClosed, isOpen, setIsOpen]);
 
     const chainOfThoughtContext = useMemo(
       () => ({ isOpen, setIsOpen }),
@@ -109,7 +147,7 @@ export type ChainOfThoughtStepProps = ComponentProps<"div"> & {
 };
 
 const stepStatusStyles = {
-  active: "text-foreground",
+  active: "text-muted-foreground",
   complete: "text-muted-foreground",
   pending: "text-muted-foreground/50",
 };
@@ -138,7 +176,7 @@ export const ChainOfThoughtStep = memo(
         <div className="absolute top-7 bottom-0 left-1/2 -mx-px w-px bg-border" />
       </div>
       <div className="flex-1 space-y-2 overflow-hidden">
-        <div>{label}</div>
+        <div className={status === "active" ? "fade-edge-r" : ""}>{label}</div>
         {description && (
           <div className="text-muted-foreground text-xs">{description}</div>
         )}

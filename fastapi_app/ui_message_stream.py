@@ -347,6 +347,10 @@ class UIMessageStreamAdapter:
             old_content = arguments.get("old_content")
             return old_content if isinstance(old_content, str) else ""
 
+        if tool_name == "apply_patch":
+            new_content = arguments.get("new_content")
+            return new_content if isinstance(new_content, str) else ""
+
         return ""
 
     def _chunk_text(self, text: str, chunk_size: int = 96) -> list[str]:

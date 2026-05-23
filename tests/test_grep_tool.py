@@ -19,6 +19,17 @@ class GrepFileToolTests(unittest.TestCase):
             "no match\nneedle in beta\n",
             encoding="utf-8",
         )
+        (self.workspace / "node_modules").mkdir()
+        (self.workspace / "node_modules" / "left-pad").mkdir()
+        (self.workspace / "node_modules" / "left-pad" / "index.js").write_text(
+            "needle from dependency\n",
+            encoding="utf-8",
+        )
+        (self.workspace / "dist").mkdir()
+        (self.workspace / "dist" / "bundle.js").write_text(
+            "needle from bundle\n",
+            encoding="utf-8",
+        )
 
     def test_grep_returns_only_matching_lines(self) -> None:
         tool = GrepFileTool()
@@ -44,6 +55,75 @@ class GrepFileToolTests(unittest.TestCase):
         output = tool.run({"regex": "missing", "search_path": "src"}, self.context)
 
         self.assertEqual(output, "未找到匹配项: missing")
+
+    def test_grep_ignores_generated_directories_by_default(self) -> None:
+        tool = GrepFileTool()
+
+        output = tool.run({"regex": "needle", "search_path": "."}, self.context)
+
+        self.assertIn("# File: src/alpha.py", output)
+        self.assertNotIn("node_modules/left-pad/index.js", output)
+        self.assertNotIn("dist/bundle.js", output)
+
+    def test_grep_can_include_ignored_directories(self) -> None:
+        tool = GrepFileTool()
+
+        output = tool.run({"regex": "needle", "search_path": ".", "include_ignored": True}, self.context)
+
+        self.assertIn("# File: node_modules/left-pad/index.js", output)
+        self.assertIn("1 | needle from dependency", output)
+        self.assertIn("# File: dist/bundle.js", output)
+
+    def test_grep_can_target_ignored_directory_explicitly(self) -> None:
+        tool = GrepFileTool()
+
+        output = tool.run({"regex": "needle", "search_path": "node_modules"}, self.context)
+
+        self.assertEqual(
+            output,
+            "\n".join(
+                [
+                    "# File: node_modules/left-pad/index.js",
+                    "1 | needle from dependency",
+                ]
+            ),
+        )
+
+    def test_grep_can_return_only_matching_files(self) -> None:
+        tool = GrepFileTool()
+
+        output = tool.run(
+            {"regex": "needle", "search_path": "src", "output_mode": "files_with_matches"},
+            self.context,
+        )
+
+        self.assertIn("# Returned files: 2", output)
+        self.assertIn("src/alpha.py", output)
+        self.assertIn("src/beta.py", output)
+        self.assertNotIn("1 |", output)
+
+    def test_grep_can_return_match_counts(self) -> None:
+        tool = GrepFileTool()
+
+        output = tool.run(
+            {"regex": "needle", "search_path": "src", "output_mode": "count"},
+            self.context,
+        )
+
+        self.assertIn("# Total matches: 3", output)
+        self.assertIn("src/alpha.py: 2", output)
+        self.assertIn("src/beta.py: 1", output)
+
+    def test_grep_can_filter_by_glob(self) -> None:
+        tool = GrepFileTool()
+
+        output = tool.run(
+            {"regex": "needle", "search_path": "src", "glob": "*alpha.py"},
+            self.context,
+        )
+
+        self.assertIn("# File: src/alpha.py", output)
+        self.assertNotIn("# File: src/beta.py", output)
 
 
 if __name__ == "__main__":

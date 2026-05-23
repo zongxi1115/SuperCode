@@ -16,6 +16,7 @@ class AgentEvent:
     tool_call: "ToolCall | None" = None
     tool_result: "ToolResult | None" = None
     final_answer: str | None = None
+    usage: dict[str, int] | None = None
 
 
 @dataclass(slots=True)
@@ -24,6 +25,7 @@ class ConversationMessage:
 
     role: str
     content: str
+    reasoning_content: str | None = None
 
 
 @dataclass(slots=True)

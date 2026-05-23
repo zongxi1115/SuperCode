@@ -50,7 +50,7 @@ export const Task = ({
 );
 
 export type TaskTriggerProps = ComponentProps<typeof CollapsibleTrigger> & {
-  title: string;
+  title: ReactNode;
   icon?: ReactNode;
 };
 

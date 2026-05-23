@@ -24,17 +24,25 @@ class SwitchSessionModelTests(unittest.IsolatedAsyncioTestCase):
         self.interactive_session.close()
 
     async def test_switch_session_model_preserves_runtime_metadata(self) -> None:
-        dummy_config = type("DummyConfig", (), {"model": "gpt-test", "max_steps": 6})()
+        dummy_config = type(
+            "DummyConfig",
+            (),
+            {
+                "model": "gpt-test",
+                "reasoning_effort": "high",
+                "include_thoughts_in_context": False,
+            },
+        )()
 
         with (
-            patch.object(api_main, "resolve_model_option", return_value={"envFile": ".env"}),
-            patch.object(api_main.AgentLLMConfig, "from_env", return_value=dummy_config),
+            patch.object(api_main, "resolve_model_option", return_value={"envFile": "ui::provider-1::gpt-test"}),
+            patch.object(api_main, "build_agent_config", return_value=(dummy_config, "ui::provider-1::gpt-test")),
             patch.object(api_main, "OpenAICompatibleClient", return_value=object()),
             patch.object(api_main, "CodingPromptBrain", return_value=object()),
         ):
             await api_main.switch_session_model(
                 self.session.session_id,
-                api_main.SwitchModelRequest(model="gpt-test"),
+                api_main.SwitchModelRequest(model="gpt-test", reasoning_effort="high"),
             )
 
         self.assertIsNotNone(self.session.chat_session)
@@ -42,6 +50,7 @@ class SwitchSessionModelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metadata["session_id"], self.session.session_id)
         self.assertEqual(metadata["backend_base_url"], api_main.BACKEND_BASE_URL)
         self.assertIs(metadata["interactive_command_session"], self.interactive_session)
+        self.assertEqual(self.session.reasoning_effort, "high")
 
 
 if __name__ == "__main__":
