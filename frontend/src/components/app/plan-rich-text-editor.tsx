@@ -170,6 +170,7 @@ export function PlanRichTextEditor({
 }: PlanRichTextEditorProps) {
   const anchorRef = useRef<HTMLDivElement>(null);
   const lastMarkdownRef = useRef(normalizeMarkdown(value));
+  const isApplyingExternalValueRef = useRef(false);
   const [slashMenu, setSlashMenu] = useState<SlashMenuState | null>(null);
   const [slashNavigation, setSlashNavigation] = useState<{
     key: string | null;
@@ -220,7 +221,9 @@ export function PlanRichTextEditor({
       onUpdate({ editor: currentEditor }) {
         const markdown = htmlToMarkdown(currentEditor.getHTML());
         lastMarkdownRef.current = markdown;
-        onChange(markdown);
+        if (!isApplyingExternalValueRef.current) {
+          onChange(markdown);
+        }
         setSlashMenu(getSlashMenuState(currentEditor, anchorRef.current?.getBoundingClientRect() ?? null));
         updateBubbleToolbar(currentEditor);
       },
@@ -236,8 +239,12 @@ export function PlanRichTextEditor({
     if (!editor) return;
     const normalized = normalizeMarkdown(value);
     if (normalized === lastMarkdownRef.current) return;
+    isApplyingExternalValueRef.current = true;
     editor.commands.setContent(markdownToHtml(normalized), false);
     lastMarkdownRef.current = normalized;
+    queueMicrotask(() => {
+      isApplyingExternalValueRef.current = false;
+    });
   }, [editor, value]);
 
   const slashCommands = useMemo<SlashCommand[]>(() => {

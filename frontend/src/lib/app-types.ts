@@ -97,7 +97,27 @@ export type PlanStep = {
   id: string;
   title: string;
   description: string;
-  status: 'pending' | 'running' | 'completed' | 'error';
+  status: 'pending' | 'running' | 'blocked' | 'completed' | 'error';
+};
+
+export type TaskRecord = {
+  id: string;
+  title: string;
+  description: string;
+  status: 'pending' | 'running' | 'blocked' | 'completed';
+  dependsOn: string[];
+  acceptanceCriteria: string[];
+  needsSplit: boolean;
+  createdBy: 'plan_agent' | 'coding_agent' | 'system' | string;
+  parentTaskId?: string | null;
+};
+
+export type TaskState = {
+  strictMode: boolean;
+  autoCreateEnabled: boolean;
+  source: 'plan' | 'coding-seeded' | string;
+  activeTaskId?: string | null;
+  tasks: TaskRecord[];
 };
 
 export type SessionContextMessage = {
@@ -130,6 +150,7 @@ export type SessionContextPayload = {
   phase?: string;
   deployState?: Record<string, unknown>;
   planState?: Record<string, unknown>;
+  taskState?: TaskState;
   selectedFilePath?: string | null;
   openFiles: string[];
   messageCount: number;
@@ -190,6 +211,7 @@ export type SessionPayload = {
   availableSkills?: SkillSummary[];
   codeChanges?: CodeChangeRecord[];
   planSteps?: PlanStep[];
+  taskState?: TaskState;
 };
 
 export type AgentMode = 'auto' | 'plan' | 'coding' | 'deploy';

@@ -225,7 +225,16 @@ export function ContextViewer({
                     <h3 className="text-sm font-medium">当前计划</h3>
                     <Queue>
                       {contextData.planSteps.map((step) => {
-                        const status = step.status === 'completed' ? 'completed' : step.status === 'error' ? 'error' : step.status === 'running' ? 'running' : 'pending';
+                        const status =
+                          step.status === 'completed'
+                            ? 'completed'
+                            : step.status === 'error'
+                              ? 'error'
+                              : step.status === 'blocked'
+                                ? 'blocked'
+                                : step.status === 'running'
+                                  ? 'running'
+                                  : 'pending';
                         return (
                           <QueueItem key={step.id} status={status}>
                             <QueueItemTitle>{step.title}</QueueItemTitle>

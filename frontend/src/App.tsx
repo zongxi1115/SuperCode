@@ -1532,6 +1532,7 @@ export default function App() {
                     phase: payload.phase ?? prev.phase,
                     deployState: payload.deployState ?? prev.deployState,
                     planState: payload.planState ?? prev.planState,
+                    taskState: payload.taskState ?? prev.taskState,
                     codeChangeCount: payload.codeChangeCount ?? prev.codeChangeCount,
                     recentCodeChanges: payload.recentCodeChanges ?? prev.recentCodeChanges,
                   }

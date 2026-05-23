@@ -90,11 +90,15 @@ def normalize_workspace(raw_workspace: str | None, default_workspace: str | Path
     if raw_workspace is None or not raw_workspace.strip():
         return str(Path(default_workspace).expanduser().resolve())
     candidate = Path(raw_workspace.strip()).expanduser().resolve()
-    if not candidate.exists():
-        raise HTTPException(status_code=400, detail="工作区不存在")
-    if not candidate.is_dir():
-        raise HTTPException(status_code=400, detail="工作区必须是目录")
-    return str(candidate)
+    if candidate.exists():
+        if not candidate.is_dir():
+            raise HTTPException(status_code=400, detail="工作区必须是目录")
+        return str(candidate)
+    parent = candidate.parent
+    if parent.exists() and parent.is_dir():
+        candidate.mkdir(parents=False, exist_ok=True)
+        return str(candidate)
+    raise HTTPException(status_code=400, detail="工作区路径的父目录不存在，无法自动创建")
 
 
 def resolve_workspace_path(workspace: str) -> Path:

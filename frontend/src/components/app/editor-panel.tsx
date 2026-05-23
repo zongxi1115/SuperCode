@@ -77,6 +77,7 @@ export function EditorPanel({
   const monacoRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null);
   const isEditingRef = useRef(false);
   const editContentRef = useRef('');
+  const lastPlanSyncRef = useRef<string | null>(null);
 
   const isPlanMode = Boolean(planData);
 
@@ -89,10 +90,19 @@ export function EditorPanel({
   }, [selectedFilePath]);
 
   useEffect(() => {
-    if (planData) {
-      setPlanEditContent(planData.markdown);
+    if (!planData) {
+      lastPlanSyncRef.current = null;
+      setPlanEditContent('');
+      return;
     }
-  }, [planData]);
+
+    if (lastPlanSyncRef.current === planData.markdown) {
+      return;
+    }
+
+    lastPlanSyncRef.current = planData.markdown;
+    setPlanEditContent((current) => (current === planData.markdown ? current : planData.markdown));
+  }, [planData?.markdown]);
 
   useEffect(() => {
     if (isWebPreviewOpen) {
@@ -238,7 +248,7 @@ export function EditorPanel({
 
                   <div className="flex-1 min-h-0 overflow-hidden">
                     <PlanRichTextEditor
-                      value={planEditContent || planData?.markdown || ''}
+                      value={planEditContent}
                       onChange={setPlanEditContent}
                       autoFocus
                     />

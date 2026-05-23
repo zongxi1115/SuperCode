@@ -1,13 +1,13 @@
 "use client";
 
 import { cn } from "@/lib/utils";
-import { CheckIcon, CircleIcon, LoaderIcon, XIcon } from "lucide-react";
+import { AlertCircleIcon, CheckIcon, CircleIcon, LoaderIcon, XIcon } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
 import { createContext, useContext, useMemo } from "react";
 
 import { Shimmer } from "./shimmer";
 
-type QueueStatus = "pending" | "running" | "completed" | "error";
+type QueueStatus = "pending" | "running" | "blocked" | "completed" | "error";
 
 interface QueueContextValue {
   isStreaming: boolean;
@@ -79,6 +79,7 @@ export type QueueItemIndicatorProps = ComponentProps<"div"> & {
 const statusIconMap: Record<QueueStatus, ReactNode> = {
   pending: <CircleIcon className="size-3.5 text-muted-foreground/50" />,
   running: <LoaderIcon className="size-3.5 animate-spin text-primary" />,
+  blocked: <AlertCircleIcon className="size-3.5 text-amber-600" />,
   completed: <CheckIcon className="size-3.5 text-primary" />,
   error: <XIcon className="size-3.5 text-destructive" />,
 };
@@ -97,6 +98,7 @@ export const QueueItemIndicator = ({
         "flex size-7 shrink-0 items-center justify-center rounded-full border",
         status === "pending" && "border-muted-foreground/25 bg-background",
         status === "running" && "border-primary/40 bg-primary/10",
+        status === "blocked" && "border-amber-300/50 bg-amber-500/10",
         status === "completed" && "border-primary/30 bg-primary/10",
         status === "error" && "border-destructive/30 bg-destructive/10",
         className

@@ -1,5 +1,5 @@
 import { ContextViewer } from "@/components/app/context-viewer";
-import { CodeChangePanel } from "@/components/app/code-change-panel";
+import { TurnFileChangeList } from "@/components/ai-elements/file-change-list";
 import { ChatComposerEditor } from "@/components/app/chat-composer-editor";
 import { cn } from "@/lib/utils";
 import {
@@ -1653,69 +1653,6 @@ function PlanDraftCard({
   );
 }
 
-function PlanToggle({
-  planSteps,
-  isStreaming,
-}: {
-  planSteps: PlanStep[];
-  isStreaming: boolean;
-}) {
-  const [isOpen, setIsOpen] = useState(false);
-
-  if (planSteps.length === 0) return null;
-
-  const completedCount = planSteps.filter(
-    (s) => s.status === "completed",
-  ).length;
-
-  return (
-    <div className="px-3">
-      <button
-        type="button"
-        onClick={() => setIsOpen((prev) => !prev)}
-        className="flex items-center gap-2 w-full rounded-md px-2 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
-      >
-        <ListChecks className="size-3.5 shrink-0" />
-        <span className="flex-1 text-left">步骤</span>
-        <span className="text-[10px] tabular-nums">
-          {completedCount}/{planSteps.length}
-        </span>
-        <motion.div
-          animate={{ rotate: isOpen ? 180 : 0 }}
-          transition={{ type: "spring", stiffness: 300, damping: 25 }}
-        >
-          <ChevronDown className="size-3" />
-        </motion.div>
-      </button>
-
-      <AnimatePresence>
-        {isOpen && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ type: "spring", stiffness: 260, damping: 26 }}
-            className="overflow-hidden"
-          >
-            <div className="px-1 pb-2 pt-1">
-              <Queue isStreaming={isStreaming}>
-                {planSteps.map((step) => (
-                  <QueueItem key={step.id} status={step.status}>
-                    <QueueItemTitle>{step.title}</QueueItemTitle>
-                    <QueueItemDescription>
-                      {step.description}
-                    </QueueItemDescription>
-                  </QueueItem>
-                ))}
-              </Queue>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </div>
-  );
-}
-
 function DataPartView({
   part,
   onViewPlan,
@@ -2054,6 +1991,7 @@ const MessageList = memo(function MessageList({
   sessionId,
   isLoading,
   messages,
+  codeChanges,
   onResolveDeleteConfirmation,
   onResolveGitConfirmation,
   onResolveConnectInput,
@@ -2067,6 +2005,7 @@ const MessageList = memo(function MessageList({
   sessionId: string | null;
   isLoading: boolean;
   messages: ChatMessage[];
+  codeChanges: CodeChangeRecord[];
   onResolveDeleteConfirmation: (toolCallId: string, approved: boolean) => void;
   onResolveGitConfirmation: (
     toolCallId: string,
@@ -2433,6 +2372,11 @@ const MessageList = memo(function MessageList({
         const isCompressing = activeCompletionAction?.action === "compress" && activeCompletionAction.messageId === msg.id;
         const isCompressed = compressedMessageIds.has(msg.id ?? "");
         const compressStatus: "compressing" | "compressed" | null = isCompressing ? "compressing" : isCompressed ? "compressed" : null;
+        const msgToolCallIds = new Set([
+          ...(msg.toolCalls?.map((tc) => tc.id) ?? []),
+          ...(msg.parts?.filter((p) => p.type === "tool_call").map((p) => (p as { type: "tool_call"; toolCall: { id: string } }).toolCall.id) ?? []),
+        ]);
+        const msgCodeChanges = codeChanges.filter((c) => c.toolCallId && msgToolCallIds.has(c.toolCallId));
         return (
           <Message key={msg.id || idx} from={msg.role} data-message-id={msg.id}>
             <MessageContent>
@@ -2447,6 +2391,9 @@ const MessageList = memo(function MessageList({
                 })
               ) : null}
             </MessageContent>
+            {msg.role === "assistant" && msgCodeChanges.length > 0 && (
+              <TurnFileChangeList changes={msgCodeChanges} />
+            )}
             {msg.role === "assistant" && compressStatus && (
               <CompressStatusLine status={compressStatus} />
             )}
@@ -2476,6 +2423,7 @@ const ChatStreamBody = memo(function ChatStreamBody({
   sessionId,
   isLoading,
   messages,
+  codeChanges,
   onResolveDeleteConfirmation,
   onResolveGitConfirmation,
   onResolveConnectInput,
@@ -2489,6 +2437,7 @@ const ChatStreamBody = memo(function ChatStreamBody({
   sessionId: string | null;
   isLoading: boolean;
   messages: ChatMessage[];
+  codeChanges: CodeChangeRecord[];
   onResolveDeleteConfirmation: (toolCallId: string, approved: boolean) => void;
   onResolveGitConfirmation: (
     toolCallId: string,
@@ -2542,6 +2491,7 @@ const ChatStreamBody = memo(function ChatStreamBody({
         sessionId={sessionId}
         isLoading={isLoading}
         messages={messages}
+        codeChanges={codeChanges}
         onResolveDeleteConfirmation={onResolveDeleteConfirmation}
         onResolveGitConfirmation={onResolveGitConfirmation}
         onResolveConnectInput={onResolveConnectInput}
@@ -3073,7 +3023,7 @@ export function ChatPanel({
   elementAttachments = [],
   onRemoveElementAttachment,
 }: ChatPanelProps) {
-  const planSteps = contextData?.planSteps ?? [];
+
   const composerRef = useRef<HTMLDivElement>(null);
   const [isFocused, setIsFocused] = useState(false);
   const [attachmentFiles, setAttachmentFiles] = useState<AttachmentData[]>([]);
@@ -3526,6 +3476,7 @@ export function ChatPanel({
               sessionId={sessionId}
               isLoading={isLoading}
               messages={messages}
+              codeChanges={codeChanges}
               onResolveDeleteConfirmation={onResolveDeleteConfirmation}
               onResolveGitConfirmation={onResolveGitConfirmation}
               onResolveConnectInput={onResolveConnectInput}
@@ -3547,19 +3498,7 @@ export function ChatPanel({
 
         <div className="shrink-0 border-t bg-background">
           <div className="max-w-[720px] mx-auto w-full">
-            <PlanToggle planSteps={planSteps} isStreaming={isLoading} />
-            <div className="px-3 pb-1">
-              <CodeChangePanel
-                changes={codeChanges}
-                title="本次会话代码追踪"
-                emptyMessage="本轮对话还没有发生新增、修改或删除代码。"
-                collapsible
-                compact
-                defaultOpen={false}
-              />
-            </div>
-
-            <div className="p-3 pt-2">
+            <div className="p-3">
               <div className="flex flex-col rounded-lg border bg-muted/30 p-2 shadow-sm focus-within:ring-1 focus-within:ring-ring">
                 <input
                   ref={fileInputRef}
