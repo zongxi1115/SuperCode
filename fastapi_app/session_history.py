@@ -3,9 +3,10 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from agent import ChatSession, ConversationMessage
+from agent import ChatSession, ConversationMessage, StepRecord, ToolResult
 
 MAX_PLANNING_RECORD_CHARS = 1_200
+MAX_STORED_TOOL_RECORDS = 80
 
 
 def ensure_user_message_recorded(session: Any, user_message: str) -> None:
@@ -246,6 +247,145 @@ def record_confirmation_result_for_agent(session: Any, content: str) -> None:
     records = list(session.chat_session.state.data.get("external_records", []))
     records.append(text)
     session.chat_session.state.data["external_records"] = records[-20:]
+
+
+def record_tool_result_for_agent(
+    session: Any,
+    *,
+    tool_id: str,
+    tool_name: str,
+    output: Any,
+    success: bool = True,
+    state: str = "completed",
+    error_message: str | None = None,
+) -> bool:
+    if session.chat_session is None:
+        return False
+
+    normalized_tool_id = tool_id.strip()
+    if not normalized_tool_id:
+        return False
+
+    result = ToolResult(
+        name=tool_name,
+        output=output,
+        tool_call_id=normalized_tool_id,
+        success=success,
+        error_message=error_message,
+    )
+    agent_state = session.chat_session.state
+    updated_step = _replace_step_tool_result(
+        agent_state.data.get("step_records", []),
+        normalized_tool_id,
+        result,
+    )
+    _replace_latest_tool_result(agent_state.tool_results, normalized_tool_id, result)
+    _upsert_agent_tool_record(
+        agent_state.data,
+        normalized_tool_id,
+        tool_name,
+        output,
+        success=success,
+        state=state,
+        error_message=error_message,
+        matched_step=updated_step,
+    )
+    return updated_step is not None
+
+
+def _replace_step_tool_result(
+    step_records: object,
+    tool_id: str,
+    result: ToolResult,
+) -> StepRecord | None:
+    if not isinstance(step_records, list):
+        return None
+
+    for step in reversed(step_records):
+        if not isinstance(step, StepRecord):
+            continue
+        tool_calls = step.tool_calls or ([step.tool_call] if step.tool_call is not None else [])
+        if not any(tool_call is not None and tool_call.id == tool_id for tool_call in tool_calls):
+            continue
+
+        tool_results = step.tool_results or ([step.tool_result] if step.tool_result is not None else [])
+        next_results: list[ToolResult] = []
+        replaced = False
+        for existing_result in tool_results:
+            if existing_result is not None and existing_result.tool_call_id == tool_id:
+                next_results.append(result)
+                replaced = True
+            elif existing_result is not None:
+                next_results.append(existing_result)
+        if not replaced:
+            next_results.append(result)
+
+        step.tool_results = next_results
+        if step.tool_call is not None and step.tool_call.id == tool_id:
+            step.tool_result = result
+        return step
+
+    return None
+
+
+def _replace_latest_tool_result(
+    tool_results: list[ToolResult],
+    tool_id: str,
+    result: ToolResult,
+) -> None:
+    for index, existing_result in enumerate(tool_results):
+        if existing_result.tool_call_id == tool_id:
+            tool_results[index] = result
+            return
+    tool_results.append(result)
+
+
+def _upsert_agent_tool_record(
+    state_data: dict[str, Any],
+    tool_id: str,
+    tool_name: str,
+    output: Any,
+    *,
+    success: bool,
+    state: str,
+    error_message: str | None,
+    matched_step: StepRecord | None,
+) -> None:
+    records = [
+        record
+        for record in list(state_data.get("tool_records", []))
+        if isinstance(record, dict)
+    ]
+    next_record: dict[str, Any] = {
+        "id": tool_id,
+        "name": tool_name,
+        "output": output,
+        "success": success,
+        "state": state,
+        "error_message": error_message,
+    }
+    if matched_step is not None:
+        next_record["turn_index"] = matched_step.turn_index
+        next_record["step_index"] = matched_step.index
+        matching_call = next(
+            (
+                tool_call
+                for tool_call in (matched_step.tool_calls or ([matched_step.tool_call] if matched_step.tool_call is not None else []))
+                if tool_call is not None and tool_call.id == tool_id
+            ),
+            None,
+        )
+        if matching_call is not None:
+            next_record["arguments"] = matching_call.arguments
+
+    for index, record in enumerate(records):
+        if str(record.get("id") or "") == tool_id:
+            records[index] = {**record, **next_record}
+            break
+    else:
+        records.append(next_record)
+
+    state_data["tool_records"] = records[-MAX_STORED_TOOL_RECORDS:]
 
 
 def build_tool_records_from_history(

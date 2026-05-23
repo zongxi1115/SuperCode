@@ -200,12 +200,12 @@ class AgentContextRecordTests(unittest.TestCase):
         ]
         state.data["active_skills"] = [
             {
-                "id": "supercode-chat-ui",
-                "name": "supercode-chat-ui",
-                "description": "负责聊天 UI、composer 和 mention 行为。",
+                "id": "frontend-design",
+                "name": "frontend-design",
+                "description": "Build polished frontend UI, components, pages, layouts, UX, responsive design.",
                 "scope": "builtin",
-                "sourcePath": "builtin_skills/supercode-chat-ui/SKILL.md",
-                "content": "保持 mention token 稳定，并同时更新 chat-panel.tsx 与 chat-composer-editor.tsx。",
+                "sourcePath": "builtin_skills/frontend-design/SKILL.md",
+                "content": "Keep typography sized to the container and verify responsive UI behavior.",
             }
         ]
 
@@ -218,8 +218,8 @@ class AgentContextRecordTests(unittest.TestCase):
         self.assertEqual(messages[-1]["content"], "继续完成聊天框改造")
         skill_context_message = messages[0]["content"]
         self.assertIn("[已激活技能]", skill_context_message)
-        self.assertIn("supercode-chat-ui", skill_context_message)
-        self.assertIn("chat-composer-editor.tsx", skill_context_message)
+        self.assertIn("frontend-design", skill_context_message)
+        self.assertIn("responsive UI behavior", skill_context_message)
 
     def test_coding_brain_includes_available_skill_catalog_for_autonomous_discovery(self) -> None:
         brain = CodingPromptBrain(client=object())
@@ -231,15 +231,15 @@ class AgentContextRecordTests(unittest.TestCase):
         ]
         state.data["available_skills"] = [
             {
-                "id": "supercode-chat-ui",
-                "name": "supercode-chat-ui",
-                "description": "修改聊天 UI、composer 和 mention 菜单。",
+                "id": "frontend-design",
+                "name": "frontend-design",
+                "description": "Build polished frontend UI, components, pages, layouts, UX, responsive design.",
                 "scope": "builtin",
             },
             {
-                "id": "supercode-agent-runtime",
-                "name": "supercode-agent-runtime",
-                "description": "处理后端会话运行时与 SSE。",
+                "id": "systematic-debugging",
+                "name": "systematic-debugging",
+                "description": "Systematic bug diagnosis for debug, broken, failing, error, regression, flaky, performance.",
                 "scope": "builtin",
             },
         ]
@@ -253,8 +253,8 @@ class AgentContextRecordTests(unittest.TestCase):
         self.assertEqual(messages[-1]["content"], "继续改造聊天框")
         catalog_message = messages[0]["content"]
         self.assertIn("[技能目录]", catalog_message)
-        self.assertIn("supercode-chat-ui", catalog_message)
-        self.assertIn("composer", catalog_message)
+        self.assertIn("frontend-design", catalog_message)
+        self.assertIn("responsive", catalog_message)
 
 
 if __name__ == "__main__":

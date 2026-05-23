@@ -4,10 +4,11 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 type ResizableHandleProps = {
   side: 'left' | 'right';
   onResize: (delta: number) => void;
+  onResizeStateChange?: (isResizing: boolean) => void;
   className?: string;
 };
 
-export function ResizableHandle({ side, onResize, className }: ResizableHandleProps) {
+export function ResizableHandle({ side, onResize, onResizeStateChange, className }: ResizableHandleProps) {
   const [isDragging, setIsDragging] = useState(false);
   const isDraggingRef = useRef(false);
   const lastXRef = useRef(0);
@@ -18,7 +19,8 @@ export function ResizableHandle({ side, onResize, className }: ResizableHandlePr
     isDraggingRef.current = true;
     lastXRef.current = e.clientX;
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
-  }, []);
+    onResizeStateChange?.(true);
+  }, [onResizeStateChange]);
 
   const handlePointerMove = useCallback(
     (e: React.PointerEvent) => {
@@ -33,7 +35,8 @@ export function ResizableHandle({ side, onResize, className }: ResizableHandlePr
   const handlePointerUp = useCallback(() => {
     setIsDragging(false);
     isDraggingRef.current = false;
-  }, []);
+    onResizeStateChange?.(false);
+  }, [onResizeStateChange]);
 
   useEffect(() => {
     if (isDragging) {

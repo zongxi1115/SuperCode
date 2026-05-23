@@ -51,6 +51,35 @@ export type CodeChangeRecord = {
   diffPreview: string;
 };
 
+export type SubagentStepSnapshot = {
+  id: string;
+  name: string;
+  status: 'running' | 'completed' | 'error' | 'paused' | string;
+  thought?: string;
+  error?: string;
+};
+
+export type SubagentSnapshot = {
+  id?: string;
+  kind?: string;
+  title?: string;
+  agentType?: string;
+  status: 'running' | 'completed' | 'error' | 'paused' | string;
+  task: string;
+  focusPaths?: string[];
+  currentThought?: string;
+  steps: SubagentStepSnapshot[];
+  stepCount: number;
+  filesRead: string[];
+  changedFiles: string[];
+  commandsRun: string[];
+  findings: string[];
+  recommendedFiles: string[];
+  toolNames?: string[];
+  finalOutput?: string;
+  error?: string;
+};
+
 export type ContentBlock =
   | { type: 'thinking'; text: string }
   | { type: 'tool_call'; toolCall: ToolCallRecord }
@@ -140,6 +169,15 @@ export type SkillSummary = {
   sourcePath?: string | null;
 };
 
+export type PluginSummary = {
+  id: string;
+  name: string;
+  description: string;
+  icon: string;
+  navSlot: string;
+  enabled: boolean;
+};
+
 export type SessionTokenUsage = {
   inputTokens: number;
   outputTokens: number;
@@ -205,6 +243,11 @@ export type SessionPayload = {
   modelId?: string | null;
   reasoningEffort?: string | null;
   mode: 'agent' | 'demo';
+  agentType?: string;
+  phase?: string;
+  routeState?: Record<string, unknown>;
+  deployState?: Record<string, unknown>;
+  planState?: Record<string, unknown>;
   isGenerating?: boolean;
   startupError?: string | null;
   envFile?: string | null;

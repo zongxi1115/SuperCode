@@ -20,6 +20,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import unquote
 
 from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -41,6 +42,10 @@ from coding_agent.tools import (
     init_git_repo,
 )
 from plan_agent import PlanPromptBrain, build_plan_tools
+from fastapi_app.agent_router import (
+    decide_agent_route_with_model,
+    normalize_route_state,
+)
 from fastapi_app.api_models import (
     ChatStreamRequest,
     ConnectToolSubmitRequest,
@@ -51,6 +56,10 @@ from fastapi_app.api_models import (
     FinishTaskRequest,
     GitCommitRequest,
     GitTagRequest,
+    KanbanBoardCreateRequest,
+    KanbanCardCreateRequest,
+    KanbanCardReorderRequest,
+    KanbanCardUpdateRequest,
     ModelConfigPayload,
     PlanSubmitRequest,
     PlanDraftUpdateRequest,
@@ -72,6 +81,8 @@ from fastapi_app.api_models import (
     ToolInputSubmitRequest,
     UIModelProviderPayload,
 )
+from fastapi_app.kanban_store import KanbanStore
+from fastapi_app.plugin_registry import list_builtin_plugins
 from fastapi_app.settings_store import (
     load_settings,
     save_settings,
@@ -101,6 +112,7 @@ from fastapi_app.session_history import (
     extract_terminal_output,
     finalize_plan_steps,
     record_confirmation_result_for_agent,
+    record_tool_result_for_agent,
     replace_assistant_text_part,
     seed_chat_session_history,
     sync_assistant_message_fields,
@@ -198,6 +210,7 @@ def _resolve_state_db_path() -> Path:
 
 STATE_DB_PATH = _resolve_state_db_path()
 _session_store = SQLiteSessionStateAdapter(STATE_DB_PATH)
+_kanban_store = KanbanStore(STATE_DB_PATH)
 
 class TerminalRuntime(TerminalRuntimeBase):
     def _get_pty_process_class(self) -> Any | None:
@@ -213,6 +226,7 @@ class UISession:
     mode: str = "demo"
     agent_type: str = "coding"
     phase: str = "idle"
+    route_state: dict[str, Any] = field(default_factory=dict)
     startup_error: str | None = None
     env_file: str | None = None
     selected_file_path: str | None = DEFAULT_SELECTED_FILE
@@ -253,6 +267,7 @@ class UISession:
                 workspace=resolve_workspace_path(self.workspace)
             )
         self.phase = normalize_session_phase(self.phase)
+        self.route_state = normalize_route_state(self.route_state)
         self.deploy_state = normalize_deploy_state(self.deploy_state)
         self.plan_state = normalize_plan_state(self.plan_state)
         self.token_usage = normalize_session_token_usage(self.token_usage)
@@ -272,6 +287,7 @@ class UISession:
             mode=self.mode,
             agentType=self.agent_type,
             phase=self.phase,
+            routeState=self.route_state,
             deployState=self.deploy_state,
             planState=self.plan_state,
             isGenerating=self.is_generating,
@@ -374,6 +390,7 @@ class UISession:
             reasoningEffort=self.reasoning_effort,
             agentType=self.agent_type,
             phase=self.phase,
+            routeState=self.route_state,
             deployState=self.deploy_state,
             planState=self.plan_state,
             selectedFilePath=self.selected_file_path,
@@ -841,6 +858,31 @@ def _sync_plan_steps_from_tasks(session: UISession) -> None:
         session.plan_steps = derived_steps
 
 
+def ensure_deploy_plan_steps(session: UISession) -> None:
+    if session.agent_type != "deploy" or session.plan_steps:
+        return
+    session.plan_steps = [
+        {
+            "id": "deploy-connect",
+            "title": "连接部署目标",
+            "description": "选择或填写部署目标信息，准备建立部署连接。",
+            "status": "running",
+        },
+        {
+            "id": "deploy-explore",
+            "title": "探索部署目录",
+            "description": "读取部署目录、配置文件和发布脚本，确认发布方式。",
+            "status": "pending",
+        },
+        {
+            "id": "deploy-execute",
+            "title": "执行部署命令",
+            "description": "同步文件或执行部署命令，并收集部署结果。",
+            "status": "pending",
+        },
+    ]
+
+
 def _build_task_payload(
     *,
     title: str,
@@ -1077,6 +1119,7 @@ def refresh_session_runtime_state(session: UISession) -> None:
     deploy_state = normalize_deploy_state(session.deploy_state)
     session.plan_state = normalize_plan_state(session.plan_state)
     _sync_plan_steps_from_tasks(session)
+    ensure_deploy_plan_steps(session)
     manager = session.deploy_connection_manager
     connections = manager.list_connections() if manager is not None else []
     deploy_state["connection_count"] = len(connections)
@@ -1128,6 +1171,7 @@ def build_agent_runtime_state(session: UISession) -> dict[str, Any]:
         "agent_type": session.agent_type,
         "phase": session.phase,
         "workspace": session.workspace,
+        "route_state": session.route_state,
         "deploy_state": session.deploy_state if session.agent_type == "deploy" else {},
         "plan_state": session.plan_state,
     }
@@ -1294,6 +1338,9 @@ def route_agent_type_for_message(session: UISession, user_message: str) -> str:
 
     active_deploy_session = bool(normalize_deploy_state(session.deploy_state).get("active_session_id"))
 
+    if _contains_any_keyword(text, CODING_ROUTE_KEYWORDS):
+        return "coding"
+
     if active_deploy_session and text in ROUTER_GENERIC_FOLLOWUPS:
         return "deploy"
     if active_deploy_session and session.agent_type == "deploy":
@@ -1302,9 +1349,6 @@ def route_agent_type_for_message(session: UISession, user_message: str) -> str:
     if _should_force_plan_route(session, text):
         return "plan"
 
-    if _contains_any_keyword(text, CODING_ROUTE_KEYWORDS):
-        return "coding"
-
     if _contains_any_keyword(text, DEPLOY_ROUTE_KEYWORDS):
         return "deploy"
 
@@ -1312,6 +1356,155 @@ def route_agent_type_for_message(session: UISession, user_message: str) -> str:
         return "plan"
 
     return "coding"
+
+
+def _fallback_route_decision(
+    session: UISession,
+    user_message: str,
+    *,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    previous_agent_type = session.agent_type
+    agent_type = route_agent_type_for_message(session, user_message)
+    return normalize_route_state(
+        {
+            "agentType": agent_type,
+            "confidence": 0.55,
+            "reason": reason or "模型路由不可用，已使用规则兜底选择智能体。",
+            "source": "fallback",
+            "fallbackUsed": True,
+            "keepCurrentAgent": agent_type == previous_agent_type,
+            "previousAgentType": previous_agent_type,
+        }
+    )
+
+
+def _forced_route_decision(session: UISession, agent_type: str) -> dict[str, Any]:
+    return normalize_route_state(
+        {
+            "agentType": agent_type,
+            "confidence": 1.0,
+            "reason": "用户在模式选择器中指定了智能体模式。",
+            "source": "forced",
+            "fallbackUsed": False,
+            "keepCurrentAgent": agent_type == session.agent_type,
+            "previousAgentType": session.agent_type,
+        }
+    )
+
+
+def _build_router_workspace_summary(session: UISession) -> dict[str, Any]:
+    return {
+        "looksEmpty": _workspace_looks_empty(session.workspace),
+        "selectedFilePath": session.selected_file_path,
+    }
+
+
+def _build_router_plan_summary(session: UISession) -> dict[str, Any]:
+    plan_state = normalize_plan_state(session.plan_state)
+    draft = plan_state.get("draft") if isinstance(plan_state.get("draft"), dict) else None
+    submitted = (
+        plan_state.get("last_submitted_plan")
+        if isinstance(plan_state.get("last_submitted_plan"), dict)
+        else None
+    )
+    active_task = _find_active_task(
+        _normalize_plan_tasks(plan_state.get("tasks")),
+        str(plan_state.get("active_task_id") or "").strip() or None,
+    )
+    return {
+        "status": plan_state.get("status"),
+        "hasDraft": bool(draft),
+        "hasSubmittedPlan": bool(submitted),
+        "draftTitle": str((draft or {}).get("title") or "").strip() or None,
+        "submittedTitle": str((submitted or {}).get("title") or "").strip() or None,
+        "pendingCodingInput": bool(plan_state.get("pending_coding_input")),
+        "activeTaskTitle": str((active_task or {}).get("title") or "").strip() or None,
+        "activeStepId": plan_state.get("active_step_id"),
+    }
+
+
+def _build_router_deploy_summary(session: UISession) -> dict[str, Any]:
+    deploy_state = normalize_deploy_state(session.deploy_state)
+    return {
+        "hasActiveSession": bool(deploy_state.get("active_session_id")),
+        "activeDisplayName": deploy_state.get("active_display_name"),
+        "activeHost": deploy_state.get("active_host"),
+        "pendingInputKind": deploy_state.get("pending_input_kind"),
+        "connectionCount": deploy_state.get("connection_count"),
+    }
+
+
+def _build_router_context(session: UISession) -> dict[str, Any]:
+    recent_user_messages = [
+        compact_text(str(message.get("content") or ""), 120)
+        for message in session.history_messages
+        if str(message.get("role") or "") == "user" and str(message.get("content") or "").strip()
+    ]
+    return {
+        "currentAgentType": session.agent_type,
+        "phase": session.phase,
+        "pending": {
+            "connectRequests": bool(session.pending_connect_requests),
+            "planQuestions": bool(session.pending_user_input_requests),
+        },
+        "plan": _build_router_plan_summary(session),
+        "deploy": _build_router_deploy_summary(session),
+        "workspace": _build_router_workspace_summary(session),
+        "recentUserMessages": recent_user_messages[-3:],
+    }
+
+
+def decide_route_for_message(session: UISession, user_message: str) -> dict[str, Any]:
+    text = _normalized_message_for_routing(user_message)
+    if not text:
+        return normalize_route_state(
+            {
+                "agentType": session.agent_type,
+                "confidence": 1.0,
+                "reason": "空消息保持当前智能体。",
+                "source": "fallback",
+                "fallbackUsed": True,
+                "keepCurrentAgent": True,
+                "previousAgentType": session.agent_type,
+            }
+        )
+
+    if session.pending_connect_requests:
+        return _fallback_route_decision(session, user_message, reason="当前正在等待部署连接信息，保持部署智能体。")
+    if session.pending_user_input_requests:
+        return _fallback_route_decision(session, user_message, reason="当前正在等待计划问题回答，保持计划智能体。")
+    pending_coding_input = str(normalize_plan_state(session.plan_state).get("pending_coding_input") or "").strip()
+    if pending_coding_input and text == _normalized_message_for_routing(pending_coding_input):
+        return normalize_route_state(
+            {
+                "agentType": "coding",
+                "confidence": 1.0,
+                "reason": "这是已提交计划生成的编码输入，直接进入编码智能体。",
+                "source": "fallback",
+                "fallbackUsed": False,
+                "keepCurrentAgent": session.agent_type == "coding",
+                "previousAgentType": session.agent_type,
+            }
+        )
+
+    if session.mode != "agent":
+        return _fallback_route_decision(session, user_message, reason="真实模型运行时不可用，已使用规则兜底选择智能体。")
+
+    try:
+        config, _model_ref = build_agent_config(ROOT, session.env_file)
+        config.reasoning_effort = None
+        return decide_agent_route_with_model(
+            OpenAICompatibleClient(config),
+            user_message=user_message,
+            context=_build_router_context(session),
+        )
+    except Exception as exc:  # noqa: BLE001 - 路由失败必须降级，不能阻断聊天
+        return _fallback_route_decision(
+            session,
+            user_message,
+            reason=f"模型路由失败，已使用规则兜底。原因：{compact_text(str(exc), 160)}",
+        )
 
 
 def rebuild_chat_session_for_agent_type(session: UISession, agent_type: str) -> None:
@@ -1348,16 +1541,22 @@ def route_session_for_user_message(
     user_message: str,
     forced_agent_type: str | None = None,
 ) -> None:
-    next_agent_type = forced_agent_type or route_agent_type_for_message(session, user_message)
+    route_state = (
+        _forced_route_decision(session, forced_agent_type)
+        if forced_agent_type
+        else decide_route_for_message(session, user_message)
+    )
+    next_agent_type = str(route_state.get("agentType") or session.agent_type)
+    session.route_state = normalize_route_state(route_state)
     if next_agent_type != session.agent_type or session.chat_session is None:
         rebuild_chat_session_for_agent_type(session, next_agent_type)
     else:
         session.agent_type = next_agent_type
 
-    session.plan_steps = []
     if session.agent_type == "plan":
         reset_phase_for_new_turn(session)
     elif session.agent_type != "deploy":
+        session.plan_steps = []
         set_session_phase(session, "idle")
     else:
         reset_phase_for_new_turn(session)
@@ -1408,6 +1607,7 @@ def hydrate_session_from_state(state: PersistedSessionState) -> UISession:
         mode="agent" if chat_session is not None else state.mode,
         agent_type=state.agent_type,
         phase=state.phase,
+        route_state=state.route_state,
         is_generating=state.is_generating,
         startup_error=startup_error if chat_session is None else state.startup_error,
         env_file=env_file_used or state.env_file,
@@ -1464,9 +1664,117 @@ def stop_session_execution(session: UISession) -> list[dict[str, Any]]:
     return terminated
 
 
+def normalize_workspace_identifier(workspace_id: str) -> str:
+    decoded = unquote(str(workspace_id or "").strip())
+    if not decoded:
+        raise HTTPException(status_code=400, detail="工作区不能为空。")
+    return normalize_workspace_impl(decoded, DEFAULT_WORKSPACE)
+
+
+@app.get("/api/plugins")
+async def get_plugins() -> JSONResponse:
+    return JSONResponse({"plugins": list_builtin_plugins()})
+
+
 @app.get("/api/workspaces")
 async def get_workspaces() -> JSONResponse:
     return JSONResponse({"workspaces": list_workspace_options()})
+
+
+@app.get("/api/workspaces/{workspace_id:path}/kanban/boards")
+async def list_kanban_boards(workspace_id: str) -> JSONResponse:
+    workspace = normalize_workspace_identifier(workspace_id)
+    boards = _kanban_store.list_boards(workspace)
+    return JSONResponse({"boards": boards})
+
+
+@app.post("/api/workspaces/{workspace_id:path}/kanban/boards")
+async def create_kanban_board(
+    workspace_id: str,
+    request: KanbanBoardCreateRequest,
+) -> JSONResponse:
+    workspace = normalize_workspace_identifier(workspace_id)
+    board = _kanban_store.create_board(
+        workspace,
+        name=request.name,
+        description=request.description,
+    )
+    return JSONResponse({"board": board})
+
+
+@app.get("/api/workspaces/{workspace_id:path}/kanban/boards/{board_id}")
+async def get_kanban_board(workspace_id: str, board_id: str) -> JSONResponse:
+    workspace = normalize_workspace_identifier(workspace_id)
+    board = _kanban_store.get_board(workspace, board_id)
+    return JSONResponse({"board": board})
+
+
+@app.post("/api/workspaces/{workspace_id:path}/kanban/cards")
+async def create_kanban_card(
+    workspace_id: str,
+    request: KanbanCardCreateRequest,
+) -> JSONResponse:
+    workspace = normalize_workspace_identifier(workspace_id)
+    card = _kanban_store.create_card(
+        workspace,
+        board_id=request.boardId,
+        title=request.title,
+        column_id=request.columnId,
+        status=request.status,
+        description=request.description,
+        priority=request.priority,
+        labels=request.labels,
+        assignee=request.assignee,
+    )
+    board = _kanban_store.get_board(workspace, str(card["boardId"]))
+    return JSONResponse({"card": card, "board": board})
+
+
+@app.patch("/api/workspaces/{workspace_id:path}/kanban/cards/{card_id}")
+async def update_kanban_card(
+    workspace_id: str,
+    card_id: str,
+    request: KanbanCardUpdateRequest,
+) -> JSONResponse:
+    workspace = normalize_workspace_identifier(workspace_id)
+    card = _kanban_store.update_card(
+        workspace,
+        card_id,
+        title=request.title,
+        description=request.description,
+        priority=request.priority,
+        labels=request.labels,
+        assignee=request.assignee,
+        column_id=request.columnId,
+        status=request.status,
+        position=request.position,
+    )
+    board = _kanban_store.get_board(workspace, str(card["boardId"]))
+    return JSONResponse({"card": card, "board": board})
+
+
+@app.post("/api/workspaces/{workspace_id:path}/kanban/cards/reorder")
+async def reorder_kanban_cards(
+    workspace_id: str,
+    request: KanbanCardReorderRequest,
+) -> JSONResponse:
+    workspace = normalize_workspace_identifier(workspace_id)
+    board = _kanban_store.reorder_cards(
+        workspace,
+        board_id=request.boardId,
+        card_id=request.cardId,
+        column_id=request.columnId,
+        target_column_id=request.targetColumnId,
+        ordered_card_ids=request.orderedCardIds,
+    )
+    return JSONResponse({"board": board})
+
+
+@app.delete("/api/workspaces/{workspace_id:path}/kanban/cards/{card_id}")
+async def delete_kanban_card(workspace_id: str, card_id: str) -> JSONResponse:
+    workspace = normalize_workspace_identifier(workspace_id)
+    result = _kanban_store.delete_card(workspace, card_id)
+    return JSONResponse(result)
 
 
 @app.get("/api/models")
@@ -1557,6 +1865,7 @@ async def switch_session_model(session_id: str, request: SwitchModelRequest) -> 
         workspace=resolve_workspace_path(session.workspace),
         tool_context_metadata={
             "include_thoughts_in_context": config.include_thoughts_in_context,
+            "llm_client": client,
         },
     )
     interactive_command_session = session.interactive_command_session
@@ -1589,6 +1898,7 @@ async def switch_session_model(session_id: str, request: SwitchModelRequest) -> 
         "mode": session.mode,
         "agentType": session.agent_type,
         "phase": session.phase,
+        "routeState": session.route_state,
         "deployState": session.deploy_state,
         "planState": session.plan_state,
         "envFile": session.env_file,
@@ -1684,6 +1994,7 @@ async def create_session(request: CreateSessionRequest) -> JSONResponse:
             mode=session.mode,
             agentType=session.agent_type,
             phase=session.phase,
+            routeState=session.route_state,
             deployState=session.deploy_state,
             planState=session.plan_state,
             isGenerating=session.is_generating,
@@ -1725,6 +2036,7 @@ async def get_session_snapshot(session_id: str) -> JSONResponse:
             mode=session.mode,
             agentType=session.agent_type,
             phase=session.phase,
+            routeState=session.route_state,
             deployState=session.deploy_state,
             planState=session.plan_state,
             isGenerating=session.is_generating,
@@ -2768,6 +3080,17 @@ def activate_plan_for_coding(session: UISession, request: PlanSubmitRequest) -> 
         last_submitted_plan=plan,
         pending_coding_input=coding_input,
     )
+    session.route_state = normalize_route_state(
+        {
+            "agentType": "coding",
+            "confidence": 1.0,
+            "reason": "计划已提交，自动切换到编码智能体执行计划。",
+            "source": "forced",
+            "fallbackUsed": False,
+            "keepCurrentAgent": session.agent_type == "coding",
+            "previousAgentType": session.agent_type,
+        }
+    )
     rebuild_chat_session_for_agent_type(session, "coding")
     session.plan_steps = []
     set_session_phase(session, "idle")
@@ -2863,6 +3186,14 @@ async def submit_tool_input(
                 **tool_record,
             },
         )
+    record_tool_result_for_agent(
+        session,
+        tool_id=tool_id,
+        tool_name=tool_name,
+        output=output,
+        success=True,
+        state="output-available",
+    )
     record_confirmation_result_for_agent(
         session,
         _format_tool_input_answers_for_agent(title, answers),
@@ -2898,6 +3229,7 @@ async def submit_plan(
             "ok": True,
             "agentType": session.agent_type,
             "phase": session.phase,
+            "routeState": session.route_state,
             "planState": session.plan_state,
             "plan": plan,
             "codingInput": coding_input,
@@ -3338,6 +3670,7 @@ def build_chat_session(
             tool_context_metadata={
                 "include_thoughts_in_context": config.include_thoughts_in_context,
                 "project_root": str(ROOT),
+                "llm_client": client,
             },
         )
         return ChatSession(agent=agent), config.model, None, normalized_model_ref, config.reasoning_effort
@@ -4222,6 +4555,7 @@ def _rebuild_chat_session_for_existing_history(
     thoughts: list[str],
     plan_steps: list[dict[str, str]],
     plan_state: dict[str, Any],
+    route_state: dict[str, Any],
     deploy_state: dict[str, Any],
     startup_error: str | None,
     mode: str,
@@ -4243,6 +4577,7 @@ def _rebuild_chat_session_for_existing_history(
         mode="agent" if chat_session is not None else mode,
         agent_type=agent_type,
         phase=phase,
+        route_state=deepcopy(route_state),
         is_generating=False,
         startup_error=startup_error if chat_session is not None else (build_error or startup_error),
         env_file=env_file_used or env_file,
@@ -4297,6 +4632,7 @@ def fork_session_from_current(session: UISession) -> UISession:
         thoughts=session.thoughts,
         plan_steps=session.plan_steps,
         plan_state=session.plan_state,
+        route_state=session.route_state,
         deploy_state=session.deploy_state,
         startup_error=session.startup_error,
         mode=session.mode,
@@ -4969,6 +5305,7 @@ def build_session_state_payload(session: UISession) -> dict[str, Any]:
     return {
         "agentType": session.agent_type,
         "phase": session.phase,
+        "routeState": session.route_state,
         "deployState": session.deploy_state,
         "planState": session.plan_state,
         "messageCount": len(session.history_messages),

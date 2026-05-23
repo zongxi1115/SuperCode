@@ -3,11 +3,15 @@
 import { cn } from "@/lib/utils";
 import { EditorContent, useEditor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
+import { Mark, mergeAttributes } from "@tiptap/core";
+import { Table } from "@tiptap/extension-table";
+import { TableRow } from "@tiptap/extension-table-row";
+import { TableCell } from "@tiptap/extension-table-cell";
+import { TableHeader } from "@tiptap/extension-table-header";
 import { marked } from "marked";
 import TurndownService from "turndown";
 import {
   Bold,
-  ChevronDown,
   Code,
   Heading1,
   Heading2,
@@ -18,9 +22,18 @@ import {
   Quote,
   Strikethrough,
   Italic,
+  MessageSquarePlus,
+  X,
+  TableIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
+
+export type Annotation = {
+  id: string;
+  text: string;
+  selectedText: string;
+};
 
 type SlashCommand = {
   id: string;
@@ -44,12 +57,75 @@ type PlanRichTextEditorProps = {
   value: string;
   onChange: (markdown: string) => void;
   autoFocus?: boolean;
+  onAnnotationsChange?: (annotations: Annotation[]) => void;
 };
+
+const AnnotationMark = Mark.create({
+  name: "annotation",
+
+  addAttributes() {
+    return {
+      annotationId: {
+        default: null,
+        parseHTML: (el: HTMLElement) => el.getAttribute("data-annotation-id"),
+        renderHTML: (attrs: Record<string, unknown>) => ({
+          "data-annotation-id": attrs.annotationId,
+        }),
+      },
+    };
+  },
+
+  parseHTML() {
+    return [{ tag: "span[data-annotation-id]" }];
+  },
+
+  renderHTML({ HTMLAttributes }) {
+    return [
+      "span",
+      mergeAttributes(HTMLAttributes, {
+        class: "annotation-highlight",
+      }),
+      0,
+    ];
+  },
+
+  addCommands() {
+    return {
+      setAnnotation:
+        (annotationId: string) =>
+        ({ commands }) => {
+          return commands.setMark(this.name, { annotationId });
+        },
+      unsetAnnotation:
+        () =>
+        ({ commands }) => {
+          return commands.unsetMark(this.name);
+        },
+    };
+  },
+
+  addKeyboardShortcuts() {
+    return {};
+  },
+});
 
 const turndown = new TurndownService({
   bulletListMarker: "-",
   codeBlockStyle: "fenced",
   headingStyle: "atx",
+});
+
+turndown.addRule("annotation", {
+  filter: "span[data-annotation-id]",
+  replacement: (content: string, node: HTMLElement) => {
+    const id = node.getAttribute("data-annotation-id");
+    return `{^${id}|${content}^}`;
+  },
+});
+
+turndown.addRule("table", {
+  filter: "table",
+  replacement: (content: string) => content,
 });
 
 function normalizeMarkdown(value: string) {
@@ -61,16 +137,32 @@ function markdownToHtml(markdown: string) {
   if (!normalized) {
     return "<p></p>";
   }
-  return marked.parse(normalized, { async: false }) as string;
+  const html = marked.parse(normalized, { async: false }) as string;
+  return html.replace(/\{\^([^}|]+)\|([^}]+)\^\}/g, (_match, id, content) => {
+    return `<span data-annotation-id="${id}">${content}</span>`;
+  });
 }
 
 function htmlToMarkdown(html: string) {
   return normalizeMarkdown(turndown.turndown(html));
 }
 
+function extractAnnotationIdsFromHtml(html: string): string[] {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, "text/html");
+  const spans = doc.querySelectorAll("span[data-annotation-id]");
+  const seen = new Set<string>();
+  spans.forEach((span) => {
+    const id = span.getAttribute("data-annotation-id");
+    if (id) seen.add(id);
+  });
+  return Array.from(seen);
+}
+
 function getSlashMenuState(
   editor: NonNullable<ReturnType<typeof useEditor>>,
   anchorRect: DOMRect | null,
+  scrollOffset: { x: number; y: number },
 ): SlashMenuState | null {
   if (editor.view.composing || !editor.state.selection.empty) return null;
 
@@ -93,9 +185,9 @@ function getSlashMenuState(
     from: from - query.length - 1,
     to: from,
     query,
-    left: coords.left - (anchorRect?.left ?? 0),
-    top: coords.top - (anchorRect?.top ?? 0),
-    bottom: coords.bottom - (anchorRect?.top ?? 0),
+    left: coords.left - (anchorRect?.left ?? 0) + scrollOffset.x,
+    top: coords.top - (anchorRect?.top ?? 0) + scrollOffset.y,
+    bottom: coords.bottom - (anchorRect?.top ?? 0) + scrollOffset.y,
     viewportBottom: coords.bottom,
   };
 }
@@ -167,6 +259,7 @@ export function PlanRichTextEditor({
   value,
   onChange,
   autoFocus = false,
+  onAnnotationsChange,
 }: PlanRichTextEditorProps) {
   const anchorRef = useRef<HTMLDivElement>(null);
   const lastMarkdownRef = useRef(normalizeMarkdown(value));
@@ -180,6 +273,29 @@ export function PlanRichTextEditor({
     index: 0,
   });
   const [bubbleToolbar, setBubbleToolbar] = useState<BubbleToolbarState | null>(null);
+  const [annotations, setAnnotations] = useState<Annotation[]>([]);
+  const [annotationPopup, setAnnotationPopup] = useState<{
+    left: number;
+    top: number;
+  } | null>(null);
+  const annotationInputRef = useRef<HTMLInputElement>(null);
+  const pendingAnnotationIdRef = useRef<string | null>(null);
+  const pendingSelectedTextRef = useRef<string>("");
+
+  const syncAnnotations = useCallback(
+    (html: string) => {
+      const idsInDom = extractAnnotationIdsFromHtml(html);
+      setAnnotations((prev) => {
+        const kept = prev.filter((a) => idsInDom.includes(a.id));
+        return kept;
+      });
+    },
+    [],
+  );
+
+  useEffect(() => {
+    onAnnotationsChange?.(annotations);
+  }, [annotations, onAnnotationsChange]);
 
   const updateBubbleToolbar = useCallback((currentEditor: NonNullable<ReturnType<typeof useEditor>>) => {
     const { from, to, empty } = currentEditor.state.selection;
@@ -192,10 +308,12 @@ export function PlanRichTextEditor({
       setBubbleToolbar(null);
       return;
     }
+    const scrollLeft = anchorRef.current?.scrollLeft ?? 0;
+    const scrollTop = anchorRef.current?.scrollTop ?? 0;
     const fromCoords = currentEditor.view.coordsAtPos(from);
     const toCoords = currentEditor.view.coordsAtPos(to);
-    const left = (fromCoords.left + toCoords.left) / 2 - anchorRect.left;
-    const top = fromCoords.top - anchorRect.top - 10;
+    const left = (fromCoords.left + toCoords.left) / 2 - anchorRect.left + scrollLeft;
+    const top = fromCoords.top - anchorRect.top + scrollTop - 10;
     setBubbleToolbar({ left, top });
   }, []);
 
@@ -206,6 +324,13 @@ export function PlanRichTextEditor({
         StarterKit.configure({
           hardBreak: true,
         }),
+        AnnotationMark,
+        Table.configure({
+          resizable: false,
+        }),
+        TableRow,
+        TableCell,
+        TableHeader,
       ],
       content: markdownToHtml(value),
       autofocus: autoFocus ? "end" : false,
@@ -217,6 +342,7 @@ export function PlanRichTextEditor({
       },
       onCreate({ editor: createdEditor }) {
         lastMarkdownRef.current = htmlToMarkdown(createdEditor.getHTML());
+        syncAnnotations(createdEditor.getHTML());
       },
       onUpdate({ editor: currentEditor }) {
         const markdown = htmlToMarkdown(currentEditor.getHTML());
@@ -224,11 +350,12 @@ export function PlanRichTextEditor({
         if (!isApplyingExternalValueRef.current) {
           onChange(markdown);
         }
-        setSlashMenu(getSlashMenuState(currentEditor, anchorRef.current?.getBoundingClientRect() ?? null));
+        setSlashMenu(getSlashMenuState(currentEditor, anchorRef.current?.getBoundingClientRect() ?? null, { x: anchorRef.current?.scrollLeft ?? 0, y: anchorRef.current?.scrollTop ?? 0 }));
         updateBubbleToolbar(currentEditor);
+        syncAnnotations(currentEditor.getHTML());
       },
       onSelectionUpdate({ editor: currentEditor }) {
-        setSlashMenu(getSlashMenuState(currentEditor, anchorRef.current?.getBoundingClientRect() ?? null));
+        setSlashMenu(getSlashMenuState(currentEditor, anchorRef.current?.getBoundingClientRect() ?? null, { x: anchorRef.current?.scrollLeft ?? 0, y: anchorRef.current?.scrollTop ?? 0 }));
         updateBubbleToolbar(currentEditor);
       },
     },
@@ -242,10 +369,11 @@ export function PlanRichTextEditor({
     isApplyingExternalValueRef.current = true;
     editor.commands.setContent(markdownToHtml(normalized), false);
     lastMarkdownRef.current = normalized;
+    syncAnnotations(editor.getHTML());
     queueMicrotask(() => {
       isApplyingExternalValueRef.current = false;
     });
-  }, [editor, value]);
+  }, [editor, syncAnnotations, value]);
 
   const slashCommands = useMemo<SlashCommand[]>(() => {
     if (!editor) return [];
@@ -300,6 +428,18 @@ export function PlanRichTextEditor({
         run: () => editor.chain().focus().toggleCodeBlock().run(),
       },
       {
+        id: "table",
+        label: "表格",
+        description: "插入3x3表格",
+        keywords: ["table", "grid", "biaoge"],
+        run: () =>
+          editor
+            .chain()
+            .focus()
+            .insertTable({ rows: 3, cols: 3, withHeaderRow: true })
+            .run(),
+      },
+      {
         id: "divider",
         label: "分割线",
         description: "插入章节分隔",
@@ -337,9 +477,85 @@ export function PlanRichTextEditor({
     [editor, slashMenu],
   );
 
+  const openAnnotationPopup = useCallback(() => {
+    if (!editor) return;
+    const { from, to, empty } = editor.state.selection;
+    if (empty || from === to) return;
+
+    const selectedText = editor.state.doc.textBetween(from, to, "\n");
+    const id = `ann-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    pendingAnnotationIdRef.current = id;
+    pendingSelectedTextRef.current = selectedText;
+
+    const anchorRect = anchorRef.current?.getBoundingClientRect();
+    if (!anchorRect) return;
+    const scrollLeft = anchorRef.current?.scrollLeft ?? 0;
+    const scrollTop = anchorRef.current?.scrollTop ?? 0;
+    const fromCoords = editor.view.coordsAtPos(from);
+    const toCoords = editor.view.coordsAtPos(to);
+    const left = (fromCoords.left + toCoords.left) / 2 - anchorRect.left + scrollLeft;
+    const top = toCoords.bottom - anchorRect.top + scrollTop + 6;
+
+    setBubbleToolbar(null);
+    setAnnotationPopup({ left: Math.max(0, left - 140), top });
+    setTimeout(() => annotationInputRef.current?.focus(), 50);
+  }, [editor]);
+
+  const confirmAnnotation = useCallback(() => {
+    if (!editor || !pendingAnnotationIdRef.current) return;
+    const id = pendingAnnotationIdRef.current;
+    const note = annotationInputRef.current?.value ?? "";
+
+    editor.chain().focus().setAnnotation(id).run();
+
+    setAnnotations((prev) => [
+      ...prev,
+      { id, text: note, selectedText: pendingSelectedTextRef.current },
+    ]);
+
+    pendingAnnotationIdRef.current = null;
+    pendingSelectedTextRef.current = "";
+    setAnnotationPopup(null);
+    if (annotationInputRef.current) annotationInputRef.current.value = "";
+  }, [editor]);
+
+  const removeAnnotation = useCallback(
+    (id: string) => {
+      setAnnotations((prev) => prev.filter((a) => a.id !== id));
+      if (editor) {
+        const { state, view } = editor;
+        const { doc } = state;
+        let tr = state.tr;
+        let modified = false;
+        doc.descendants((node, pos) => {
+          if (node.marks) {
+            const mark = node.marks.find(
+              (m) => m.type.name === "annotation" && m.attrs.annotationId === id,
+            );
+            if (mark) {
+              tr = tr.removeMark(pos, pos + node.nodeSize, mark);
+              modified = true;
+            }
+          }
+        });
+        if (modified) view.dispatch(tr);
+      }
+    },
+    [editor],
+  );
+
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
       if (!editor) return;
+
+      if (annotationPopup) {
+        if (event.key === "Escape") {
+          setAnnotationPopup(null);
+          pendingAnnotationIdRef.current = null;
+          return;
+        }
+        return;
+      }
 
       if (slashMenu) {
         if (event.key === "ArrowDown" && filteredSlashCommands.length > 0) {
@@ -391,6 +607,7 @@ export function PlanRichTextEditor({
       selectedSlashIndex,
       slashMenu,
       slashMenuKey,
+      annotationPopup,
     ],
   );
 
@@ -511,6 +728,16 @@ export function PlanRichTextEditor({
           <Quote className="size-3.5" />
         </ToolbarButton>
         <ToolbarButton
+          label="表格"
+          active={editor?.isActive("table")}
+          onMouseDown={(event) => {
+            event.preventDefault();
+            editor?.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run();
+          }}
+        >
+          <TableIcon className="size-3.5" />
+        </ToolbarButton>
+        <ToolbarButton
           label="分割线"
           onMouseDown={(event) => {
             event.preventDefault();
@@ -519,17 +746,23 @@ export function PlanRichTextEditor({
         >
           <Minus className="size-3.5" />
         </ToolbarButton>
-        <div className="ml-auto flex items-center gap-1 rounded-full bg-background/80 px-2.5 py-1 text-[11px] text-muted-foreground shadow-sm">
-          <ChevronDown className="size-3" />
-          输入 <span className="font-medium text-foreground">/</span> 打开结构菜单
-        </div>
+        <div className="mx-1 h-5 w-px bg-border/70" />
+        <ToolbarButton
+          label="批注"
+          onMouseDown={(event) => {
+            event.preventDefault();
+            openAnnotationPopup();
+          }}
+        >
+          <MessageSquarePlus className="size-3.5" />
+        </ToolbarButton>
       </div>
 
       <div ref={anchorRef} className="relative flex-1 min-h-0 overflow-auto">
         <EditorContent editor={editor} onKeyDown={handleKeyDown} />
 
         <AnimatePresence>
-          {bubbleToolbar && !slashMenu && editor && (
+          {bubbleToolbar && !slashMenu && !annotationPopup && editor && (
             <motion.div
               initial={{ opacity: 0, y: 4, scale: 0.95 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -645,6 +878,69 @@ export function PlanRichTextEditor({
               >
                 <Quote className="size-3.5" />
               </BubbleToolbarButton>
+              <div className="mx-0.5 h-4 w-px bg-border/60" />
+              <BubbleToolbarButton
+                label="添加批注"
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  openAnnotationPopup();
+                }}
+              >
+                <MessageSquarePlus className="size-3.5" />
+              </BubbleToolbarButton>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        <AnimatePresence>
+          {annotationPopup && (
+            <motion.div
+              initial={{ opacity: 0, y: -4, scale: 0.95 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -4, scale: 0.95 }}
+              transition={{ duration: 0.15, ease: [0.25, 0.1, 0.25, 1] }}
+              className="absolute z-50 flex items-center gap-2 rounded-lg border border-amber-300/50 bg-amber-50/98 px-3 py-2 shadow-lg backdrop-blur dark:border-amber-600/40 dark:bg-amber-950/90"
+              style={{
+                left: Math.max(0, annotationPopup.left),
+                top: annotationPopup.top,
+                minWidth: 280,
+              }}
+              onMouseDown={(e) => e.preventDefault()}
+            >
+              <MessageSquarePlus className="size-4 shrink-0 text-amber-600 dark:text-amber-400" />
+              <input
+                ref={annotationInputRef}
+                type="text"
+                placeholder="输入批注内容…"
+                className="min-w-0 flex-1 bg-transparent text-sm text-amber-900 outline-none placeholder:text-amber-400/60 dark:text-amber-100 dark:placeholder:text-amber-500/50"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    confirmAnnotation();
+                  }
+                  if (e.key === "Escape") {
+                    setAnnotationPopup(null);
+                    pendingAnnotationIdRef.current = null;
+                  }
+                }}
+              />
+              <button
+                type="button"
+                onClick={confirmAnnotation}
+                className="shrink-0 rounded-md bg-amber-500/20 px-2.5 py-0.5 text-xs font-medium text-amber-700 transition-colors hover:bg-amber-500/30 dark:text-amber-300 dark:hover:bg-amber-500/20"
+              >
+                确认
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setAnnotationPopup(null);
+                  pendingAnnotationIdRef.current = null;
+                }}
+                className="shrink-0 rounded p-0.5 text-amber-400/60 transition-colors hover:text-amber-600"
+              >
+                <X className="size-3.5" />
+              </button>
             </motion.div>
           )}
         </AnimatePresence>
@@ -689,6 +985,8 @@ export function PlanRichTextEditor({
                       <Quote className="size-4" />
                     ) : command.id === "code-block" ? (
                       <Code className="size-4" />
+                    ) : command.id === "table" ? (
+                      <TableIcon className="size-4" />
                     ) : (
                       <Minus className="size-4" />
                     )}
@@ -709,6 +1007,104 @@ export function PlanRichTextEditor({
           </div>
         ) : null}
       </div>
+
+      <AnimatePresence>
+        {annotations.length > 0 && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.2, ease: [0.25, 0.1, 0.25, 1] }}
+            className="overflow-hidden border-t border-border/60"
+          >
+            <div className="bg-amber-50/50 px-4 py-2.5 dark:bg-amber-950/20">
+              <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-amber-700 dark:text-amber-400">
+                <MessageSquarePlus className="size-3.5" />
+                批注 ({annotations.length})
+              </div>
+              <div className="flex flex-col gap-1.5">
+                {annotations.map((ann, index) => (
+                  <div
+                    key={ann.id}
+                    className="group flex items-start gap-2 rounded-md border border-amber-200/50 bg-white/60 px-2.5 py-1.5 text-xs dark:border-amber-800/30 dark:bg-amber-950/20"
+                  >
+                    <span className="mt-0.5 inline-flex size-4 shrink-0 items-center justify-center rounded-full bg-amber-400/20 text-[10px] font-bold text-amber-600 dark:bg-amber-400/15 dark:text-amber-400">
+                      {index + 1}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <span className="text-amber-800/70 dark:text-amber-300/60">
+                        &ldquo;{ann.selectedText}&rdquo;
+                      </span>
+                      {ann.text && (
+                        <span className="ml-1 text-foreground/80">&mdash; {ann.text}</span>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => removeAnnotation(ann.id)}
+                      className="shrink-0 rounded p-0.5 text-muted-foreground/40 transition-colors hover:text-destructive"
+                      aria-label="删除批注"
+                    >
+                      <X className="size-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <style>{`
+        .annotation-highlight {
+          background-color: rgba(251, 191, 36, 0.25);
+          border-bottom: 2px solid rgba(251, 191, 36, 0.5);
+          border-radius: 2px;
+          cursor: default;
+        }
+        .dark .annotation-highlight {
+          background-color: rgba(251, 191, 36, 0.15);
+          border-bottom-color: rgba(251, 191, 36, 0.35);
+        }
+        .ProseMirror table {
+          border-collapse: collapse;
+          table-layout: fixed;
+          width: 100%;
+          margin: 0;
+          overflow: hidden;
+        }
+        .ProseMirror td,
+        .ProseMirror th {
+          border: 1px solid var(--border, #e2e8f0);
+          min-width: 80px;
+          padding: 6px 10px;
+          position: relative;
+          vertical-align: top;
+          box-sizing: border-box;
+        }
+        .ProseMirror th {
+          background-color: var(--muted, #f1f5f9);
+          font-weight: 600;
+        }
+        .ProseMirror td > *,
+        .ProseMirror th > * {
+          margin: 0;
+        }
+        .dark .ProseMirror th {
+          background-color: var(--muted, #1e293b);
+        }
+        .dark .ProseMirror td,
+        .dark .ProseMirror th {
+          border-color: var(--border, #334155);
+        }
+        .ProseMirror .selectedCell::after {
+          content: "";
+          position: absolute;
+          inset: 0;
+          background: rgba(59, 130, 246, 0.12);
+          pointer-events: none;
+        }
+      `}</style>
     </div>
   );
 }

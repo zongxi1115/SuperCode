@@ -2,7 +2,7 @@ import Editor from '@monaco-editor/react';
 import { SiJetbrains, SiSublimetext, SiVscodium, SiZedindustries } from '@icons-pack/react-simple-icons';
 import { FileTree } from '@/components/ai-elements/file-tree';
 import { EditorSidebar } from '@/components/app/editor-sidebar';
-import { PlanRichTextEditor } from '@/components/app/plan-rich-text-editor';
+import { PlanRichTextEditor, type Annotation } from '@/components/app/plan-rich-text-editor';
 import { EditorTools, type EditorTarget } from '@/components/app/editor-tools';
 import { renderFileTreeNodes } from '@/components/app/file-tree-renderers';
 import { ResizableHandle } from '@/components/app/resizable-handle';
@@ -11,8 +11,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { getFileLanguage } from '@/lib/app-utils';
 import type { FileTreeNode } from '@/lib/app-types';
-import { motion } from 'motion/react';
-import { CircleAlert, FileCode, FolderTree, PanelsTopLeft, SquareTerminal } from 'lucide-react';
+import { CircleAlert, FileCode, FolderTree, PanelsTopLeft, Rocket, SquareTerminal } from 'lucide-react';
 import type { editor as MonacoEditor } from 'monaco-editor';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
@@ -34,7 +33,9 @@ type EditorPanelProps = {
   onWebPreviewUrlChange: (url: string) => void;
   onSelectPreviewElement?: (html: string, selector: string) => void;
   planData?: PlanData | null;
-  onPlanSave?: (markdown: string) => void;
+  onPlanSave?: (markdown: string, annotations: Annotation[]) => void;
+  onPlanAnnotationsChange?: (annotations: Annotation[]) => void;
+  onSubmitPlan?: (markdown: string, annotations: Annotation[]) => void;
   onClosePlan?: () => void;
 };
 
@@ -65,6 +66,8 @@ export function EditorPanel({
   onSelectPreviewElement,
   planData,
   onPlanSave,
+  onPlanAnnotationsChange,
+  onSubmitPlan,
   onClosePlan,
 }: EditorPanelProps) {
   const [isEditing, setIsEditing] = useState(false);
@@ -72,12 +75,14 @@ export function EditorPanel({
   const [isSaving, setIsSaving] = useState(false);
   const [fileTreeWidth, setFileTreeWidth] = useState(DEFAULT_FILE_TREE_WIDTH);
   const [isFileTreeVisible, setIsFileTreeVisible] = useState(true);
+  const [isFileTreeResizing, setIsFileTreeResizing] = useState(false);
   const [editorLaunchError, setEditorLaunchError] = useState<string | null>(null);
   const [planEditContent, setPlanEditContent] = useState('');
   const monacoRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null);
   const isEditingRef = useRef(false);
   const editContentRef = useRef('');
   const lastPlanSyncRef = useRef<string | null>(null);
+  const planAnnotationsRef = useRef<Annotation[]>([]);
 
   const isPlanMode = Boolean(planData);
 
@@ -97,7 +102,9 @@ export function EditorPanel({
   useEffect(() => {
     if (!planData) {
       lastPlanSyncRef.current = null;
+      planAnnotationsRef.current = [];
       setPlanEditContent('');
+      onPlanAnnotationsChange?.([]);
       return;
     }
 
@@ -106,8 +113,10 @@ export function EditorPanel({
     }
 
     lastPlanSyncRef.current = planData.markdown;
+    planAnnotationsRef.current = [];
+    onPlanAnnotationsChange?.([]);
     setPlanEditContent((current) => (current === planData.markdown ? current : planData.markdown));
-  }, [planData]);
+  }, [onPlanAnnotationsChange, planData]);
 
   useEffect(() => {
     if (isWebPreviewOpen) {
@@ -171,7 +180,7 @@ export function EditorPanel({
       if ((e.ctrlKey || e.metaKey) && e.key === 's') {
         e.preventDefault();
         if (isPlanMode) {
-          onPlanSave?.(planEditContent);
+          onPlanSave?.(planEditContent, planAnnotationsRef.current);
         } else if (isEditingRef.current) {
           void handleSaveRef.current();
         }
@@ -257,6 +266,15 @@ export function EditorPanel({
                       <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">计划</span>
                     </div>
                     <div className="flex items-center gap-1.5">
+                      <Button
+                        size="sm"
+                        variant="default"
+                        className="h-7 gap-1.5 text-xs bg-primary hover:bg-primary/90"
+                        onClick={() => onSubmitPlan?.(planEditContent, planAnnotationsRef.current)}
+                      >
+                        <Rocket className="w-3.5 h-3.5" />
+                        提交方案
+                      </Button>
                       <Button size="sm" variant="ghost" className="h-7 gap-1.5 text-xs" onClick={onClosePlan}>
                         返回编辑器
                       </Button>
@@ -268,6 +286,10 @@ export function EditorPanel({
                       value={planEditContent}
                       onChange={setPlanEditContent}
                       autoFocus
+                      onAnnotationsChange={(annotations) => {
+                        planAnnotationsRef.current = annotations;
+                        onPlanAnnotationsChange?.(annotations);
+                      }}
                     />
                   </div>
                 </div>
@@ -356,12 +378,15 @@ export function EditorPanel({
                       <ResizableHandle
                         side="right"
                         onResize={handleFileTreeResize}
+                        onResizeStateChange={setIsFileTreeResizing}
                         className="border-l border-border/60 bg-background/40 hover:bg-primary/15"
                       />
 
-                      <motion.div
-                        animate={{ width: fileTreeWidth }}
-                        transition={{ duration: 0.2, ease: [0.25, 0.1, 0.25, 1] }}
+                      <div
+                        style={{
+                          width: fileTreeWidth,
+                          transition: isFileTreeResizing ? 'none' : 'width 0.2s cubic-bezier(0.25, 0.1, 0.25, 1)',
+                        }}
                         className="flex shrink-0 flex-col overflow-hidden border-l bg-muted/10"
                       >
                         <div className="flex items-center border-b px-3 py-2">
@@ -387,7 +412,7 @@ export function EditorPanel({
                             )}
                           </div>
                         </div>
-                      </motion.div>
+                      </div>
                     </>
                   ) : null}
 

@@ -35,7 +35,7 @@ class SkillsRegistryTests(unittest.TestCase):
         skills = list_available_skills(workspace)
 
         self.assertTrue(any(skill.id == "demo-skill" for skill in skills))
-        self.assertTrue(any(skill.id == "supercode-chat-ui" for skill in skills))
+        self.assertTrue(any(skill.id == "frontend-design" for skill in skills))
 
     def test_strip_skill_mentions_keeps_other_mentions(self) -> None:
         message = "请用 @[skill:demo-skill] 看一下 @[src/App.tsx] 的输入区域"
@@ -65,30 +65,30 @@ class SkillsRegistryTests(unittest.TestCase):
         cleaned, active_skills = resolve_message_skills(
             workspace,
             "请先 @[skill:demo-skill] 再处理这个页面",
-            requested_skill_ids=["supercode-safe-validation"],
+            requested_skill_ids=["code-review"],
         )
 
         self.assertEqual(cleaned, "请先 再处理这个页面")
         self.assertEqual(
             [skill["id"] for skill in active_skills],
-            ["supercode-safe-validation", "demo-skill"],
+            ["code-review", "demo-skill"],
         )
         self.assertIn("Keep the change small.", active_skills[1]["content"])
 
     def test_extract_skill_references_from_message_dedicated_to_skill_tokens(self) -> None:
-        message = "使用 @[skill:supercode-chat-ui] 和 @[src/App.tsx]，再参考 @[skill:demo-skill]"
+        message = "使用 @[skill:frontend-design] 和 @[src/App.tsx]，再参考 @[skill:demo-skill]"
 
         references = extract_skill_references_from_message(message)
 
-        self.assertEqual(references, ["supercode-chat-ui", "demo-skill"])
+        self.assertEqual(references, ["frontend-design", "demo-skill"])
 
     def test_select_relevant_skills_can_auto_match_by_description(self) -> None:
         workspace = Path(tempfile.mkdtemp(prefix="supercode-skills-")).resolve()
 
-        selected = select_relevant_skills(workspace, "帮我调整聊天框的 composer 和 mention 交互")
+        selected = select_relevant_skills(workspace, "帮我调整前端 React 组件和 responsive UI 交互")
 
-        self.assertTrue(any(skill["id"] == "supercode-chat-ui" for skill in selected))
-        matched = next(skill for skill in selected if skill["id"] == "supercode-chat-ui")
+        self.assertTrue(any(skill["id"] == "frontend-design" for skill in selected))
+        matched = next(skill for skill in selected if skill["id"] == "frontend-design")
         self.assertEqual(matched["activationSource"], "auto")
         self.assertIn("terms:", matched["matchReason"])
 

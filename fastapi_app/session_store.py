@@ -24,6 +24,7 @@ class PersistedSessionState:
     reasoning_effort: str | None = None
     agent_type: str = "coding"
     phase: str = "idle"
+    route_state: dict[str, Any] = field(default_factory=dict)
     is_generating: bool = False
     startup_error: str | None = None
     env_file: str | None = None
@@ -88,7 +89,7 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
             connection.execute(
                 """
                 INSERT INTO sessions (
-                    session_id, workspace, mode, model, agent_type, phase, title, preview,
+                    session_id, workspace, mode, model, agent_type, phase, route_state, title, preview,
                     reasoning_effort,
                     message_count, tool_call_count, created_at, updated_at,
                     is_generating,
@@ -100,7 +101,7 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                     pending_user_input_requests, pending_connect_requests, deploy_connections, deploy_state
                 )
                 VALUES (
-                    :session_id, :workspace, :mode, :model, :agent_type, :phase, :title, :preview,
+                    :session_id, :workspace, :mode, :model, :agent_type, :phase, :route_state, :title, :preview,
                     :reasoning_effort,
                     :message_count, :tool_call_count, :created_at, :updated_at,
                     :is_generating,
@@ -118,6 +119,7 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                     reasoning_effort = excluded.reasoning_effort,
                     agent_type = excluded.agent_type,
                     phase = excluded.phase,
+                    route_state = excluded.route_state,
                     title = excluded.title,
                     preview = excluded.preview,
                     message_count = excluded.message_count,
@@ -187,6 +189,7 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                     reasoning_effort TEXT,
                     agent_type TEXT NOT NULL DEFAULT 'coding',
                     phase TEXT NOT NULL DEFAULT 'idle',
+                    route_state TEXT NOT NULL DEFAULT '{}',
                     title TEXT NOT NULL,
                     preview TEXT NOT NULL,
                     message_count INTEGER NOT NULL,
@@ -247,6 +250,10 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                 connection.execute(
                     "ALTER TABLE sessions ADD COLUMN phase TEXT NOT NULL DEFAULT 'idle'"
                 )
+            if "route_state" not in existing_columns:
+                connection.execute(
+                    "ALTER TABLE sessions ADD COLUMN route_state TEXT NOT NULL DEFAULT '{}'"
+                )
             if "pending_connect_requests" not in existing_columns:
                 connection.execute(
                     "ALTER TABLE sessions ADD COLUMN pending_connect_requests TEXT NOT NULL DEFAULT '{}'"
@@ -296,6 +303,7 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
             "reasoning_effort": state.reasoning_effort,
             "agent_type": state.agent_type,
             "phase": state.phase,
+            "route_state": self._to_json(state.route_state),
             "title": state.title,
             "preview": state.preview,
             "message_count": state.message_count,
@@ -336,6 +344,7 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
             reasoning_effort=row["reasoning_effort"] if "reasoning_effort" in row.keys() else None,
             agent_type=str(row["agent_type"] if "agent_type" in row.keys() else "coding"),
             phase=str(row["phase"] if "phase" in row.keys() else "idle"),
+            route_state=self._from_json(row["route_state"] if "route_state" in row.keys() else "{}", {}),
             title=str(row["title"]),
             preview=str(row["preview"]),
             message_count=int(row["message_count"]),

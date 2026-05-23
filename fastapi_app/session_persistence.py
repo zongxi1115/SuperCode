@@ -55,6 +55,7 @@ def session_to_persisted_state(session: Any) -> PersistedSessionState:
         reasoning_effort=session.reasoning_effort,
         agent_type=session.agent_type,
         phase=session.phase,
+        route_state=session.route_state,
         title=session.summary_title(),
         preview=session.summary_preview(),
         message_count=len(session.history_messages),

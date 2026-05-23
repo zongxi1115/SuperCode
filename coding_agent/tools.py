@@ -16,7 +16,11 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
+from agent.agent import CodingAgent
+from agent.llm_client import OpenAICompatibleClient
+from agent.schema import AgentResponse, AgentState, StepRecord, ToolCall
 from agent.tools import BaseTool, ToolContext
+from coding_agent.brain import CodeExplorationPromptBrain
 
 INTERACTIVE_IDLE_SECONDS = 1.0
 INTERACTIVE_POLL_SECONDS = 0.05
@@ -40,6 +44,9 @@ LIST_FILE_MAX_RESULTS = 200
 GLOB_MAX_RESULTS = 100
 GREP_DEFAULT_LIMIT = 100
 GREP_MAX_LIMIT = 300
+CODE_EXPLORATION_DEFAULT_MAX_STEPS = 8
+CODE_EXPLORATION_MAX_STEPS = 16
+SUBAGENT_SUMMARY_MAX_CHARS = 6000
 APPLY_PATCH_BEGIN = "*** Begin Patch"
 APPLY_PATCH_END = "*** End Patch"
 APPLY_PATCH_UPDATE_PREFIX = "*** Update File: "
@@ -84,6 +91,19 @@ def _parse_int_argument(
     if minimum is not None and parsed < minimum:
         raise ValueError(f"{field_name} 必须大于等于 {minimum}。")
     return parsed
+
+
+def _compact_text(value: str, limit: int) -> str:
+    compact = " ".join(value.split()).strip()
+    if len(compact) <= limit:
+        return compact
+    return f"{compact[:limit].rstrip()}..."
+
+
+def _truncate_text(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    return f"{value[:limit].rstrip()}\n\n... [truncated]"
 
 
 def _should_respect_ignored_dirs(target: Path, include_ignored: bool) -> bool:
@@ -1761,6 +1781,337 @@ class GrepFileTool(CodingBaseTool):
         return normalized
 
 
+class DelegateCodeExplorationTool(CodingBaseTool):
+    """委派只读代码探索子智能体。"""
+
+    name = "delegate_code_exploration"
+    description = (
+        "委派一个只读代码探索子智能体查找相关模块、调用链、数据流和测试入口。"
+        "参数：task 必填，focus_paths 可选路径数组，max_steps 可选默认 8。"
+        "子智能体只允许 list_file、glob_file、read_file、grep_file，不会修改文件或执行命令。"
+        "适合在主任务需要跨目录理解代码前使用；小范围已知文件请直接 read_file/grep_file。"
+    )
+    parameters_schema = {
+        "type": "object",
+        "properties": {
+            "task": {"type": "string"},
+            "focus_paths": {"type": "array", "items": {"type": "string"}},
+            "max_steps": {"type": "integer"},
+        },
+        "required": ["task"],
+        "additionalProperties": False,
+    }
+
+    def run(self, arguments: dict[str, object], context: ToolContext) -> dict[str, Any]:
+        task = str(arguments.get("task") or "").strip()
+        if not task:
+            raise ValueError("task 不能为空。")
+        focus_paths = self._normalize_focus_paths(arguments.get("focus_paths"))
+        max_steps = min(
+            _parse_int_argument(
+                arguments.get("max_steps", CODE_EXPLORATION_DEFAULT_MAX_STEPS),
+                field_name="max_steps",
+                minimum=1,
+            ),
+            CODE_EXPLORATION_MAX_STEPS,
+        )
+
+        snapshot = self._build_snapshot(
+            task=task,
+            focus_paths=focus_paths,
+            status="running",
+            steps=[],
+        )
+        self._emit_snapshot(context, snapshot)
+
+        try:
+            subagent = self._build_subagent(context, max_steps=max_steps)
+            response = self._run_subagent(
+                subagent,
+                task=self._build_subagent_task(task, focus_paths),
+            )
+        except Exception as exc:  # noqa: BLE001 - 工具输出要把失败状态给 UI 展示
+            snapshot = {
+                **snapshot,
+                "status": "error",
+                "finalOutput": "",
+                "error": str(exc),
+            }
+            self._emit_snapshot(context, snapshot)
+            return {
+                "status": "error",
+                "task": task,
+                "focus_paths": focus_paths,
+                "error": str(exc),
+                "data_part": {"type": "data-subagent-task", "data": snapshot},
+            }
+
+        final_snapshot = self._snapshot_from_response(
+            response=response,
+            task=task,
+            focus_paths=focus_paths,
+            max_steps=max_steps,
+        )
+        self._emit_snapshot(context, final_snapshot)
+        return {
+            "status": final_snapshot["status"],
+            "task": task,
+            "focus_paths": focus_paths,
+            "files_read": final_snapshot["filesRead"],
+            "commands_run": final_snapshot["commandsRun"],
+            "findings": final_snapshot["findings"],
+            "recommended_files": final_snapshot["recommendedFiles"],
+            "final_output": final_snapshot["finalOutput"],
+            "data_part": {"type": "data-subagent-task", "data": final_snapshot},
+        }
+
+    def _normalize_focus_paths(self, raw_value: object) -> list[str]:
+        if raw_value is None:
+            return []
+        if not isinstance(raw_value, list):
+            raise ValueError("focus_paths 必须是字符串数组。")
+        paths: list[str] = []
+        seen: set[str] = set()
+        for raw_path in raw_value:
+            path = str(raw_path or "").strip().replace("\\", "/")
+            if not path or path in seen:
+                continue
+            paths.append(path)
+            seen.add(path)
+            if len(paths) >= 12:
+                break
+        return paths
+
+    def _build_subagent(self, context: ToolContext, *, max_steps: int) -> CodingAgent:
+        factory = context.metadata.get("code_exploration_subagent_factory")
+        if callable(factory):
+            return factory(context, max_steps)
+
+        client = context.metadata.get("llm_client")
+        if not isinstance(client, OpenAICompatibleClient):
+            raise RuntimeError("缺少 llm_client，无法启动代码探索子智能体。")
+
+        return CodingAgent(
+            brain=CodeExplorationPromptBrain(client, workspace=context.workspace),
+            tools=build_code_exploration_tools(),
+            workspace=context.workspace,
+            max_steps=max_steps,
+            tool_context_metadata={
+                "include_thoughts_in_context": bool(
+                    context.metadata.get("include_thoughts_in_context")
+                ),
+                "project_root": context.metadata.get("project_root"),
+                "cancel_event": context.metadata.get("cancel_event"),
+            },
+        )
+
+    def _build_subagent_task(self, task: str, focus_paths: list[str]) -> str:
+        lines = [
+            "请作为只读代码探索子智能体完成以下侦察任务。",
+            "",
+            f"任务：{task}",
+        ]
+        if focus_paths:
+            lines.extend(
+                [
+                    "",
+                    "优先关注路径：",
+                    *[f"- {path}" for path in focus_paths],
+                ]
+            )
+        lines.extend(
+            [
+                "",
+                "请只返回摘要、关键路径、调用链/数据流、发现和建议下一步。",
+            ]
+        )
+        return "\n".join(lines)
+
+    def _run_subagent(self, subagent: CodingAgent, *, task: str) -> AgentResponse:
+        state = AgentState(
+            task="你是一个只读代码探索子智能体，请围绕主智能体委派的任务收集代码事实。",
+            current_input=task,
+            conversation_messages=[],
+        )
+        return subagent.run_turn(state)
+
+    def _snapshot_from_response(
+        self,
+        *,
+        response: AgentResponse,
+        task: str,
+        focus_paths: list[str],
+        max_steps: int,
+    ) -> dict[str, Any]:
+        files_read = self._collect_files_read(response.steps)
+        commands_run = self._collect_commands_run(response.steps)
+        tool_names = self._collect_tool_names(response.steps)
+        final_output = _truncate_text(response.final_output.strip(), SUBAGENT_SUMMARY_MAX_CHARS)
+        findings = self._extract_findings(final_output)
+        recommended_files = self._extract_recommended_files(final_output, files_read)
+        status = "paused" if len(response.steps) >= max_steps and not final_output else "completed"
+        steps = self._snapshot_steps(response.steps)
+        current_thought = next(
+            (step.thought for step in reversed(response.steps) if step.thought.strip()),
+            "",
+        )
+        return self._build_snapshot(
+            task=task,
+            focus_paths=focus_paths,
+            status=status,
+            steps=steps,
+            current_thought=current_thought,
+            files_read=files_read,
+            commands_run=commands_run,
+            findings=findings,
+            recommended_files=recommended_files,
+            tool_names=tool_names,
+            final_output=final_output,
+        )
+
+    def _build_snapshot(
+        self,
+        *,
+        task: str,
+        focus_paths: list[str],
+        status: str,
+        steps: list[dict[str, Any]],
+        current_thought: str = "",
+        files_read: list[str] | None = None,
+        commands_run: list[str] | None = None,
+        findings: list[str] | None = None,
+        recommended_files: list[str] | None = None,
+        tool_names: list[str] | None = None,
+        final_output: str = "",
+    ) -> dict[str, Any]:
+        return {
+            "id": f"code-exploration-{abs(hash((task, tuple(focus_paths))))}",
+            "kind": "code_exploration",
+            "title": "代码探索",
+            "agentType": "code_exploration",
+            "status": status,
+            "task": task,
+            "focusPaths": focus_paths,
+            "currentThought": _compact_text(current_thought, 500),
+            "steps": steps,
+            "stepCount": len(steps),
+            "filesRead": files_read or [],
+            "changedFiles": [],
+            "commandsRun": commands_run or [],
+            "findings": findings or [],
+            "recommendedFiles": recommended_files or [],
+            "toolNames": tool_names or [],
+            "finalOutput": final_output,
+        }
+
+    def _snapshot_steps(self, steps: list[StepRecord]) -> list[dict[str, Any]]:
+        snapshot_steps: list[dict[str, Any]] = []
+        for step in steps:
+            tool_calls = self._step_tool_calls(step)
+            name = ", ".join(tool.name for tool in tool_calls) if tool_calls else "final"
+            has_error = any(
+                result is not None and not result.success
+                for result in self._step_tool_results(step)
+            )
+            snapshot_steps.append(
+                {
+                    "id": f"step-{step.index}",
+                    "name": name,
+                    "status": "error" if has_error else "completed",
+                    "thought": _compact_text(step.thought, 300),
+                }
+            )
+        return snapshot_steps
+
+    def _collect_files_read(self, steps: list[StepRecord]) -> list[str]:
+        files: list[str] = []
+        seen: set[str] = set()
+        for step in steps:
+            for tool_call in self._step_tool_calls(step):
+                if tool_call.name != "read_file":
+                    continue
+                filename = str(tool_call.arguments.get("filename") or "").strip()
+                if filename and filename not in seen:
+                    files.append(filename)
+                    seen.add(filename)
+        return files
+
+    def _collect_commands_run(self, steps: list[StepRecord]) -> list[str]:
+        commands: list[str] = []
+        seen: set[str] = set()
+        for step in steps:
+            for tool_call in self._step_tool_calls(step):
+                if tool_call.name not in {"execute", "excecute"}:
+                    continue
+                command = str(
+                    tool_call.arguments.get("content")
+                    or tool_call.arguments.get("command")
+                    or ""
+                ).strip()
+                if command and command not in seen:
+                    commands.append(command)
+                    seen.add(command)
+        return commands
+
+    def _collect_tool_names(self, steps: list[StepRecord]) -> list[str]:
+        names: list[str] = []
+        seen: set[str] = set()
+        for step in steps:
+            for tool_call in self._step_tool_calls(step):
+                if tool_call.name not in seen:
+                    names.append(tool_call.name)
+                    seen.add(tool_call.name)
+        return names
+
+    def _extract_findings(self, final_output: str) -> list[str]:
+        findings: list[str] = []
+        for raw_line in final_output.splitlines():
+            line = raw_line.strip().lstrip("-*0123456789.、) ")
+            if not line or line.startswith("#"):
+                continue
+            findings.append(_compact_text(line, 220))
+            if len(findings) >= 6:
+                break
+        return findings
+
+    def _extract_recommended_files(
+        self,
+        final_output: str,
+        files_read: list[str],
+    ) -> list[str]:
+        recommended: list[str] = []
+        seen: set[str] = set()
+        path_pattern = re.compile(r"[\w@./\\-]+\.[A-Za-z0-9]{1,8}")
+        for candidate in [*path_pattern.findall(final_output), *files_read]:
+            normalized = candidate.strip("`'\".,:;()[]{}").replace("\\", "/")
+            if not normalized or normalized in seen:
+                continue
+            recommended.append(normalized)
+            seen.add(normalized)
+            if len(recommended) >= 8:
+                break
+        return recommended
+
+    def _step_tool_calls(self, step: StepRecord) -> list[ToolCall]:
+        if step.tool_calls:
+            return step.tool_calls
+        return [step.tool_call] if step.tool_call is not None else []
+
+    def _step_tool_results(self, step: StepRecord) -> list[Any]:
+        if step.tool_results:
+            return step.tool_results
+        return [step.tool_result] if step.tool_result is not None else []
+
+    def _emit_snapshot(self, context: ToolContext, snapshot: dict[str, Any]) -> None:
+        emitter = context.metadata.get("runtime_event_emitter")
+        if not callable(emitter):
+            return
+        try:
+            emitter("data-subagent-task", {"data": snapshot})
+        except TypeError:
+            emitter("data-subagent-task", snapshot)
+
+
 class WriteFileTool(CodingBaseTool):
     """创建新文件。"""
 
@@ -2757,6 +3108,7 @@ def build_coding_tools() -> list[BaseTool]:
         GlobFileTool(),
         ReadFileTool(),
         GrepFileTool(),
+        DelegateCodeExplorationTool(),
         CreateTaskTool(),
         GetTaskStatusTool(),
         FinishTaskTool(),
@@ -2773,4 +3125,15 @@ def build_coding_tools() -> list[BaseTool]:
         GitCommitTool(),
         GitLogTool(),
         GitTagTool(),
+    ]
+
+
+def build_code_exploration_tools() -> list[BaseTool]:
+    """构造代码探索子智能体的只读工具集。"""
+
+    return [
+        ListFileTool(),
+        GlobFileTool(),
+        ReadFileTool(),
+        GrepFileTool(),
     ]

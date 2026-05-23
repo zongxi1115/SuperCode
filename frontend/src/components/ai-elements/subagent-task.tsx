@@ -14,6 +14,7 @@ import {
   CheckCircle2Icon,
   ChevronDownIcon,
   Clock3Icon,
+  FileSearchIcon,
   FileCode2Icon,
   HammerIcon,
   TerminalSquareIcon,
@@ -61,21 +62,41 @@ export function SubagentTaskCard({
 }: SubagentTaskCardProps) {
   const [isOpen, setIsOpen] = useState(snapshot.status === "running");
   const statusMeta = getStatusMeta(snapshot.status);
-  const runningSteps = snapshot.steps.filter((step) => step.status === "running").length;
-  const latestStep = snapshot.steps[snapshot.steps.length - 1];
+  const steps = snapshot.steps ?? [];
+  const filesRead = snapshot.filesRead ?? [];
+  const changedFiles = snapshot.changedFiles ?? [];
+  const commandsRun = snapshot.commandsRun ?? [];
+  const findings = snapshot.findings ?? [];
+  const recommendedFiles = snapshot.recommendedFiles ?? [];
+  const runningSteps = steps.filter((step) => step.status === "running").length;
+  const latestStep = steps[steps.length - 1];
+  const title = snapshot.title || (snapshot.kind === "code_exploration" ? "代码探索" : "子智能体");
 
   const summary = useMemo(() => {
     if (snapshot.status === "running" && latestStep?.name) {
       return `子智能体正在处理 ${latestStep.name}`;
     }
-    if (snapshot.changedFiles.length > 0) {
-      return `已影响 ${snapshot.changedFiles.length} 个文件`;
+    if (filesRead.length > 0) {
+      return `已阅读 ${filesRead.length} 个文件`;
     }
-    if (snapshot.commandsRun.length > 0) {
-      return `执行了 ${snapshot.commandsRun.length} 条命令`;
+    if (recommendedFiles.length > 0) {
+      return `建议查看 ${recommendedFiles.length} 个文件`;
+    }
+    if (changedFiles.length > 0) {
+      return `已影响 ${changedFiles.length} 个文件`;
+    }
+    if (commandsRun.length > 0) {
+      return `执行了 ${commandsRun.length} 条命令`;
     }
     return snapshot.status === "completed" ? "子任务已完成" : "子任务处理中";
-  }, [latestStep?.name, snapshot.changedFiles.length, snapshot.commandsRun.length, snapshot.status]);
+  }, [
+    latestStep?.name,
+    filesRead.length,
+    recommendedFiles.length,
+    changedFiles.length,
+    commandsRun.length,
+    snapshot.status,
+  ]);
 
   return (
     <Collapsible
@@ -90,7 +111,7 @@ export function SubagentTaskCard({
           </div>
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="text-sm font-medium">Coding 子智能体</span>
+              <span className="text-sm font-medium">{title}</span>
               <Badge
                 variant="outline"
                 className={cn("gap-1.5 rounded-full text-[11px]", statusMeta.badgeClassName)}
@@ -130,13 +151,13 @@ export function SubagentTaskCard({
             </div>
           ) : null}
 
-          {snapshot.steps.length > 0 ? (
+          {steps.length > 0 ? (
             <div className="space-y-2">
               <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
                 Steps
               </div>
               <div className="space-y-2">
-                {snapshot.steps.map((step) => {
+                {steps.map((step) => {
                   const stepMeta = getStatusMeta(step.status);
                   return (
                     <div
@@ -166,13 +187,32 @@ export function SubagentTaskCard({
             </div>
           ) : null}
 
-          {snapshot.changedFiles.length > 0 ? (
+          {filesRead.length > 0 ? (
             <div className="space-y-2">
               <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                Changed Files
+                Files Read
               </div>
               <div className="grid gap-2">
-                {snapshot.changedFiles.map((file) => (
+                {filesRead.map((file) => (
+                  <div
+                    key={file}
+                    className="flex items-center gap-2 rounded-lg border bg-background px-3 py-2 text-sm"
+                  >
+                    <FileSearchIcon className="size-3.5 text-muted-foreground" />
+                    <span className="truncate">{file}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          {recommendedFiles.length > 0 ? (
+            <div className="space-y-2">
+              <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                Recommended Files
+              </div>
+              <div className="grid gap-2">
+                {recommendedFiles.map((file) => (
                   <div
                     key={file}
                     className="flex items-center gap-2 rounded-lg border bg-background px-3 py-2 text-sm"
@@ -185,13 +225,50 @@ export function SubagentTaskCard({
             </div>
           ) : null}
 
-          {snapshot.commandsRun.length > 0 ? (
+          {findings.length > 0 ? (
+            <div className="space-y-2">
+              <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                Findings
+              </div>
+              <div className="space-y-2">
+                {findings.map((finding, index) => (
+                  <div
+                    key={`${finding}-${index}`}
+                    className="rounded-lg border bg-background px-3 py-2 text-sm text-muted-foreground"
+                  >
+                    {finding}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          {changedFiles.length > 0 ? (
+            <div className="space-y-2">
+              <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                Changed Files
+              </div>
+              <div className="grid gap-2">
+                {changedFiles.map((file) => (
+                  <div
+                    key={file}
+                    className="flex items-center gap-2 rounded-lg border bg-background px-3 py-2 text-sm"
+                  >
+                    <FileCode2Icon className="size-3.5 text-muted-foreground" />
+                    <span className="truncate">{file}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          {commandsRun.length > 0 ? (
             <div className="space-y-2">
               <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
                 Commands
               </div>
               <div className="grid gap-2">
-                {snapshot.commandsRun.map((command, index) => (
+                {commandsRun.map((command, index) => (
                   <div key={`${command}-${index}`} className="rounded-lg border bg-background">
                     <div className="flex items-center gap-2 px-3 pt-3 text-xs text-muted-foreground">
                       <TerminalSquareIcon className="size-3.5" />
@@ -212,6 +289,12 @@ export function SubagentTaskCard({
               <div className="rounded-lg border bg-background">
                 <CodeBlock code={snapshot.finalOutput} language="markdown" />
               </div>
+            </div>
+          ) : null}
+
+          {snapshot.error ? (
+            <div className="rounded-lg border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              {snapshot.error}
             </div>
           ) : null}
         </div>

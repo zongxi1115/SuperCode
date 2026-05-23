@@ -548,3 +548,10 @@ class CodingPromptBrain(OpenAICompatibleBrain):
 
     def _default_prompt_path(self) -> Path:
         return Path(__file__).resolve().parent / "prompts" / "coding.md"
+
+
+class CodeExplorationPromptBrain(CodingPromptBrain):
+    """只读代码探索子智能体 brain。"""
+
+    def _default_prompt_path(self) -> Path:
+        return Path(__file__).resolve().parent / "prompts" / "code_exploration.md"

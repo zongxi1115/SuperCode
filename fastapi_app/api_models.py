@@ -30,6 +30,15 @@ class SkillSummary(BaseModel):
     sourcePath: str | None = None
 
 
+class PluginSummary(BaseModel):
+    id: str
+    name: str
+    description: str
+    icon: str
+    navSlot: str
+    enabled: bool = True
+
+
 class CreateSessionResponse(BaseModel):
     sessionId: str
     model: str
@@ -38,6 +47,7 @@ class CreateSessionResponse(BaseModel):
     mode: str
     agentType: str = "coding"
     phase: str = "idle"
+    routeState: dict[str, Any] = Field(default_factory=dict)
     deployState: dict[str, Any] = Field(default_factory=dict)
     planState: dict[str, Any] = Field(default_factory=dict)
     isGenerating: bool
@@ -87,6 +97,7 @@ class SessionContextResponse(BaseModel):
     reasoningEffort: str | None = None
     agentType: str = "coding"
     phase: str = "idle"
+    routeState: dict[str, Any] = Field(default_factory=dict)
     deployState: dict[str, Any] = Field(default_factory=dict)
     planState: dict[str, Any] = Field(default_factory=dict)
     selectedFilePath: str | None
@@ -298,3 +309,38 @@ class GitCommitRequest(BaseModel):
 class GitTagRequest(BaseModel):
     tag: str
     message: str | None = None
+
+
+class KanbanBoardCreateRequest(BaseModel):
+    name: str = "默认看板"
+    description: str | None = None
+
+
+class KanbanCardCreateRequest(BaseModel):
+    boardId: str
+    title: str
+    columnId: str | None = None
+    status: str | None = None
+    description: str | None = None
+    priority: str = "none"
+    labels: list[str] = Field(default_factory=list)
+    assignee: str | None = None
+
+
+class KanbanCardUpdateRequest(BaseModel):
+    title: str | None = None
+    description: str | None = None
+    priority: str | None = None
+    labels: list[str] | None = None
+    assignee: str | None = None
+    columnId: str | None = None
+    status: str | None = None
+    position: float | None = None
+
+
+class KanbanCardReorderRequest(BaseModel):
+    boardId: str
+    cardId: str | None = None
+    columnId: str | None = None
+    targetColumnId: str | None = None
+    orderedCardIds: list[str] = Field(default_factory=list)

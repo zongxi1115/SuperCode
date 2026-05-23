@@ -7,9 +7,10 @@
 3. 文件读写、搜索、命令执行等工具实现
 """
 
-from .brain import CodingPromptBrain
+from .brain import CodeExplorationPromptBrain, CodingPromptBrain
 from .tools import (
     CreateTaskTool,
+    DelegateCodeExplorationTool,
     ExcecuteTool,
     ExecuteTool,
     FinishTaskTool,
@@ -28,6 +29,7 @@ from .tools import (
     TerminalInputTool,
     TerminalWaitTool,
     WriteFileTool,
+    build_code_exploration_tools,
     build_coding_tools,
     execute_git_commit,
     execute_git_tag,
@@ -36,7 +38,9 @@ from .tools import (
 
 __all__ = [
     "CodingPromptBrain",
+    "CodeExplorationPromptBrain",
     "CreateTaskTool",
+    "DelegateCodeExplorationTool",
     "ExcecuteTool",
     "ExecuteTool",
     "FinishTaskTool",
@@ -55,6 +59,7 @@ __all__ = [
     "TerminalInputTool",
     "TerminalWaitTool",
     "WriteFileTool",
+    "build_code_exploration_tools",
     "build_coding_tools",
     "execute_git_commit",
     "execute_git_tag",

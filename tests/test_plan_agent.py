@@ -4,10 +4,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from agent import ChatSession
+from agent import ChatSession, StepRecord, ToolCall, ToolResult
 from agent.tools import ToolContext
 from fastapi_app import main as api_main
 from fastapi_app.api_models import PlanDraftUpdateRequest, PlanSubmitRequest, ToolInputSubmitRequest
+from plan_agent.brain import PlanPromptBrain
 from plan_agent.tools import AskPlanQuestionsTool, ReadCurrentPlanTool, SavePlanTool, SearchWebTool
 
 
@@ -183,6 +184,33 @@ class PlanAgentEndpointsTests(unittest.IsolatedAsyncioTestCase):
                 ],
             },
         }
+        self.session.chat_session.state.current_input = "先帮我规划后台 MVP"
+        self.session.chat_session.state.data["turn_index"] = 1
+        self.session.chat_session.state.data["step_records"] = [
+            StepRecord(
+                turn_index=1,
+                index=1,
+                thought="需求还缺两个关键输入，先提问。",
+                tool_call=ToolCall(
+                    id="tool-plan-1",
+                    name="ask_plan_questions",
+                    arguments={
+                        "title": "确认需求",
+                        "questions": self.session.pending_user_input_requests["tool-plan-1"]["request"]["questions"],
+                    },
+                ),
+                tool_result=ToolResult(
+                    name="ask_plan_questions",
+                    tool_call_id="tool-plan-1",
+                    output={
+                        "requires_user_input": True,
+                        "input_kind": "plan_questions",
+                        "questions": self.session.pending_user_input_requests["tool-plan-1"]["request"]["questions"],
+                    },
+                    success=True,
+                ),
+            )
+        ]
         api_main._sessions[self.session.session_id] = self.session
 
     async def asyncTearDown(self) -> None:
@@ -215,6 +243,38 @@ class PlanAgentEndpointsTests(unittest.IsolatedAsyncioTestCase):
         answers = self.session.history_tools[0]["output"]["answers"]
         self.assertEqual(answers[0]["selectedOptions"][0]["label"], "Web")
         self.assertEqual(answers[1]["text"], "SuperCode")
+
+    async def test_submit_tool_input_records_answers_as_original_tool_result(self) -> None:
+        await api_main.submit_tool_input(
+            self.session.session_id,
+            "tool-plan-1",
+            ToolInputSubmitRequest(
+                answers=[
+                    {
+                        "questionId": "platform",
+                        "selectedOptionIds": ["web"],
+                    },
+                    {
+                        "questionId": "brand",
+                        "text": "SuperCode",
+                    },
+                ]
+            ),
+        )
+
+        step = self.session.chat_session.state.data["step_records"][0]
+        tool_result = step.tool_result
+        self.assertIsNotNone(tool_result)
+        self.assertEqual(tool_result.tool_call_id, "tool-plan-1")
+        self.assertFalse(tool_result.output.get("requires_user_input", False))
+        self.assertEqual(tool_result.output["answers"][1]["text"], "SuperCode")
+
+        brain = PlanPromptBrain(client=object())
+        native_messages = brain._build_current_turn_native_messages(self.session.chat_session.state)
+        self.assertEqual(native_messages[-1]["role"], "tool")
+        self.assertEqual(native_messages[-1]["tool_call_id"], "tool-plan-1")
+        self.assertIn("SuperCode", native_messages[-1]["content"])
+        self.assertNotIn("requires_user_input", native_messages[-1]["content"])
 
     async def test_submit_plan_switches_session_to_coding_and_clears_history(self) -> None:
         self.session.history_messages = [{"id": "u1", "role": "user", "content": "先帮我规划"}]

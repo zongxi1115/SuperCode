@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ChatPanel } from '@/components/app/chat-panel';
 import { EditorPanel, type PlanData } from '@/components/app/editor-panel';
+import type { Annotation } from '@/components/app/plan-rich-text-editor';
 import { ResizableHandle } from '@/components/app/resizable-handle';
 import { Sidebar } from '@/components/app/sidebar';
 import { TerminalPanel } from '@/components/app/terminal-panel';
 import { SettingsDialog } from '@/components/app/settings-dialog';
 import { WorkspacePicker } from '@/components/app/workspace-picker';
+import { KanbanBoard } from '@/components/kanban/kanban-board';
 import type {
   AgentMode,
   AppSettings,
@@ -19,6 +21,7 @@ import type {
   ModelConfigPayload,
   ModelOption,
   PlanStep,
+  PluginSummary,
   RecentProject,
   SessionContextPayload,
   SessionContextCompressionPayload,
@@ -128,6 +131,31 @@ function extractSelectedSkillIds(message: string) {
   return skillIds;
 }
 
+function formatPlanAnnotations(annotations: Annotation[], title?: string) {
+  const items = annotations
+    .filter((annotation) => annotation.selectedText.trim() || annotation.text.trim())
+    .map((annotation, index) => {
+      const selectedText = annotation.selectedText.trim();
+      const note = annotation.text.trim();
+      return `${index + 1}. "${selectedText}"${note ? ` — ${note}` : ''}`;
+    });
+
+  if (items.length === 0) {
+    return '';
+  }
+
+  const titleSuffix = title?.trim() ? ` (${title.trim()})` : '';
+  return `\n\n---\n**批注${titleSuffix}:**\n${items.join('\n')}`;
+}
+
+function isAgentMode(value: unknown): value is AgentMode {
+  return value === 'plan' || value === 'coding' || value === 'deploy';
+}
+
+function resolveAgentModeForRequest(value: unknown) {
+  return isAgentMode(value) ? value : undefined;
+}
+
 function mergeCodeChanges(
   current: CodeChangeRecord[],
   incoming: CodeChangeRecord[],
@@ -193,6 +221,7 @@ export default function App() {
   const [input, setInput] = useState('');
   const [fileTree, setFileTree] = useState<FileTreeNode[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [activePlugin, setActivePlugin] = useState<string | null>(null);
   const [terminalOutput, setTerminalOutput] = useState('');
   const [terminalInput, setTerminalInput] = useState('');
   const [isTerminalSubmitting, setIsTerminalSubmitting] = useState(false);
@@ -204,6 +233,7 @@ export default function App() {
   const [selectedFileContent, setSelectedFileContent] = useState('');
   const [selectedFilePath, setSelectedFilePath] = useState('');
   const [planData, setPlanData] = useState<PlanData | null>(null);
+  const [planAnnotations, setPlanAnnotations] = useState<Annotation[]>([]);
   const [backendMode, setBackendMode] = useState<'agent' | 'demo'>('demo');
   const [startupError, setStartupError] = useState<string | null>(null);
   const [directoryTree, setDirectoryTree] = useState<DirectoryNode[]>([]);
@@ -214,6 +244,7 @@ export default function App() {
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [isRightPanelCollapsed, setIsRightPanelCollapsed] = useState(true);
   const [sidebarWidth, setSidebarWidth] = useState(280);
+  const [isSidebarResizing, setIsSidebarResizing] = useState(false);
   const [isGitPanelOpen, setIsGitPanelOpen] = useState(false);  const [isContextOpen, setIsContextOpen] = useState(false);
   const [isContextLoading, setIsContextLoading] = useState(false);
   const [sessionContext, setSessionContext] = useState<SessionContextPayload | null>(null);
@@ -230,6 +261,7 @@ export default function App() {
   const [selectedReasoningEffort, setSelectedReasoningEffort] = useState<string | null>(null);
   const [selectedAgentMode, setSelectedAgentMode] = useState<AgentMode>('auto');
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
+  const [availablePlugins, setAvailablePlugins] = useState<PluginSummary[]>([]);
   const [availableSkills, setAvailableSkills] = useState<SkillSummary[]>([]);
   const [isModelConfigOpen, setIsModelConfigOpen] = useState(false);
   const [appSettings, setAppSettings] = useState<AppSettings>({ autoApprove: false, thinkingRendering: 'text' });
@@ -248,8 +280,38 @@ export default function App() {
     currentSessionIdRef.current = sessionId;
   }, [sessionId]);
 
+  useEffect(() => {
+    const handleHashChange = () => {
+      const hash = window.location.hash.slice(1);
+      if (hash.startsWith('/plugin/')) {
+        setActivePlugin(hash.replace('/plugin/', ''));
+      } else {
+        setActivePlugin(null);
+      }
+    };
+    
+    handleHashChange();
+    window.addEventListener('hashchange', handleHashChange);
+    return () => window.removeEventListener('hashchange', handleHashChange);
+  }, []);
+
+  useEffect(() => {
+    const currentHash = window.location.hash.slice(1);
+    if (activePlugin) {
+      const targetHash = `/plugin/${activePlugin}`;
+      if (currentHash !== targetHash) {
+        window.location.hash = targetHash;
+      }
+    } else {
+      if (currentHash.startsWith('/plugin/')) {
+        window.history.pushState(null, '', window.location.pathname + window.location.search);
+      }
+    }
+  }, [activePlugin]);
+
   const openPlanDraftPanel = useCallback((title: string, markdown: string) => {
     setPlanData({ title, markdown });
+    setPlanAnnotations([]);
     setIsRightPanelCollapsed(false);
   }, []);
 
@@ -504,11 +566,21 @@ export default function App() {
         setModelConfigPath(data.configPath ?? null);
       })
       .catch(console.error);
+
+    fetch('http://localhost:8000/api/plugins')
+      .then((res) => res.json())
+      .then((data: { plugins?: PluginSummary[] }) => {
+        setAvailablePlugins(data.plugins ?? []);
+      })
+      .catch(console.error);
   }, [initialWorkspace]);
 
   const syncVisibleSessionSnapshot = useCallback((data: SessionPayload) => {
     setBackendMode(data.mode);
     setStartupError(data.startupError ?? null);
+    if (isAgentMode(data.agentType)) {
+      setSelectedAgentMode(data.agentType);
+    }
     setSelectedModelId((prev) => resolveSelectedModelId(data, modelOptions) ?? prev ?? null);
     setSelectedReasoningEffort(normalizeReasoningEffort(data.reasoningEffort));
     setMessages(hydrateMessages(data.messages ?? [], data.thoughts, data.toolCalls));
@@ -595,7 +667,7 @@ export default function App() {
           workspace,
           model: selectedModelId,
           reasoning_effort: selectedReasoningEffort,
-          agent_type: selectedAgentMode === 'auto' ? undefined : selectedAgentMode,
+          agent_type: resolveAgentModeForRequest(selectedAgentMode),
         }),
         signal: controller.signal,
       });
@@ -1813,13 +1885,16 @@ export default function App() {
       }).join('\n\n');
       finalMsg = `${elementContext}\n\n${finalMsg}`;
     }
+    if (planData && planAnnotations.length > 0) {
+      finalMsg = `${finalMsg}${formatPlanAnnotations(planAnnotations, planData.title)}`;
+    }
 
     await streamAssistantResponse({
       url: 'http://localhost:8000/api/chat/stream',
       body: {
         session_id: sessionId,
         message: finalMsg,
-        agent_mode: selectedAgentMode,
+        agent_mode: resolveAgentModeForRequest(selectedAgentMode) ?? 'auto',
         skills: selectedSkills,
       },
       streamSessionId: sessionId,
@@ -2385,6 +2460,7 @@ export default function App() {
         backendMode={backendMode}
         startupError={startupError}
         width={sidebarWidth}
+        isResizing={isSidebarResizing}
         isGitPanelOpen={isGitPanelOpen}
         onGitPanelToggle={() => setIsGitPanelOpen((prev) => !prev)}
         onNewSession={handleNewSession}
@@ -2392,13 +2468,23 @@ export default function App() {
         onDeleteHistory={(targetSessionId) => void handleDeleteHistory(targetSessionId)}
         onToggle={toggleSidebar}
         onSelectOtherProject={handleSelectOtherProject}
+        activePlugin={activePlugin}
+        plugins={availablePlugins}
+        onActivePluginChange={setActivePlugin}
       />
       {!isSidebarCollapsed && (
         <ResizableHandle
           side="left"
           onResize={(delta) => setSidebarWidth((prev) => Math.min(Math.max(prev + delta, 220), 480))}
+          onResizeStateChange={setIsSidebarResizing}
         />
       )}
+      {activePlugin === 'kanban' ? (
+        <div className="flex-1 flex flex-col min-w-0 bg-background overflow-hidden relative z-10">
+          <KanbanBoard workspace={selectedWorkspace} />
+        </div>
+      ) : (
+      <>
       <div style={isRightPanelCollapsed ? undefined : { width: chatPanelWidth }} className={isRightPanelCollapsed ? 'flex-1' : 'flex-shrink-0'}>
         <ChatPanel
         sessionId={sessionId}
@@ -2462,19 +2548,22 @@ export default function App() {
             ]);
           }}
           planData={planData}
-          onPlanSave={async (markdown) => {
+          onPlanAnnotationsChange={setPlanAnnotations}
+          onPlanSave={async (markdown, annotations) => {
             if (!planData) return;
             const nextPlan = { ...planData, markdown };
             setPlanData(nextPlan);
+            setPlanAnnotations(annotations);
 
             if (!sessionId) return;
             try {
+              const annotationPayload = formatPlanAnnotations(annotations);
               const response = await fetch(`http://localhost:8000/api/sessions/${sessionId}/plan-draft`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                   title: nextPlan.title,
-                  markdown: nextPlan.markdown,
+                  markdown: nextPlan.markdown + annotationPayload,
                 }),
               });
               const payload = await response.json();
@@ -2495,7 +2584,76 @@ export default function App() {
               console.error('保存计划草案失败:', error);
             }
           }}
-          onClosePlan={() => setPlanData(null)}
+          onSubmitPlan={async (markdown, annotations) => {
+            const annotationPayload = formatPlanAnnotations(annotations);
+            const submittedMarkdown = markdown + annotationPayload;
+
+            setPlanData(null);
+            setPlanAnnotations([]);
+            setSelectedAgentMode('coding');
+
+            if (!sessionId) return;
+
+            try {
+              const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/plan/submit`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  title: planData?.title,
+                  markdown: submittedMarkdown,
+                }),
+              });
+              const payload = await res.json();
+              if (!res.ok) {
+                throw new Error(String(payload.detail ?? '提交方案失败'));
+              }
+
+              const codingInput = String(payload.codingInput ?? '').trim();
+              if (!codingInput) {
+                throw new Error('提交方案失败：后端没有返回编码输入');
+              }
+              setMessages([]);
+              setSessionContext((prev) =>
+                prev
+                  ? {
+                      ...prev,
+                      agentType: typeof payload.agentType === 'string' ? payload.agentType : 'coding',
+                      phase: typeof payload.phase === 'string' ? payload.phase : prev.phase,
+                      planState:
+                        payload.planState && typeof payload.planState === 'object'
+                          ? payload.planState
+                          : prev.planState,
+                      planSteps: [],
+                      messageCount: 0,
+                      toolCallCount: 0,
+                      thoughtCount: 0,
+                      recentMessages: [],
+                      recentThoughts: [],
+                      recentTools: [],
+                    }
+                  : prev,
+              );
+              await loadSessionHistory();
+
+              await streamAssistantResponse({
+                url: 'http://localhost:8000/api/chat/stream',
+                body: {
+                  session_id: sessionId,
+                  message: codingInput,
+                  agent_mode: 'coding',
+                },
+                streamSessionId: sessionId,
+                userVisibleMessage: codingInput,
+                clearComposer: true,
+              });
+            } catch (error) {
+              console.error('提交方案失败:', error);
+            }
+          }}
+          onClosePlan={() => {
+            setPlanData(null);
+            setPlanAnnotations([]);
+          }}
         />
         <TerminalPanel
           output={terminalOutput}
@@ -2517,6 +2675,8 @@ export default function App() {
           onTerminateProcess={(terminalId) => void terminateManagedProcess(terminalId)}
         />
       </div>
+      </>
+      )}
       </>
       )}
       </div>

@@ -2,9 +2,9 @@ import { Button } from '@/components/ui/button';
 import { GitPanel } from '@/components/app/git-panel';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { AnimatePresence, motion } from 'motion/react';
-import type { SessionHistoryItem } from '@/lib/app-types';
+import type { PluginSummary, SessionHistoryItem } from '@/lib/app-types';
 import { cn } from '@/lib/utils';
-import { ChevronRight, FileCode, FolderOpen, GitBranch, PanelLeftClose, PanelLeftOpen, Plus, Trash2 } from 'lucide-react';
+import { ChevronRight, FileCode, FolderOpen, GitBranch, PanelLeftClose, PanelLeftOpen, Plus, Trash2, LayoutDashboard } from 'lucide-react';
 import { useMemo, useState } from 'react';
 
 type SidebarProps = {
@@ -12,6 +12,7 @@ type SidebarProps = {
   historyItems: SessionHistoryItem[];
   isHistoryLoading: boolean;
   isCollapsed: boolean;
+  isResizing: boolean;
   selectedWorkspace: string;
   backendMode: 'agent' | 'demo';
   startupError: string | null;
@@ -23,6 +24,9 @@ type SidebarProps = {
   onDeleteHistory: (sessionId: string) => void;
   onToggle: () => void;
   onSelectOtherProject: () => void;
+  activePlugin: string | null;
+  plugins: PluginSummary[];
+  onActivePluginChange: (pluginId: string | null) => void;
 };
 
 function getFolderName(path: string): string {
@@ -42,6 +46,7 @@ export function Sidebar({
   historyItems,
   isHistoryLoading,
   isCollapsed,
+  isResizing,
   selectedWorkspace,
   backendMode,
   startupError,
@@ -53,6 +58,9 @@ export function Sidebar({
   onToggle,
   onSelectOtherProject,
   width,
+  activePlugin,
+  plugins,
+  onActivePluginChange,
 }: SidebarProps) {
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(new Set());
 
@@ -85,9 +93,11 @@ export function Sidebar({
   };
 
   return (
-    <motion.div
-      animate={{ width: isCollapsed ? 48 : width }}
-      transition={{ duration: 0.25, ease: [0.25, 0.1, 0.25, 1] }}
+    <div
+      style={{
+        width: isCollapsed ? 48 : width,
+        transition: isResizing ? 'none' : 'width 0.25s cubic-bezier(0.25, 0.1, 0.25, 1)',
+      }}
       className={cn(
         'border-r bg-muted/20 flex flex-col flex-shrink-0 overflow-hidden',
         !isCollapsed && `min-w-[220px] max-w-[480px]`
@@ -140,6 +150,36 @@ export function Sidebar({
 
             <ScrollArea className="flex-1 px-2 py-1">
               <div className="space-y-1">
+                {/* 插件入口 */}
+                {(plugins.length > 0 ? plugins : [{ id: 'kanban', name: '看板', description: '工作区级任务看板', icon: 'layout-dashboard', navSlot: 'sidebar', enabled: true }]).length > 0 ? (
+                  <div className="space-y-0.5 mb-4">
+                    <div className="px-2 py-1.5 text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
+                      插件
+                    </div>
+                    {(plugins.length > 0 ? plugins : [{ id: 'kanban', name: '看板', description: '工作区级任务看板', icon: 'layout-dashboard', navSlot: 'sidebar', enabled: true }])
+                      .filter((plugin) => plugin.enabled && plugin.navSlot === 'sidebar')
+                      .map((plugin) => (
+                        <button
+                          key={plugin.id}
+                          type="button"
+                          onClick={() => onActivePluginChange(activePlugin === plugin.id ? null : plugin.id)}
+                          className={cn(
+                            'flex items-center gap-2 w-full px-2 py-1.5 rounded-md text-xs font-medium transition-colors',
+                            activePlugin === plugin.id ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:text-foreground hover:bg-muted/40'
+                          )}
+                          title={plugin.description}
+                        >
+                          <LayoutDashboard className="w-3.5 h-3.5 shrink-0" />
+                          <span className="flex-1 text-left">{plugin.id === 'kanban' ? '看板' : plugin.name}</span>
+                        </button>
+                      ))}
+                  </div>
+                ) : null}
+
+                <div className="px-2 py-1.5 text-[10px] font-semibold text-muted-foreground uppercase tracking-wider border-t pt-3">
+                  会话历史
+                </div>
+
                 {isHistoryLoading ? (
                   <div className="rounded-lg border border-dashed px-3 py-4 text-xs text-muted-foreground text-center">加载中...</div>
                 ) : null}
@@ -280,6 +320,6 @@ export function Sidebar({
           </button>
         </div>
       )}
-    </motion.div>
+    </div>
   );
 }

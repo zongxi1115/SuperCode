@@ -1,5 +1,6 @@
 import { ContextViewer } from "@/components/app/context-viewer";
 import { TurnFileChangeList } from "@/components/ai-elements/file-change-list";
+import { SubagentTaskCard } from "@/components/ai-elements/subagent-task";
 import { ChatComposerEditor } from "@/components/app/chat-composer-editor";
 import { cn } from "@/lib/utils";
 import {
@@ -153,6 +154,7 @@ import type {
   PlanStep,
   SessionContextPayload,
   SkillSummary,
+  SubagentSnapshot,
   ToolCallRecord,
 } from "@/lib/app-types";
 import {
@@ -1971,6 +1973,15 @@ function DataPartView({
   onViewPlan?: (title: string, markdown: string) => void;
 }) {
   const data = part.data;
+
+  if (
+    part.dataType === "data-subagent-task" &&
+    data &&
+    typeof data === "object" &&
+    !Array.isArray(data)
+  ) {
+    return <SubagentTaskCard snapshot={data as SubagentSnapshot} />;
+  }
 
   if (part.dataType === "data-session-state") {
     const agentType = data?.agentType as string | undefined;
