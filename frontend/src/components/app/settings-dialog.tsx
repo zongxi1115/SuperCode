@@ -18,6 +18,7 @@ import { Textarea } from '@/components/ui/textarea';
 import type { AppSettings, ModelOption, UIModelProvider } from '@/lib/app-types';
 import {
   AlertTriangle,
+  Brain,
   Eye,
   EyeOff,
   Globe,
@@ -446,6 +447,49 @@ export function SettingsDialog({
                       </AlertDescription>
                     </Alert>
                   )}
+                </div>
+              </div>
+
+              <Separator />
+
+              <div>
+                <h3 className="mb-3 text-sm font-semibold">思考过程渲染</h3>
+                <div className="space-y-4">
+                  <div className="flex items-start justify-between gap-4 rounded-lg border bg-card p-4">
+                    <div className="flex items-start gap-3">
+                      <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-violet-500/10">
+                        <Brain className="size-4 text-violet-600 dark:text-violet-400" />
+                      </div>
+                      <div className="space-y-1">
+                        <div className="text-sm font-medium">思考过程渲染方式</div>
+                        <div className="text-xs text-muted-foreground">
+                          Markdown 模式支持代码高亮、数学公式等，但可能造成卡顿；纯文本模式更轻快
+                        </div>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <Button
+                        variant={draftSettings.thinkingRendering === 'text' ? 'default' : 'outline'}
+                        size="sm"
+                        className="h-7 px-2.5 text-xs"
+                        onClick={() =>
+                          setDraftSettings((prev) => ({ ...prev, thinkingRendering: 'text' }))
+                        }
+                      >
+                        纯文本
+                      </Button>
+                      <Button
+                        variant={draftSettings.thinkingRendering === 'markdown' ? 'default' : 'outline'}
+                        size="sm"
+                        className="h-7 px-2.5 text-xs"
+                        onClick={() =>
+                          setDraftSettings((prev) => ({ ...prev, thinkingRendering: 'markdown' }))
+                        }
+                      >
+                        Markdown
+                      </Button>
+                    </div>
+                  </div>
                 </div>
               </div>
 

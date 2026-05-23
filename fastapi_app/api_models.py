@@ -71,6 +71,14 @@ class SessionContextTool(BaseModel):
     success: bool | None = None
 
 
+class SessionTokenUsage(BaseModel):
+    inputTokens: int = 0
+    outputTokens: int = 0
+    reasoningTokens: int = 0
+    cachedInputTokens: int = 0
+    totalTokens: int = 0
+
+
 class SessionContextResponse(BaseModel):
     sessionId: str
     workspace: str
@@ -88,6 +96,8 @@ class SessionContextResponse(BaseModel):
     thoughtCount: int
     estimatedTokens: int
     maxTokens: int
+    usage: SessionTokenUsage = Field(default_factory=SessionTokenUsage)
+    cumulativeUsage: SessionTokenUsage = Field(default_factory=SessionTokenUsage)
     recentMessages: list[SessionContextMessage]
     recentThoughts: list[str]
     recentTools: list[SessionContextTool]
@@ -155,6 +165,7 @@ class ModelConfigPayload(BaseModel):
 
 class SettingsPayload(BaseModel):
     autoApprove: bool = False
+    thinkingRendering: Literal["text", "markdown"] = "text"
 
 
 class SessionHistoryItem(BaseModel):

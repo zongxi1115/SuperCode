@@ -140,6 +140,14 @@ export type SkillSummary = {
   sourcePath?: string | null;
 };
 
+export type SessionTokenUsage = {
+  inputTokens: number;
+  outputTokens: number;
+  reasoningTokens: number;
+  cachedInputTokens: number;
+  totalTokens: number;
+};
+
 export type SessionContextPayload = {
   sessionId: string;
   workspace: string;
@@ -158,6 +166,8 @@ export type SessionContextPayload = {
   thoughtCount: number;
   estimatedTokens: number;
   maxTokens: number;
+  usage: SessionTokenUsage;
+  cumulativeUsage: SessionTokenUsage;
   recentMessages: SessionContextMessage[];
   recentThoughts: string[];
   recentTools: SessionContextTool[];
@@ -302,6 +312,7 @@ export type ModelConfigPayload = {
 
 export type AppSettings = {
   autoApprove: boolean;
+  thinkingRendering: "text" | "markdown";
 };
 
 export type GitCommitInfo = {

@@ -99,6 +99,28 @@ class ClientParsingTests(unittest.TestCase):
 
         self.assertEqual(reasoning, "Need to inspect the file first.")
 
+    def test_log_usage_normalizes_openai_compatible_fields(self) -> None:
+        self.client._log_usage(
+            {
+                "prompt_tokens": 1234,
+                "completion_tokens": 210,
+                "total_tokens": 1444,
+                "prompt_tokens_details": {"cached_tokens": 320},
+                "completion_tokens_details": {"reasoning_tokens": 64},
+            }
+        )
+
+        self.assertEqual(
+            self.client.last_usage,
+            {
+                "inputTokens": 1234,
+                "outputTokens": 210,
+                "reasoningTokens": 64,
+                "cachedInputTokens": 320,
+                "totalTokens": 1444,
+            },
+        )
+
     def test_build_request_includes_reasoning_effort_when_configured(self) -> None:
         client = OpenAICompatibleClient(
             AgentLLMConfig(

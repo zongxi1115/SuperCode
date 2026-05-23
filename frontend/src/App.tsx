@@ -52,7 +52,7 @@ import { PanelRightOpen, PanelRightClose, Settings2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 const DEFAULT_WEB_PREVIEW_URL = 'http://localhost:5173';
-const CONTEXT_COMPRESSION_USAGE_THRESHOLD = 0.7;
+const CONTEXT_COMPRESSION_USAGE_THRESHOLD = 0.8;
 
 function getPreviewUrlFromToolPayload(payload: { preview_url?: unknown; output?: unknown }) {
   if (typeof payload.preview_url === 'string' && payload.preview_url.trim()) {
@@ -231,7 +231,7 @@ export default function App() {
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
   const [availableSkills, setAvailableSkills] = useState<SkillSummary[]>([]);
   const [isModelConfigOpen, setIsModelConfigOpen] = useState(false);
-  const [appSettings, setAppSettings] = useState<AppSettings>({ autoApprove: false });
+  const [appSettings, setAppSettings] = useState<AppSettings>({ autoApprove: false, thinkingRendering: 'text' });
   const [visualModelProviders, setVisualModelProviders] = useState<UIModelProvider[]>([]);
   const [envModelConfigs, setEnvModelConfigs] = useState<ModelOption[]>([]);
   const [modelConfigPath, setModelConfigPath] = useState<string | null>(null);
@@ -1185,32 +1185,77 @@ export default function App() {
       const toolInputBuffersById = new Map<string, string>();
       const isVisibleStreamSession = () => currentSessionIdRef.current === streamSessionId;
 
+      const pendingUpdates = new Map<string, ((message: ChatMessage) => ChatMessage)[]>();
+      let rafHandle: number | null = null;
+
+      const flushPendingUpdates = () => {
+        if (pendingUpdates.size === 0) {
+          rafHandle = null;
+          return;
+        }
+        const updates = new Map(pendingUpdates);
+        pendingUpdates.clear();
+        rafHandle = null;
+        setMessages((prev) => {
+          let changed = false;
+          const next = prev.map((message) => {
+            if (message.role === 'assistant' && updates.has(message.id)) {
+              const updaters = updates.get(message.id)!;
+              let updated = message;
+              for (const fn of updaters) {
+                updated = fn(updated);
+              }
+              changed = true;
+              return updated;
+            }
+            return message;
+          });
+          for (const [id, updaters] of updates) {
+            if (!next.some((m) => m.id === id)) {
+              let msg: ChatMessage = { id, role: 'assistant', content: '', thoughts: '', toolCalls: [], parts: [] };
+              for (const fn of updaters) {
+                msg = fn(msg);
+              }
+              next.push(msg);
+              changed = true;
+            }
+          }
+          return changed ? next : prev;
+        });
+      };
+
+      const scheduleFlush = () => {
+        if (rafHandle !== null) return;
+        rafHandle = requestAnimationFrame(flushPendingUpdates);
+      };
+
+      const flushImmediately = () => {
+        if (rafHandle !== null) {
+          cancelAnimationFrame(rafHandle);
+          rafHandle = null;
+        }
+        flushPendingUpdates();
+      };
+
       const updateAssistantMessage = (
         assistantId: string,
-        updater: (message: ChatMessage) => ChatMessage
+        updater: (message: ChatMessage) => ChatMessage,
+        immediate = false
       ) => {
         if (!isVisibleStreamSession()) {
           return;
         }
-        setMessages((prev) => {
-          let found = false;
-          const next = prev.map((message) => {
-            if (message.id === assistantId && message.role === 'assistant') {
-              found = true;
-              return updater(message);
-            }
-            return message;
-          });
-
-          if (found) {
-            return next;
-          }
-
-          return [
-            ...next,
-            updater({ id: assistantId, role: 'assistant', content: '', thoughts: '', toolCalls: [], parts: [] })
-          ];
-        });
+        const list = pendingUpdates.get(assistantId);
+        if (list) {
+          list.push(updater);
+        } else {
+          pendingUpdates.set(assistantId, [updater]);
+        }
+        if (immediate) {
+          flushImmediately();
+        } else {
+          scheduleFlush();
+        }
       };
 
       const processEvent = async (eventStr: string) => {
@@ -1237,7 +1282,8 @@ export default function App() {
           const updateToolPart = (
             assistantId: string,
             toolCallId: string,
-            updater: (toolCall: ToolCallRecord) => ToolCallRecord
+            updater: (toolCall: ToolCallRecord) => ToolCallRecord,
+            immediate = true
           ) => {
             updateAssistantMessage(assistantId, (message) => ({
               ...message,
@@ -1249,7 +1295,7 @@ export default function App() {
                   ? { ...part, toolCall: updater(part.toolCall) }
                   : part
               )
-            }));
+            }), immediate);
           };
 
           const syncGitCommitStatusPreview = async (
@@ -1291,7 +1337,8 @@ export default function App() {
             assistantId: string,
             toolCallId: string,
             createToolCall: () => ToolCallRecord,
-            updater: (toolCall: ToolCallRecord) => ToolCallRecord
+            updater: (toolCall: ToolCallRecord) => ToolCallRecord,
+            immediate = true
           ) => {
             updateAssistantMessage(assistantId, (message) => {
               let found = false;
@@ -1319,7 +1366,7 @@ export default function App() {
                 toolCalls: nextToolCalls,
                 parts: nextParts
               };
-            });
+            }, immediate);
           };
 
           const handleToolResultSideEffects = (payload: Record<string, unknown>) => {
@@ -1365,14 +1412,14 @@ export default function App() {
 
           if (data.type === 'start') {
             currentAssistantId = data.messageId || currentAssistantId || Math.random().toString();
-            updateAssistantMessage(currentAssistantId, (message) => message);
+            updateAssistantMessage(currentAssistantId, (message) => message, true);
           } else if (data.type === 'text-delta') {
             currentAssistantId = currentAssistantId || Math.random().toString();
             updateAssistantMessage(currentAssistantId, (message) => ({
               ...message,
               content: `${message.content}${data.delta ?? ''}`,
               parts: appendToLastPart(message, 'text', data.delta ?? '')
-            }));
+            }), false);
           } else if (data.type === 'reasoning-delta') {
             const assistantId = currentAssistantId;
             if (!assistantId) return;
@@ -1380,7 +1427,7 @@ export default function App() {
               ...message,
               thoughts: `${message.thoughts ?? ''}${data.delta ?? ''}`,
               parts: appendToLastPart(message, 'thinking', data.delta ?? '')
-            }));
+            }), false);
           } else if (data.type === 'tool-input-available') {
             const assistantId = currentAssistantId;
             if (!assistantId) return;
@@ -1454,7 +1501,8 @@ export default function App() {
                 ...toolCall,
                 streamedInput: `${toolCall.streamedInput ?? ''}${delta}`,
                 state: 'running'
-              })
+              }),
+              false
             );
           } else if (data.type === 'tool-output-available') {
             const assistantId = currentAssistantId;
@@ -1463,6 +1511,7 @@ export default function App() {
             updateToolPart(assistantId, toolCallId, (toolCall) => ({
               ...toolCall,
               output: data.output,
+              streamedInput: undefined,
               state: 'completed'
             }));
           } else if (data.type === 'data-tool-result') {
@@ -1503,6 +1552,7 @@ export default function App() {
               ...payload,
               id: toolCallId,
               name: toolName,
+              streamedInput: undefined,
               approval: (
                 payload.approval &&
                 typeof payload.approval === 'object' &&
@@ -1533,6 +1583,13 @@ export default function App() {
                     deployState: payload.deployState ?? prev.deployState,
                     planState: payload.planState ?? prev.planState,
                     taskState: payload.taskState ?? prev.taskState,
+                    messageCount: payload.messageCount ?? prev.messageCount,
+                    toolCallCount: payload.toolCallCount ?? prev.toolCallCount,
+                    thoughtCount: payload.thoughtCount ?? prev.thoughtCount,
+                    estimatedTokens: payload.estimatedTokens ?? prev.estimatedTokens,
+                    maxTokens: payload.maxTokens ?? prev.maxTokens,
+                    usage: payload.usage ?? prev.usage,
+                    cumulativeUsage: payload.cumulativeUsage ?? prev.cumulativeUsage,
                     codeChangeCount: payload.codeChangeCount ?? prev.codeChangeCount,
                     recentCodeChanges: payload.recentCodeChanges ?? prev.recentCodeChanges,
                   }
@@ -1563,14 +1620,14 @@ export default function App() {
             updateAssistantMessage(assistantId, (message) => ({
               ...message,
               parts: [...(message.parts ?? []), { type: 'data' as const, dataType: data.type, data: data.data }]
-            }));
+            }), true);
           } else if (data.type === 'data-assistant-reset') {
             currentAssistantId = data.data?.id || currentAssistantId || Math.random().toString();
             updateAssistantMessage(currentAssistantId, (message) => ({
               ...message,
               content: '',
               parts: (message.parts ?? []).filter((p) => p.type !== 'text')
-            }));
+            }), true);
           } else if (data.type === 'data-tool-call') {
             return;
           } else if (typeof data.type === 'string' && data.type.startsWith('data-')) {
@@ -1579,31 +1636,31 @@ export default function App() {
             updateAssistantMessage(assistantId, (message) => ({
               ...message,
               parts: [...(message.parts ?? []), { type: 'data' as const, dataType: data.type, data: data.data }]
-            }));
+            }), true);
           } else if (data.type === 'error') {
             currentAssistantId = currentAssistantId || Math.random().toString();
             updateAssistantMessage(currentAssistantId, (message) => ({
               ...message,
               content: `${message.content}${data.errorText ?? ''}`,
               parts: appendToLastPart(message, 'text', data.errorText ?? '')
-            }));
+            }), true);
           } else if (data.type === 'assistant_started') {
             currentAssistantId = data.payload.id || currentAssistantId || Math.random().toString();
-            updateAssistantMessage(currentAssistantId, (message) => message);
+            updateAssistantMessage(currentAssistantId, (message) => message, true);
           } else if (data.type === 'assistant_delta') {
             currentAssistantId = data.payload.id || currentAssistantId || Math.random().toString();
             updateAssistantMessage(currentAssistantId, (message) => ({
               ...message,
               content: `${message.content}${data.payload.delta ?? ''}`,
               parts: appendToLastPart(message, 'text', data.payload.delta ?? '')
-            }));
+            }), false);
           } else if (data.type === 'assistant_reset') {
             currentAssistantId = data.payload.id || currentAssistantId || Math.random().toString();
             updateAssistantMessage(currentAssistantId, (message) => ({
               ...message,
               content: '',
               parts: (message.parts ?? []).filter((p) => p.type !== 'text')
-            }));
+            }), true);
           } else if (data.type === 'thought_delta') {
             const assistantId = data.payload.assistant_id || currentAssistantId;
             if (!assistantId) return;
@@ -1612,7 +1669,7 @@ export default function App() {
               ...message,
               thoughts: `${message.thoughts ?? ''}${data.payload.delta ?? ''}`,
               parts: appendToLastPart(message, 'thinking', data.payload.delta ?? '')
-            }));
+            }), false);
           } else if (data.type === 'thought') {
             const assistantId = data.payload.assistant_id || currentAssistantId;
             if (!assistantId) return;
@@ -1628,7 +1685,7 @@ export default function App() {
                 thoughts: nextThought,
                 parts: newParts
               };
-            });
+            }, true);
           } else if (data.type === 'tool_call') {
             const assistantId = data.payload.assistant_id || currentAssistantId;
             if (!assistantId) return;
@@ -1641,7 +1698,7 @@ export default function App() {
               ...message,
               toolCalls: [...(message.toolCalls ?? []), toolCallRecord],
               parts: [...(message.parts ?? []), { type: 'tool_call' as const, toolCall: toolCallRecord }]
-            }));
+            }), true);
             if (
               isVisibleStreamSession() &&
               data.payload.name === 'read_file' &&
@@ -1682,7 +1739,7 @@ export default function App() {
                   ? { ...p, toolCall: { ...p.toolCall, ...data.payload, ...updatedTool } }
                   : p
               )
-            }));
+            }), true);
           }
         } catch (error) {
           console.error('Failed to parse SSE event', error, eventStr);
@@ -1708,6 +1765,7 @@ export default function App() {
       if (buffer.trim()) {
         await processEvent(buffer);
       }
+      flushImmediately();
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') {
         return;
@@ -2363,6 +2421,7 @@ export default function App() {
         onRemoveElementAttachment={(id) => setElementAttachments((prev) => prev.filter((e) => e.id !== id))}
         onCompletionAction={handleCompletionAction}
         activeCompletionAction={completionActionState}
+        thinkingRendering={appSettings.thinkingRendering}
         />
       </div>
       {!isRightPanelCollapsed && (

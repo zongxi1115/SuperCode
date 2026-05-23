@@ -185,6 +185,32 @@ class ContextCompressionTests(unittest.TestCase):
         self.assertEqual(response.skippedReason, "usage_below_threshold")
         self.assertLess(response.usageRatio, response.usageThreshold)
 
+    def test_context_snapshot_prefers_backend_usage_when_available(self) -> None:
+        session = self._make_session()
+        session.token_usage = {
+            "inputTokens": 4321,
+            "outputTokens": 210,
+            "reasoningTokens": 64,
+            "cachedInputTokens": 120,
+            "totalTokens": 4595,
+        }
+        session.cumulative_token_usage = {
+            "inputTokens": 9600,
+            "outputTokens": 1800,
+            "reasoningTokens": 320,
+            "cachedInputTokens": 1500,
+            "totalTokens": 11720,
+        }
+        session.max_context_tokens = 128000
+
+        snapshot = session.context_snapshot()
+
+        self.assertEqual(snapshot.estimatedTokens, 4321)
+        self.assertEqual(snapshot.maxTokens, 128000)
+        self.assertEqual(snapshot.usage.inputTokens, 4321)
+        self.assertEqual(snapshot.usage.reasoningTokens, 64)
+        self.assertEqual(snapshot.cumulativeUsage.totalTokens, 11720)
+
 
 if __name__ == "__main__":
     unittest.main()

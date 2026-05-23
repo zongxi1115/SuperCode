@@ -21,15 +21,10 @@ class ApplyPatchToolTests(unittest.TestCase):
 
         result = tool.run(
             {
-                "patch": (
-                    "*** Begin Patch\n"
-                    "*** Update File: src/a.ts\n"
-                    "@@\n"
-                    "-const before = 1;\n"
-                    "+const after = 1;\n"
-                    " const keep = 2;\n"
-                    "*** End Patch"
-                )
+                "filename": "src/a.ts",
+                "start_line": 1,
+                "end_line": 1,
+                "new_content": "const after = 1;"
             },
             self.context,
         )
@@ -40,74 +35,33 @@ class ApplyPatchToolTests(unittest.TestCase):
             "const after = 1;\nconst keep = 2;\n",
         )
 
-    def test_apply_patch_rejects_add_file_operations(self) -> None:
+    def test_apply_patch_out_of_bounds(self) -> None:
         tool = ApplyPatchTool()
 
-        with self.assertRaisesRegex(ValueError, "只支持 \\*\\*\\* Update File"):
+        with self.assertRaisesRegex(ValueError, "超出文件总行数"):
             tool.run(
                 {
-                    "patch": (
-                        "*** Begin Patch\n"
-                        "*** Add File: src/new.ts\n"
-                        "+export const value = 1;\n"
-                        "*** End Patch"
-                    )
+                    "filename": "src/a.ts",
+                    "start_line": 5,
+                    "end_line": 6,
+                    "new_content": "const after = 1;"
                 },
                 self.context,
             )
 
-    def test_apply_patch_rejects_final_code_pasted_without_diff_markers(self) -> None:
+    def test_apply_patch_invalid_range(self) -> None:
         tool = ApplyPatchTool()
 
-        with self.assertRaisesRegex(ValueError, "没有任何 '\\+' 或 '-' 变更行"):
+        with self.assertRaisesRegex(ValueError, "start_line 不能大于 end_line \\+ 1"):
             tool.run(
                 {
-                    "patch": (
-                        "*** Begin Patch\n"
-                        "*** Update File: src/a.ts\n"
-                        " const after = 1;\n"
-                        " const keep = 2;\n"
-                        "*** End Patch"
-                    )
+                    "filename": "src/a.ts",
+                    "start_line": 3,
+                    "end_line": 1,
+                    "new_content": "const after = 1;"
                 },
                 self.context,
             )
-
-    def test_apply_patch_can_match_unique_block_ignoring_indent_whitespace(self) -> None:
-        tool = ApplyPatchTool()
-        (self.workspace / "src" / "template.vue").write_text(
-            "<div>\n"
-            "  <section>\n"
-            "    <div class=\"course-list\">\n"
-            "      <div>row</div>\n"
-            "    </div>\n"
-            "  </section>\n"
-            "</div>\n",
-            encoding="utf-8",
-        )
-
-        result = tool.run(
-            {
-                "patch": (
-                    "*** Begin Patch\n"
-                    "*** Update File: src/template.vue\n"
-                    "@@\n"
-                    "     <div class=\"course-list\">\n"
-                    "       <div>row</div>\n"
-                    "     </div>\n"
-                    "+    <div class=\"powered-by\">Powered by zongxi</div>\n"
-                    "   </section>\n"
-                    "*** End Patch"
-                )
-            },
-            self.context,
-        )
-
-        self.assertEqual(result["files"], ["src/template.vue"])
-        self.assertIn(
-            "<div class=\"powered-by\">Powered by zongxi</div>",
-            (self.workspace / "src" / "template.vue").read_text(encoding="utf-8"),
-        )
 
 
 class DeleteFileInWorkspaceTests(unittest.TestCase):

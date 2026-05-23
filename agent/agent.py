@@ -228,6 +228,18 @@ class CodingAgent:
                 tool_definitions=tool_definitions,
                 on_stream=on_brain_stream,
             )
+            latest_usage_getter = getattr(self.brain, "latest_usage", None)
+            latest_usage = latest_usage_getter() if callable(latest_usage_getter) else None
+            if latest_usage:
+                self._emit_event(
+                    on_event,
+                    AgentEvent(
+                        type="usage",
+                        step_index=index,
+                        message=f"第 {index} 步已更新模型 usage。",
+                        usage=latest_usage,
+                    ),
+                )
             self._emit_event(
                 on_event,
                 AgentEvent(

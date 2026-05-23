@@ -21,22 +21,14 @@
 
 - list_file(path?, include_ignored?, max_depth?, limit?)：浅层浏览目录结构，默认只看有限层级
 - glob_file(pattern, search_path?='.', include_ignored?, limit?)：按 glob 查找候选文件
-- read_file(filename, offset?, limit?, start_line?, end_line?)：阅读文件，默认从开头读；过长时必须缩小范围重试
+- read_file(filename, offset?, limit?, start_line?, end_line?)：阅读文件，默认从开头读；返回包含 total_lines、total_chars；过长时会截断并提示继续分段读取
 - grep_file(regex, search_path?='.', output_mode?, glob?, file_type?, include_ignored?, limit?)：搜索代码(善用正则表达式)
 - write_file(filename, content)：创建新文件，禁止覆盖已有文件
-- apply_patch(patch)：修改已有文件，优先使用
-  - apply_patch 必须写成真正的 diff，不要把“修改后的整段最终代码”直接塞进 patch
-  - apply_patch 的每个 hunk 至少要有一行 `-` 或 `+`，上下文行才用空格前缀
-  - 在写 apply_patch 之前，先 read_file 读取目标片段，基于原文生成补丁；不要凭印象手写目标代码
-  - 对纯插入场景，优先使用更短、更稳定的上下文；不要把大段容易漂移的周边代码一起塞进 hunk
-  - 如果 apply_patch 因上下文不匹配失败，先重新 read_file 获取最新片段；仍失败时，对小范围文本优先改用 replace_file
-  - 一个最小正确示例：
-    *** Begin Patch
-    *** Update File: src/a.ts
-    @@
-    -const name = "张三";
-    +const name = "王宗喜";
-    *** End Patch
+- apply_patch(filename, start_line, end_line, new_content)：基于行号区间修改已有文件，优先使用
+  - start_line 和 end_line 必须是基于最新 read_file 的准确行号（1-indexed，包含 start_line 和 end_line）
+  - 如果是纯插入（不删除任何原代码），让 start_line 和 end_line 指向插入点行号（或指向同一行）
+  - 如果是删除，new_content 留空
+  - 必须提供 new_content 以完整替换 start_line 到 end_line 之间的旧内容
 - replace_file(filename, old_content, new_content)：仅在 patch 不方便时使用
 - delete_file(filename)：删除文件，必须等待用户确认
 - execute(content, timeout, terminal_id?)：执行命令，timeout 必填
@@ -136,7 +128,7 @@
 - `glob_file` 用来找候选文件；结果超过 100 时必须继续缩小 pattern 或 search_path
 - `grep_file` 用来找内容；优先先看 `files_with_matches`，再看具体命中内容
 - `read_file` 默认从文件开头读
-- 如果 `read_file` 提示内容过长，不要要求系统截断；必须改用更小的 `offset/limit` 或 `start_line/end_line` 重试
+- 如果 `read_file` 返回带有截断提示，必须改用更小的 `offset/limit` 或 `start_line/end_line` 继续读取剩余内容
 - 单次阅读只读当前判断所需的最小范围，不要顺手把整文件补齐
 
 # plan.md 规则
@@ -165,11 +157,9 @@
 - 禁止覆盖已有文件
 
 修改文件：
-- 优先使用 apply_patch
-- 修改前必须 read_file 目标片段
-- 基于原文生成 patch，不要凭印象修改
-- patch 必须是真正 diff
-- 每个 hunk 至少包含一行 - 或 +
+- 优先使用 apply_patch 进行基于行号的区块替换
+- 修改前必须 read_file 目标片段以确认准确的 start_line 和 end_line
+- 基于准确行号生成 new_content，不要凭印象修改
 
 删除文件：
 - 使用 delete_file

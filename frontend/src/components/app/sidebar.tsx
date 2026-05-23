@@ -259,6 +259,14 @@ export function Sidebar({
 
       {isCollapsed && (
         <div className="flex-1 flex flex-col items-center pt-3 gap-2">
+          <button
+            type="button"
+            onClick={onNewSession}
+            className="w-7 h-7 rounded-md bg-primary/10 flex items-center justify-center hover:bg-primary/20 transition-colors"
+            title="新建会话"
+          >
+            <Plus className="w-3.5 h-3.5 text-primary" />
+          </button>
           <div className="w-7 h-7 rounded-md bg-muted/80 flex items-center justify-center" title={selectedWorkspace}>
             <FileCode className="w-3.5 h-3.5 text-muted-foreground" />
           </div>

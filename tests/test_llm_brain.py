@@ -110,7 +110,7 @@ class ParseJsonOutputTests(unittest.TestCase):
     def test_extracts_partial_apply_patch_content_for_realtime_tool_input(self) -> None:
         raw_output = (
             '{"action":"tool","tool_name":"apply_patch",'
-            '"tool_arguments":{"patch":"*** Begin Patch\\n*** Update File: src/a.ts\\n@@\\n-old\\n+new'
+            '"tool_arguments":{"filename":"src/a.ts","start_line":1,"end_line":1,"new_content":"const after = 1;'
         )
 
         argument_name, streamed_input = self.brain._extract_partial_streamable_tool_input(
@@ -118,8 +118,8 @@ class ParseJsonOutputTests(unittest.TestCase):
             "apply_patch",
         )
 
-        self.assertEqual(argument_name, "patch")
-        self.assertIn("*** Update File: src/a.ts", streamed_input or "")
+        self.assertEqual(argument_name, "new_content")
+        self.assertEqual(streamed_input, "const after = 1;")
 
     def test_extracts_partial_save_plan_arguments_for_realtime_tool_input(self) -> None:
         raw_output = (
@@ -154,6 +154,79 @@ class ParseJsonOutputTests(unittest.TestCase):
         self.assertEqual(parsed["title"], "SuperDocs AI Coding Agent —— 从零搭建计划")
         self.assertEqual(parsed["summary"], "基于 Python + Anthropic Claude API")
         self.assertEqual(parsed["key_steps"], ["搭 CLI", "接 Claude API"])
+
+    def test_parse_tool_arguments_text_recovers_write_file_html_content(self) -> None:
+        arguments = (
+            '{"filename":"index.html","content":"<!doctype html>\n'
+            '<div class="hero" data-json=\'{"msg":"hi"}\'>\n'
+            '  <script>\n'
+            '    const raw = "\\\\n";\n'
+            '  </script>\n'
+            '</div>"}'
+        )
+        expected = "\n".join(
+            [
+                "<!doctype html>",
+                '<div class="hero" data-json=\'{"msg":"hi"}\'>',
+                "  <script>",
+                '    const raw = "\\n";',
+                "  </script>",
+                "</div>",
+            ]
+        )
+
+        parsed = self.brain._parse_tool_arguments_text(arguments, "write_file")
+
+        self.assertEqual(parsed["filename"], "index.html")
+        self.assertEqual(parsed["content"], expected)
+
+    def test_parse_json_output_recovers_nested_write_file_arguments(self) -> None:
+        raw_output = (
+            '{"action":"tool","thought":"写入首页","tool_name":"write_file","tool_arguments":'
+            '{"filename":"index.html","content":"<!doctype html>\n'
+            '<div class="hero">\n'
+            '  <script>\n'
+            '    const raw = "\\\\n";\n'
+            "  </script>\n"
+            '</div>"}}'
+        )
+        expected = "\n".join(
+            [
+                "<!doctype html>",
+                '<div class="hero">',
+                "  <script>",
+                '    const raw = "\\n";',
+                "  </script>",
+                "</div>",
+            ]
+        )
+
+        payload = self.brain._parse_json_output(raw_output)
+
+        self.assertEqual(payload["action"], "tool")
+        self.assertEqual(payload["tool_name"], "write_file")
+        self.assertEqual(payload["tool_arguments"]["filename"], "index.html")
+        self.assertEqual(payload["tool_arguments"]["content"], expected)
+
+    def test_parse_tool_arguments_text_decodes_escaped_newlines_in_tsx_content(self) -> None:
+        arguments = '''{"filename":"AdminPage.tsx","content":"import { useState, useEffect } from 'react'\\nimport './AdminPage.css'\\n\\nfunction AdminPage() {\\n  return (\\n    <div className=\\"admin-page\\" data-label="管理页面">\\n      <input placeholder="标题" />\\n    </div>\\n  )\\n}"}'''
+
+        parsed = self.brain._parse_tool_arguments_text(arguments, "write_file")
+
+        self.assertEqual(parsed["filename"], "AdminPage.tsx")
+        self.assertEqual(
+            parsed["content"],
+            """import { useState, useEffect } from 'react'
+import './AdminPage.css'
+
+function AdminPage() {
+  return (
+    <div className=\"admin-page\" data-label=\"管理页面\">
+      <input placeholder=\"标题\" />
+    </div>
+  )
+}""",
+        )
 
     def test_completion_to_decision_uses_native_tool_calls(self) -> None:
         decision = self.brain._completion_to_decision(
@@ -228,6 +301,37 @@ class _NativeStreamingClient:
         return CompletionResponse(text="first second", reasoning_text="Need to inspect")
 
 
+class _NativeStreamingToolClient:
+    def chat_stream_completion_messages(self, messages, tools=None, on_text_delta=None, on_reasoning_delta=None, on_tool_call_delta=None):  # noqa: ANN001
+        if on_reasoning_delta is not None:
+            on_reasoning_delta("Need to inspect")
+        if on_text_delta is not None:
+            on_text_delta("<template>")
+            on_text_delta("\n<div>partial</div>")
+        if on_tool_call_delta is not None:
+            from agent.llm_client import CompletionToolCallDelta
+
+            on_tool_call_delta(
+                CompletionToolCallDelta(
+                    index=0,
+                    id="call_1",
+                    name="apply_patch",
+                    arguments_delta='{"filename":"App.vue","start_line":1,"end_line":1,"new_content":"<template>',
+                    arguments='{"filename":"App.vue","start_line":1,"end_line":1,"new_content":"<template>',
+                )
+            )
+        return CompletionResponse(
+            reasoning_text="Need to inspect",
+            tool_calls=[
+                CompletionToolCall(
+                    id="call_1",
+                    name="apply_patch",
+                    arguments='{"filename":"App.vue","start_line":1,"end_line":1,"new_content":"<template>"}',
+                )
+            ],
+        )
+
+
 class DecideModeTests(unittest.TestCase):
     def test_decide_prefers_native_tool_calling(self) -> None:
         brain = OpenAICompatibleBrain(client=_NativeClient())
@@ -286,6 +390,21 @@ class DecideModeTests(unittest.TestCase):
         self.assertEqual(decision.thought, "Need to inspect")
         self.assertTrue(any(update.final_answer for update in updates))
         self.assertTrue(any(update.thought for update in updates))
+
+    def test_native_streaming_tool_calls_do_not_emit_final_text_updates(self) -> None:
+        brain = OpenAICompatibleBrain(client=_NativeStreamingToolClient())
+        updates = []
+
+        decision = brain.decide(
+            state=AgentState(task="task", current_input="patch app"),
+            tool_definitions={"apply_patch": {"description": "修改文件", "parameters_schema": None}},
+            on_stream=updates.append,
+        )
+
+        self.assertEqual(decision.action, "tool")
+        self.assertEqual(decision.tool_name, "apply_patch")
+        self.assertFalse(any(update.final_answer for update in updates))
+        self.assertTrue(any(update.streamed_tool_name == "apply_patch" for update in updates))
 
 
 if __name__ == "__main__":

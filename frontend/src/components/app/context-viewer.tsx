@@ -63,11 +63,30 @@ export function ContextViewer({
     : (contextData?.recentCodeChanges ?? []);
   const usedTokens = contextData?.estimatedTokens ?? 0;
   const maxTokens = Math.max(contextData?.maxTokens ?? 1, 1);
-  const usage = {
-    inputTokens: Math.max(Math.round(usedTokens * 0.65), 0),
-    outputTokens: Math.max(Math.round(usedTokens * 0.25), 0),
-    reasoningTokens: Math.max(Math.round(usedTokens * 0.1), 0),
-  };
+  const usage = contextData?.usage
+    ? {
+        inputTokens: contextData.usage.inputTokens,
+        outputTokens: contextData.usage.outputTokens,
+        reasoningTokens: contextData.usage.reasoningTokens,
+        cachedInputTokens: contextData.usage.cachedInputTokens,
+        totalTokens: contextData.usage.totalTokens,
+        inputTokenDetails: {
+          noCacheTokens: Math.max(
+            contextData.usage.inputTokens - contextData.usage.cachedInputTokens,
+            0,
+          ),
+          cacheReadTokens: contextData.usage.cachedInputTokens,
+          cacheWriteTokens: undefined,
+        },
+        outputTokenDetails: {
+          textTokens: Math.max(
+            contextData.usage.outputTokens - contextData.usage.reasoningTokens,
+            0,
+          ),
+          reasoningTokens: contextData.usage.reasoningTokens,
+        },
+      }
+    : undefined;
 
   return (
     <>
@@ -157,6 +176,10 @@ export function ContextViewer({
                       <div>工作区：{contextData.workspace}</div>
                       <div>当前文件：{contextData.selectedFilePath || '暂无'}</div>
                       <div>打开标签：{contextData.openFiles.join('、') || '暂无'}</div>
+                      <div>
+                        累计消耗：
+                        {` ${contextData.cumulativeUsage?.totalTokens ?? 0} tokens`}
+                      </div>
                     </div>
                   </section>
 

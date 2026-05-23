@@ -27,7 +27,7 @@ class OpenAICompatibleBrain(AgentBrain):
 
     _STREAMABLE_TOOL_INPUT_SPECS: dict[str, tuple[str, str, str]] = {
         "write_file": ("content", "content", "string"),
-        "apply_patch": ("patch", "patch", "string"),
+        "apply_patch": ("new_content", "new_content", "string"),
         "replace_file": ("new_content", "new_content", "string"),
         "save_plan": ("arguments", "tool_arguments", "object"),
     }
@@ -51,17 +51,11 @@ class OpenAICompatibleBrain(AgentBrain):
             else:
                 streamed_text = ""
                 streamed_reasoning = ""
+                streamed_text_emitted = ""
 
                 def handle_text_delta(delta: str) -> None:
                     nonlocal streamed_text
                     streamed_text += delta
-                    on_stream(
-                        BrainStreamingUpdate(
-                            raw_output=streamed_text,
-                            action="final",
-                            final_answer=streamed_text,
-                        )
-                    )
 
                 def handle_reasoning_delta(delta: str) -> None:
                     nonlocal streamed_reasoning
@@ -98,6 +92,18 @@ class OpenAICompatibleBrain(AgentBrain):
                     on_reasoning_delta=handle_reasoning_delta,
                     on_tool_call_delta=handle_tool_delta,
                 )
+
+                if not completion.tool_calls:
+                    final_text = completion.text or streamed_text
+                    if final_text and final_text != streamed_text_emitted:
+                        streamed_text_emitted = final_text
+                        on_stream(
+                            BrainStreamingUpdate(
+                                raw_output=final_text,
+                                action="final",
+                                final_answer=final_text,
+                            )
+                        )
 
             return self._completion_to_decision(completion)
         except UnsupportedToolCallingError:
@@ -136,12 +142,15 @@ class OpenAICompatibleBrain(AgentBrain):
         payload = self._parse_json_output(raw_output)
         return self._to_decision(payload)
 
+    def latest_usage(self) -> dict[str, int] | None:
+        return self.client.last_usage
+
     def _build_messages(
         self,
         state: AgentState,
         tool_definitions: dict[str, dict[str, Any]],
         response_mode: str = "legacy_json",
-    ) -> list[dict[str, str]]:
+    ) -> list[dict[str, object]]:
         system_prompt = self._build_system_prompt(tool_definitions, response_mode=response_mode)
         user_prompt = self._build_user_prompt(state)
         return [
@@ -358,7 +367,10 @@ class OpenAICompatibleBrain(AgentBrain):
             try:
                 payload, _ = decoder.raw_decode(cleaned[start_index:])
             except json.JSONDecodeError:
-                continue
+                try:
+                    payload = self._repair_and_parse_json(cleaned[start_index:])
+                except Exception:
+                    continue
 
             if not isinstance(payload, dict):
                 continue
@@ -713,14 +725,230 @@ class OpenAICompatibleBrain(AgentBrain):
         if not cleaned:
             return {}
         try:
-            parsed = json.loads(cleaned)
+            parsed = json.loads(cleaned, strict=False)
         except json.JSONDecodeError as exc:
             recovered = self._recover_tool_arguments(cleaned, tool_name)
             if recovered is not None:
                 return recovered
-            raise ValueError(f"工具 {tool_name} 的 arguments 不是合法 JSON：{arguments_text}") from exc
+            try:
+                parsed = self._repair_and_parse_json(cleaned)
+            except Exception as inner_exc:
+                raise ValueError(f"工具 {tool_name} 的 arguments 不是合法 JSON：{arguments_text}") from exc
         if not isinstance(parsed, dict):
             raise ValueError(f"工具 {tool_name} 的 arguments 必须是对象。")
+        return parsed
+
+    def _skip_json_whitespace(self, text: str, cursor: int) -> int:
+        while cursor < len(text) and text[cursor].isspace():
+            cursor += 1
+        return cursor
+
+    def _string_may_terminate(
+        self,
+        text: str,
+        cursor: int,
+        terminators: set[str],
+    ) -> bool:
+        cursor = self._skip_json_whitespace(text, cursor)
+        if cursor >= len(text):
+            return True
+        candidate = text[cursor]
+        if candidate not in terminators:
+            return False
+        if candidate == "}":
+            follow = self._skip_json_whitespace(text, cursor + 1)
+            return follow >= len(text) or text[follow] in {",", "}", "]"}
+        return True
+
+    def _parse_relaxed_json_string(
+        self,
+        text: str,
+        cursor: int,
+        terminators: set[str],
+    ) -> tuple[str, int]:
+        if cursor >= len(text) or text[cursor] != '"':
+            raise ValueError("字符串必须以双引号开头")
+
+        cursor += 1
+        buffer: list[str] = []
+        escape = False
+        unicode_digits: list[str] | None = None
+
+        while cursor < len(text):
+            char = text[cursor]
+
+            if unicode_digits is not None:
+                if char.lower() in "0123456789abcdef":
+                    unicode_digits.append(char)
+                    if len(unicode_digits) == 4:
+                        buffer.append(chr(int("".join(unicode_digits), 16)))
+                        unicode_digits = None
+                        escape = False
+                else:
+                    buffer.append("\\u" + "".join(unicode_digits))
+                    buffer.append(char)
+                    unicode_digits = None
+                    escape = False
+                cursor += 1
+                continue
+
+            if escape:
+                mapped = {
+                    '"': '"',
+                    "\\": "\\",
+                    "/": "/",
+                    "b": "\b",
+                    "f": "\f",
+                    "n": "\n",
+                    "r": "\r",
+                    "t": "\t",
+                }.get(char)
+                if mapped is not None:
+                    buffer.append(mapped)
+                    escape = False
+                    cursor += 1
+                    continue
+
+                if char == "u":
+                    unicode_digits = []
+                    cursor += 1
+                    continue
+
+                buffer.append(char)
+                escape = False
+                cursor += 1
+                continue
+
+            if char == "\\":
+                escape = True
+                cursor += 1
+                continue
+
+            if char == '"':
+                if self._string_may_terminate(text, cursor + 1, terminators):
+                    return "".join(buffer), cursor + 1
+                buffer.append(char)
+                cursor += 1
+                continue
+
+            buffer.append(char)
+            cursor += 1
+
+        if escape:
+            buffer.append("\\")
+        if unicode_digits is not None:
+            buffer.append("\\u" + "".join(unicode_digits))
+        return "".join(buffer), cursor
+
+    def _parse_relaxed_json_literal(self, text: str, cursor: int) -> tuple[Any, int]:
+        end = cursor
+        while end < len(text) and text[end] not in ",}]":
+            end += 1
+
+        raw_literal = text[cursor:end].strip()
+        if raw_literal == "true":
+            return True, end
+        if raw_literal == "false":
+            return False, end
+        if raw_literal == "null":
+            return None, end
+        if not raw_literal:
+            return "", end
+        try:
+            return json.loads(raw_literal), end
+        except Exception:
+            return raw_literal, end
+
+    def _parse_relaxed_json_array(self, text: str, cursor: int) -> tuple[list[Any], int]:
+        if cursor >= len(text) or text[cursor] != "[":
+            raise ValueError("数组必须以 [ 开头")
+
+        cursor += 1
+        values: list[Any] = []
+
+        while True:
+            cursor = self._skip_json_whitespace(text, cursor)
+            if cursor >= len(text):
+                return values, cursor
+            if text[cursor] == "]":
+                return values, cursor + 1
+
+            value, cursor = self._parse_relaxed_json_value(text, cursor, {",", "]"})
+            values.append(value)
+
+            cursor = self._skip_json_whitespace(text, cursor)
+            if cursor >= len(text):
+                return values, cursor
+            if text[cursor] == ",":
+                cursor += 1
+                continue
+            if text[cursor] == "]":
+                return values, cursor + 1
+
+            return values, cursor
+
+    def _parse_relaxed_json_object(self, text: str, cursor: int) -> tuple[dict[str, Any], int]:
+        if cursor >= len(text) or text[cursor] != "{":
+            raise ValueError("对象必须以 { 开头")
+
+        cursor += 1
+        result: dict[str, Any] = {}
+
+        while True:
+            cursor = self._skip_json_whitespace(text, cursor)
+            if cursor >= len(text):
+                return result, cursor
+            if text[cursor] == "}":
+                return result, cursor + 1
+            if text[cursor] != '"':
+                raise ValueError("对象键必须使用双引号包裹")
+
+            key, cursor = self._parse_relaxed_json_string(text, cursor, {":"})
+            cursor = self._skip_json_whitespace(text, cursor)
+            if cursor >= len(text) or text[cursor] != ":":
+                raise ValueError(f"对象键 {key} 缺少冒号")
+
+            cursor += 1
+            value, cursor = self._parse_relaxed_json_value(text, cursor, {",", "}"})
+            result[key] = value
+
+            cursor = self._skip_json_whitespace(text, cursor)
+            if cursor >= len(text):
+                return result, cursor
+            if text[cursor] == ",":
+                cursor += 1
+                continue
+            if text[cursor] == "}":
+                return result, cursor + 1
+
+            return result, cursor
+
+    def _parse_relaxed_json_value(
+        self,
+        text: str,
+        cursor: int,
+        terminators: set[str],
+    ) -> tuple[Any, int]:
+        cursor = self._skip_json_whitespace(text, cursor)
+        if cursor >= len(text):
+            return "", cursor
+
+        char = text[cursor]
+        if char == '"':
+            return self._parse_relaxed_json_string(text, cursor, terminators)
+        if char == "{":
+            return self._parse_relaxed_json_object(text, cursor)
+        if char == "[":
+            return self._parse_relaxed_json_array(text, cursor)
+        return self._parse_relaxed_json_literal(text, cursor)
+
+    def _repair_and_parse_json(self, text: str) -> dict[str, Any]:
+        """宽容模式的 JSON 修复提取器，允许字符串里出现未转义引号和真实换行。"""
+        start = text.find("{")
+        if start == -1:
+            raise ValueError("无法提取任何 JSON 对象")
+
+        parsed, _ = self._parse_relaxed_json_object(text, start)
         return parsed
 
     def _to_decision(self, payload: dict[str, object]) -> BrainDecision:

@@ -65,8 +65,13 @@ class ChatSession:
         response = self.agent.run_turn(self.state, on_event=on_event)
 
         if response.final_output.strip():
+            assistant_reasoning = self._assistant_reasoning_from_response(response)
             self.state.conversation_messages.append(
-                ConversationMessage(role="assistant", content=response.final_output)
+                ConversationMessage(
+                    role="assistant",
+                    content=response.final_output,
+                    reasoning_content=assistant_reasoning or None,
+                )
             )
         self._append_execution_records(response)
         if response.final_output.strip():
@@ -92,8 +97,13 @@ class ChatSession:
         )
 
         if response.final_output.strip():
+            assistant_reasoning = self._assistant_reasoning_from_response(response)
             self.state.conversation_messages.append(
-                ConversationMessage(role="assistant", content=response.final_output)
+                ConversationMessage(
+                    role="assistant",
+                    content=response.final_output,
+                    reasoning_content=assistant_reasoning or None,
+                )
             )
         self._append_execution_records(response)
         return response
@@ -107,6 +117,17 @@ class ChatSession:
     def _append_execution_records(self, response: AgentResponse) -> None:
         self._append_tool_records(response)
         self._append_planning_records(response)
+
+    def _assistant_reasoning_from_response(self, response: AgentResponse) -> str:
+        thoughts: list[str] = []
+        for step in response.steps:
+            thought = " ".join(step.thought.split()).strip()
+            if not thought:
+                continue
+            if thoughts and thoughts[-1] == thought:
+                continue
+            thoughts.append(thought)
+        return "\n\n".join(thoughts)
 
     def _append_tool_records(self, response: AgentResponse) -> None:
         """把工具调用事实追加到模型上下文账本，不伪装成对话消息。"""

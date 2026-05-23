@@ -109,7 +109,7 @@ response = session.ask("先看看项目结构", on_event=on_event)
   - `files_with_matches`：只返回命中文件
   - `count`：返回每个文件的命中次数和总数
 - `grep_file(...)` 可通过 `glob` 或 `file_type` 限制搜索范围。
-- `read_file(...)` 默认从文件开头读取；如果返回过长，不会静默截断，而是直接报错，要求改用更小的 `offset/limit` 或 `start_line/end_line` 重试。
+- `read_file(...)` 默认从文件开头读取；返回里会带 `total_lines`、`total_chars` 等元信息；如果返回过长，会在最大输出长度处截断，并明确提示还有内容未读完，继续用更小的 `offset/limit` 或 `start_line/end_line` 分段读取。
 - `execute(...)`、`terminal_input(...)`、`terminal_wait(...)` 的 `timeout` 都是必填秒数。
 - 交互式终端结果会带 `status`、`exit_reason`、`awaiting_input`、`input_prompt`、`input_request` 等字段：
   - `status=completed`：命令已结束，立即返回最终结果

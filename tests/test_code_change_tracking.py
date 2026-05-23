@@ -41,9 +41,48 @@ class _FakeCodeChangeChatSession:
         return AgentResponse(task=user_message, final_output="done")
 
 
+class _FakeApplyPatchCodeChangeChatSession:
+    def __init__(self, workspace: Path) -> None:
+        self.workspace = workspace
+
+    def ask(self, user_message: str, on_event=None) -> AgentResponse:
+        target = self.workspace / "src" / "tracked.ts"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("export const tracked = false;\n", encoding="utf-8")
+
+        tool_call = ToolCall(
+            id="tool-patch-1",
+            name="apply_patch",
+            arguments={
+                "filename": "src/tracked.ts",
+                "start_line": 1,
+                "end_line": 1,
+                "new_content": "export const tracked = true;",
+            },
+        )
+        if on_event is not None:
+            on_event(AgentEvent(type="tool_call", step_index=1, tool_call=tool_call))
+        target.write_text("export const tracked = true;\n", encoding="utf-8")
+        if on_event is not None:
+            on_event(
+                AgentEvent(
+                    type="tool_result",
+                    step_index=1,
+                    tool_call=tool_call,
+                    tool_result=ToolResult(
+                        name="apply_patch",
+                        tool_call_id=tool_call.id,
+                        output={"summary": "已修改文件 src/tracked.ts 的第 1 到 1 行。", "files": ["src/tracked.ts"]},
+                        success=True,
+                    ),
+                )
+            )
+        return AgentResponse(task=user_message, final_output="done")
+
+
 class CodeChangeTrackingTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self) -> None:
-        for session_id in ["session-save", "session-delete", "session-stream-code-change"]:
+        for session_id in ["session-save", "session-delete", "session-stream-code-change", "session-stream-apply-patch"]:
             api_main._sessions.pop(session_id, None)
             api_main._session_store.delete(session_id)
 
@@ -131,6 +170,23 @@ class CodeChangeTrackingTests(unittest.IsolatedAsyncioTestCase):
         payload = code_change_event.get("payload")
         assert isinstance(payload, dict)
         self.assertEqual(payload["data"]["path"], "src/tracked.ts")
+
+    async def test_run_agent_stream_tracks_apply_patch_file_changes(self) -> None:
+        workspace = Path(tempfile.mkdtemp(prefix="supercode-stream-apply-patch-")).resolve()
+        session = api_main.UISession(
+            session_id="session-stream-apply-patch",
+            model="test-model",
+            workspace=str(workspace),
+            chat_session=_FakeApplyPatchCodeChangeChatSession(workspace),
+        )
+        api_main._sessions[session.session_id] = session
+        queue: asyncio.Queue[dict[str, object] | None] = asyncio.Queue()
+
+        await api_main.run_agent_stream(session, "修改一个文件", queue)
+
+        self.assertEqual(len(session.code_changes), 1)
+        self.assertEqual(session.code_changes[0]["action"], "modified")
+        self.assertEqual(session.code_changes[0]["path"], "src/tracked.ts")
 
 
 if __name__ == "__main__":

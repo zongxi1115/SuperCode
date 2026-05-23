@@ -34,6 +34,9 @@ class PersistedSessionState:
     history_messages: list[dict[str, Any]] = field(default_factory=list)
     history_tools: list[dict[str, Any]] = field(default_factory=list)
     thoughts: list[str] = field(default_factory=list)
+    token_usage: dict[str, int] = field(default_factory=dict)
+    cumulative_token_usage: dict[str, int] = field(default_factory=dict)
+    max_context_tokens: int | None = None
     plan_steps: list[dict[str, str]] = field(default_factory=list)
     plan_state: dict[str, Any] = field(default_factory=dict)
     code_changes: list[dict[str, Any]] = field(default_factory=list)
@@ -91,7 +94,8 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                     is_generating,
                     startup_error, env_file, selected_file_path, open_files,
                     terminal_output, preview_url, history_messages,
-                    history_tools, thoughts, plan_steps, plan_state, code_changes, pending_delete_confirmations,
+                    history_tools, thoughts, token_usage, cumulative_token_usage, max_context_tokens,
+                    plan_steps, plan_state, code_changes, pending_delete_confirmations,
                     pending_commit_confirmations, pending_tag_confirmations,
                     pending_user_input_requests, pending_connect_requests, deploy_connections, deploy_state
                 )
@@ -102,7 +106,8 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                     :is_generating,
                     :startup_error, :env_file, :selected_file_path, :open_files,
                     :terminal_output, :preview_url, :history_messages,
-                    :history_tools, :thoughts, :plan_steps, :plan_state, :code_changes, :pending_delete_confirmations,
+                    :history_tools, :thoughts, :token_usage, :cumulative_token_usage, :max_context_tokens,
+                    :plan_steps, :plan_state, :code_changes, :pending_delete_confirmations,
                     :pending_commit_confirmations, :pending_tag_confirmations,
                     :pending_user_input_requests, :pending_connect_requests, :deploy_connections, :deploy_state
                 )
@@ -129,6 +134,9 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                     history_messages = excluded.history_messages,
                     history_tools = excluded.history_tools,
                     thoughts = excluded.thoughts,
+                    token_usage = excluded.token_usage,
+                    cumulative_token_usage = excluded.cumulative_token_usage,
+                    max_context_tokens = excluded.max_context_tokens,
                     plan_steps = excluded.plan_steps,
                     plan_state = excluded.plan_state,
                     code_changes = excluded.code_changes,
@@ -195,6 +203,9 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                     history_messages TEXT NOT NULL,
                     history_tools TEXT NOT NULL,
                     thoughts TEXT NOT NULL,
+                    token_usage TEXT NOT NULL DEFAULT '{}',
+                    cumulative_token_usage TEXT NOT NULL DEFAULT '{}',
+                    max_context_tokens INTEGER,
                     plan_steps TEXT NOT NULL,
                     plan_state TEXT NOT NULL DEFAULT '{}',
                     code_changes TEXT NOT NULL DEFAULT '[]',
@@ -260,6 +271,18 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                 connection.execute(
                     "ALTER TABLE sessions ADD COLUMN deploy_state TEXT NOT NULL DEFAULT '{}'"
                 )
+            if "token_usage" not in existing_columns:
+                connection.execute(
+                    "ALTER TABLE sessions ADD COLUMN token_usage TEXT NOT NULL DEFAULT '{}'"
+                )
+            if "cumulative_token_usage" not in existing_columns:
+                connection.execute(
+                    "ALTER TABLE sessions ADD COLUMN cumulative_token_usage TEXT NOT NULL DEFAULT '{}'"
+                )
+            if "max_context_tokens" not in existing_columns:
+                connection.execute(
+                    "ALTER TABLE sessions ADD COLUMN max_context_tokens INTEGER"
+                )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_sessions_updated_at ON sessions(updated_at DESC)"
             )
@@ -289,6 +312,9 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
             "history_messages": self._to_json(state.history_messages),
             "history_tools": self._to_json(state.history_tools),
             "thoughts": self._to_json(state.thoughts),
+            "token_usage": self._to_json(state.token_usage),
+            "cumulative_token_usage": self._to_json(state.cumulative_token_usage),
+            "max_context_tokens": state.max_context_tokens,
             "plan_steps": self._to_json(state.plan_steps),
             "plan_state": self._to_json(state.plan_state),
             "code_changes": self._to_json(state.code_changes),
@@ -326,6 +352,16 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
             history_messages=self._from_json(row["history_messages"], []),
             history_tools=self._from_json(row["history_tools"], []),
             thoughts=self._from_json(row["thoughts"], []),
+            token_usage=self._from_json(row["token_usage"] if "token_usage" in row.keys() else "{}", {}),
+            cumulative_token_usage=self._from_json(
+                row["cumulative_token_usage"] if "cumulative_token_usage" in row.keys() else "{}",
+                {},
+            ),
+            max_context_tokens=(
+                int(row["max_context_tokens"])
+                if "max_context_tokens" in row.keys() and row["max_context_tokens"] is not None
+                else None
+            ),
             plan_steps=self._from_json(row["plan_steps"], []),
             plan_state=self._from_json(row["plan_state"] if "plan_state" in row.keys() else "{}", {}),
             code_changes=self._from_json(row["code_changes"] if "code_changes" in row.keys() else "[]", []),

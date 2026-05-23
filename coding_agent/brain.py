@@ -6,7 +6,7 @@ from pathlib import Path
 
 from agent.llm_brain import OpenAICompatibleBrain
 from agent.llm_client import OpenAICompatibleClient
-from agent.schema import AgentState, StepRecord
+from agent.schema import AgentState, StepRecord, ToolResult
 
 
 MAX_CONVERSATION_MESSAGES = 12
@@ -57,7 +57,7 @@ class CodingPromptBrain(OpenAICompatibleBrain):
                 "4. 在真正修改文件前，优先先探索相关目录、文件和引用关系。",
                 "4.1 定位文件时优先使用 glob_file 和 grep_file，不要默认展开整个仓库。",
                 "4.2 grep_file 优先先用 output_mode=files_with_matches 看命中分布，再按需用 output_mode=content。",
-                "4.3 read_file 默认从文件开头读；如果工具提示内容过长，必须改用更小的 offset/limit 或 start_line/end_line 重试，不要假设系统会自动截断。",
+                "4.3 read_file 默认从文件开头读；返回会带 total_lines、total_chars 等元信息；如果工具提示已截断，必须继续用更小的 offset/limit 或 start_line/end_line 分段读取后续内容。",
                 "5. 普通答疑可以直接输出最终文本；需要查看或修改项目时再调用工具。",
                 "6. 命令执行工具优先使用 `excecute`；如果输出里提到 `execute`，可视为同义工具。调用时必须提供 `content` 和 `timeout`（秒），并可选传 `terminal_id`。",
                 "7. 如果 execute/excecute 返回的结果里 `status` 是 `running` 且 `awaiting_input` 为 true，说明命令很可能在等输入。优先参考 `input_prompt` / `input_request`，并调用 `terminal_input`；如果结果里带有 `terminal_id`，后续继续交互时要沿用同一个 `terminal_id`。",
@@ -85,7 +85,7 @@ class CodingPromptBrain(OpenAICompatibleBrain):
                 "5. 在真正修改文件前，优先先探索相关目录、文件和引用关系。",
                 "5.1 定位文件时优先使用 glob_file 和 grep_file，不要默认展开整个仓库。",
                 "5.2 grep_file 优先先用 output_mode=files_with_matches 看命中分布，再按需用 output_mode=content。",
-                "5.3 read_file 默认从文件开头读；如果工具提示内容过长，必须改用更小的 offset/limit 或 start_line/end_line 重试，不要假设系统会自动截断。",
+                "5.3 read_file 默认从文件开头读；返回会带 total_lines、total_chars 等元信息；如果工具提示已截断，必须继续用更小的 offset/limit 或 start_line/end_line 分段读取后续内容。",
                 "6. 普通答疑可以直接 final；需要查看或修改项目时再调用工具。",
                 "7. 命令执行工具优先使用 `excecute`；如果输出里提到 `execute`，可视为同义工具。调用时必须提供 `content` 和 `timeout`（秒），并可选传 `terminal_id`。",
                 "8. 如果 execute/excecute 返回的结果里 `status` 是 `running` 且 `awaiting_input` 为 true，说明命令很可能在等输入。优先参考 `input_prompt` / `input_request`，并调用 `terminal_input`；如果结果里带有 `terminal_id`，后续继续交互时要沿用同一个 `terminal_id`。",
@@ -110,7 +110,7 @@ class CodingPromptBrain(OpenAICompatibleBrain):
         state: AgentState,
         tool_definitions: dict[str, dict[str, object]],
         response_mode: str = "legacy_json",
-    ) -> list[dict[str, str]]:
+    ) -> list[dict[str, object]]:
         system_content = [self._build_system_prompt(tool_definitions, response_mode=response_mode)]
 
         runtime_state_context = self._build_runtime_state_context(state)
@@ -133,7 +133,7 @@ class CodingPromptBrain(OpenAICompatibleBrain):
         if active_skills_context:
             system_content.append(active_skills_context)
 
-        messages: list[dict[str, str]] = [
+        messages: list[dict[str, object]] = [
             {"role": "system", "content": "\n\n".join(system_content)}
         ]
 
@@ -147,13 +147,16 @@ class CodingPromptBrain(OpenAICompatibleBrain):
             user_content.append(state.current_input.strip())
 
         current_turn_history = self._build_current_turn_history(state)
-        if current_turn_history:
+        if current_turn_history and response_mode != "native_tools":
             user_content.append("")
             user_content.append(current_turn_history)
             user_content.append(self._build_continuation_instruction(response_mode))
 
         if user_content:
             messages.append({"role": "user", "content": "\n".join(user_content)})
+
+        if response_mode == "native_tools":
+            messages.extend(self._build_current_turn_native_messages(state))
 
         return messages
 
@@ -206,8 +209,8 @@ class CodingPromptBrain(OpenAICompatibleBrain):
             return messages[:-1], last_content
         return messages, current_input
 
-    def _conversation_messages_for_model(self, raw_messages: list[object]) -> list[dict[str, str]]:
-        model_messages: list[dict[str, str]] = []
+    def _conversation_messages_for_model(self, raw_messages: list[object]) -> list[dict[str, object]]:
+        model_messages: list[dict[str, object]] = []
         for message in raw_messages[-MAX_CONVERSATION_MESSAGES:]:
             role = str(getattr(message, "role", ""))
             content = str(getattr(message, "content", "")).strip()
@@ -215,7 +218,11 @@ class CodingPromptBrain(OpenAICompatibleBrain):
                 continue
             if content.startswith("[内部工具轨迹摘要]"):
                 continue
-            model_messages.append({"role": role, "content": content})
+            model_message: dict[str, object] = {"role": role, "content": content}
+            reasoning_content = str(getattr(message, "reasoning_content", "") or "").strip()
+            if role == "assistant" and reasoning_content:
+                model_message["reasoning_content"] = reasoning_content
+            model_messages.append(model_message)
         return model_messages
 
     def _build_tool_records_context(self, state: AgentState) -> str:
@@ -426,6 +433,107 @@ class CodingPromptBrain(OpenAICompatibleBrain):
                 ),
             ]
         )
+
+    def _build_current_turn_native_messages(self, state: AgentState) -> list[dict[str, object]]:
+        turn_index = state.data.get("turn_index")
+        if turn_index is None:
+            return []
+
+        step_records = state.data.get("step_records", [])
+        if not isinstance(step_records, list):
+            return []
+
+        current_turn_steps = [
+            step
+            for step in step_records
+            if isinstance(step, StepRecord) and step.turn_index == turn_index
+        ]
+        if not current_turn_steps:
+            return []
+
+        messages: list[dict[str, object]] = []
+        for step in current_turn_steps:
+            tool_calls = step.tool_calls or ([step.tool_call] if step.tool_call is not None else [])
+            if not tool_calls:
+                continue
+
+            assistant_tool_calls = []
+            for position, tool_call in enumerate(tool_calls, start=1):
+                if tool_call is None:
+                    continue
+                tool_call_id = tool_call.id or f"step-{step.index}-tool-{position}-{tool_call.name}"
+                assistant_tool_calls.append(
+                    {
+                        "id": tool_call_id,
+                        "type": "function",
+                        "function": {
+                            "name": tool_call.name,
+                            "arguments": json.dumps(tool_call.arguments, ensure_ascii=False),
+                        },
+                    }
+                )
+
+            if not assistant_tool_calls:
+                continue
+
+            assistant_message: dict[str, object] = {
+                "role": "assistant",
+                "tool_calls": assistant_tool_calls,
+            }
+            reasoning_content = " ".join(step.thought.split()).strip()
+            if reasoning_content:
+                assistant_message["reasoning_content"] = reasoning_content
+            messages.append(assistant_message)
+
+            tool_results = step.tool_results or ([step.tool_result] if step.tool_result is not None else [])
+            results_by_id = {
+                result.tool_call_id: result
+                for result in tool_results
+                if result is not None and result.tool_call_id
+            }
+            emitted_result_ids: set[str | None] = set()
+
+            for tool_call in tool_calls:
+                if tool_call is None:
+                    continue
+                tool_call_id = tool_call.id or ""
+                result = results_by_id.get(tool_call_id)
+                if result is None:
+                    continue
+                emitted_result_ids.add(result.tool_call_id)
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "content": self._serialize_native_tool_result(result),
+                    }
+                )
+
+            for result in tool_results:
+                if result is None or result.tool_call_id in emitted_result_ids:
+                    continue
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": result.tool_call_id or f"step-{step.index}-tool-result",
+                        "content": self._serialize_native_tool_result(result),
+                    }
+                )
+
+        return messages
+
+    def _serialize_native_tool_result(self, result: ToolResult) -> str:
+        output = result.output
+        if result.success:
+            return output if isinstance(output, str) else json.dumps(output, ensure_ascii=False)
+
+        payload = {
+            "success": False,
+            "error": str(result.error_message or "Tool execution failed."),
+        }
+        if output is not None:
+            payload["output"] = output
+        return json.dumps(payload, ensure_ascii=False)
 
     def _build_system_info(self) -> str:
         lines = [

@@ -219,6 +219,11 @@ def seed_chat_session_history(
         ConversationMessage(
             role=str(message.get("role", "")),
             content=str(message.get("content", "")),
+            reasoning_content=(
+                extract_message_thought_text(message)
+                if str(message.get("role", "")) == "assistant"
+                else None
+            ) or None,
         )
         for message in history_messages
         if str(message.get("role", "")) in {"user", "assistant"}
@@ -383,20 +388,21 @@ def update_plan_steps_for_tool(session: Any, step_index: int | None, tool_name: 
             elif step["status"] != "completed":
                 step["status"] = "pending"
 
+    steps_len = len(session.plan_steps)
     if getattr(session, "agent_type", "coding") == "deploy":
-        if tool_name == "connect":
+        if tool_name == "connect" and steps_len > 0:
             session.plan_steps[0]["description"] = "已发起部署连接，等待用户填写部署目标信息。"
-        elif tool_name in {"list_files", "read_file"}:
+        elif tool_name in {"list_files", "read_file"} and steps_len > 1:
             session.plan_steps[1]["description"] = "正在读取部署目录、配置文件和发布脚本。"
-        elif tool_name in {"transfer_files", "execute"}:
+        elif tool_name in {"transfer_files", "execute"} and steps_len > 2:
             session.plan_steps[2]["description"] = "正在同步文件或执行部署命令，并收集结果。"
         return
 
-    if tool_name in {"read_file", "list_file", "grep_file"}:
+    if tool_name in {"read_file", "list_file", "grep_file"} and steps_len > 1:
         session.plan_steps[1]["description"] = "已进入代码探索，正在读取结构、文件和引用关系。"
-    elif tool_name in {"write_file", "replace_file"}:
+    elif tool_name in {"write_file", "replace_file"} and steps_len > 2:
         session.plan_steps[2]["description"] = "已开始落地修改，准备把变更写回工作区。"
-    elif tool_name in {"execute", "excecute", "terminal_input", "terminal_wait"}:
+    elif tool_name in {"execute", "excecute", "terminal_input", "terminal_wait"} and steps_len > 3:
         session.plan_steps[3]["description"] = "正在执行命令并收集终端输出。"
 
 

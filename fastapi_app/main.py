@@ -58,6 +58,7 @@ from fastapi_app.api_models import (
     SessionContextCompressionRequest,
     SessionContextCompressionResponse,
     SessionContextResponse,
+    SessionTokenUsage,
     SessionContextTool,
     SessionHistoryItem,
     SessionRestoreRequest,
@@ -150,7 +151,7 @@ DEFAULT_OPEN_FILES = [
 MAX_CODE_CHANGE_RECORDS = 300
 MAX_CODE_CHANGE_DIFF_LINES = 80
 CONTEXT_COMPRESSION_SUMMARY_PREFIX = "[会话压缩摘要]"
-DEFAULT_CONTEXT_COMPRESSION_USAGE_THRESHOLD = 0.7
+DEFAULT_CONTEXT_COMPRESSION_USAGE_THRESHOLD = 0.8
 DEFAULT_CONTEXT_COMPRESSION_RECENT_MESSAGES = 6
 DEFAULT_CONTEXT_COMPRESSION_RECENT_TOOLS = 8
 DEFAULT_CONTEXT_COMPRESSION_RECENT_THOUGHTS = 4
@@ -158,6 +159,32 @@ MAX_CONTEXT_COMPRESSION_SOURCE_MESSAGES = 24
 MAX_CONTEXT_COMPRESSION_SOURCE_TOOLS = 20
 MAX_CONTEXT_COMPRESSION_SOURCE_THOUGHTS = 10
 MAX_CONTEXT_COMPRESSION_SOURCE_CODE_CHANGES = 8
+
+
+def _empty_session_token_usage() -> dict[str, int]:
+    return {
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "reasoningTokens": 0,
+        "cachedInputTokens": 0,
+        "totalTokens": 0,
+    }
+
+
+def normalize_session_token_usage(raw_usage: object) -> dict[str, int]:
+    usage = _empty_session_token_usage()
+    if not isinstance(raw_usage, dict):
+        return usage
+
+    for key in usage:
+        value = raw_usage.get(key)
+        if isinstance(value, bool):
+            usage[key] = int(value)
+        elif isinstance(value, (int, float)):
+            usage[key] = max(int(value), 0)
+    if usage["totalTokens"] == 0:
+        usage["totalTokens"] = usage["inputTokens"] + usage["outputTokens"]
+    return usage
 
 
 def _resolve_state_db_path() -> Path:
@@ -213,13 +240,14 @@ class UISession:
     history_tools: list[dict[str, Any]] = field(default_factory=list)
     code_changes: list[dict[str, Any]] = field(default_factory=list)
     thoughts: list[str] = field(default_factory=list)
+    token_usage: dict[str, int] = field(default_factory=dict)
+    cumulative_token_usage: dict[str, int] = field(default_factory=dict)
+    max_context_tokens: int | None = None
     created_at: int = field(default_factory=lambda: int(time.time() * 1000))
     updated_at: int = field(default_factory=lambda: int(time.time() * 1000))
     plan_steps: list[dict[str, str]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        if not self.plan_steps:
-            self.plan_steps = build_default_plan_steps(self.agent_type)
         if self.deploy_connection_manager is None:
             self.deploy_connection_manager = DeployConnectionManager(
                 workspace=resolve_workspace_path(self.workspace)
@@ -227,6 +255,9 @@ class UISession:
         self.phase = normalize_session_phase(self.phase)
         self.deploy_state = normalize_deploy_state(self.deploy_state)
         self.plan_state = normalize_plan_state(self.plan_state)
+        self.token_usage = normalize_session_token_usage(self.token_usage)
+        self.cumulative_token_usage = normalize_session_token_usage(self.cumulative_token_usage)
+        self.max_context_tokens = self.max_context_tokens or infer_model_context_limit(self.model)
         refresh_session_runtime_state(self)
 
     def snapshot(self) -> CreateSessionResponse:
@@ -350,8 +381,10 @@ class UISession:
             messageCount=len(self.history_messages),
             toolCallCount=len(self.history_tools),
             thoughtCount=len(self.thoughts),
-            estimatedTokens=estimate_session_tokens(self),
-            maxTokens=infer_model_context_limit(self.model),
+            estimatedTokens=estimate_session_context_tokens(self),
+            maxTokens=max(self.max_context_tokens or infer_model_context_limit(self.model), 1),
+            usage=SessionTokenUsage(**normalize_session_token_usage(self.token_usage)),
+            cumulativeUsage=SessionTokenUsage(**normalize_session_token_usage(self.cumulative_token_usage)),
             recentMessages=recent_messages,
             recentThoughts=self.thoughts[-6:],
             recentTools=recent_tools,
@@ -880,7 +913,10 @@ def create_task_in_session(
         order=len(tasks) + 1,
     )
     tasks.append(task)
-    first_step = task["steps"][0]
+    task_steps = task.get("steps")
+    if not task_steps:
+        raise HTTPException(status_code=400, detail="创建的 task 至少需要一个 step。")
+    first_step = task_steps[0]
     update_plan_state(
         session,
         tasks=tasks,
@@ -1294,6 +1330,7 @@ def rebuild_chat_session_for_agent_type(session: UISession, agent_type: str) -> 
     session.reasoning_effort = reasoning_effort
     if chat_session is not None:
         session.model = model_name
+        session.max_context_tokens = infer_model_context_limit(session.model)
         seed_chat_session_history(session.chat_session, session.history_messages, session.history_tools)
         if isinstance(session.chat_session.agent, CodingAgent):
             attach_agent_runtime_metadata(
@@ -1317,7 +1354,7 @@ def route_session_for_user_message(
     else:
         session.agent_type = next_agent_type
 
-    session.plan_steps = build_default_plan_steps(session.agent_type)
+    session.plan_steps = []
     if session.agent_type == "plan":
         reset_phase_for_new_turn(session)
     elif session.agent_type != "deploy":
@@ -1327,75 +1364,7 @@ def route_session_for_user_message(
     sync_session_runtime_state_for_agent(session)
 
 
-def build_default_plan_steps(agent_type: str) -> list[dict[str, str]]:
-    if agent_type == "plan":
-        return []
-    if agent_type == "deploy":
-        return [
-            {
-                "id": "1",
-                "title": "连接部署目标",
-                "description": "向用户收集部署目录或目标环境信息，建立 deploy session。",
-                "status": "running",
-            },
-            {
-                "id": "2",
-                "title": "探索配置与脚本",
-                "description": "读取部署目录、配置文件、发布脚本和工作流。",
-                "status": "pending",
-            },
-            {
-                "id": "3",
-                "title": "执行发布动作",
-                "description": "在明确工作目录和命令后执行部署或验证命令。",
-                "status": "pending",
-            },
-            {
-                "id": "4",
-                "title": "校验发布结果",
-                "description": "检查命令输出、部署结果和关键验证点。",
-                "status": "pending",
-            },
-            {
-                "id": "5",
-                "title": "沉淀结论",
-                "description": "总结当前部署状态、风险和后续建议。",
-                "status": "pending",
-            },
-        ]
 
-    return [
-        {
-            "id": "1",
-            "title": "分析需求，确认界面结构与布局",
-            "description": "聊天区、代码区、文件树、终端与工具链同时在线。",
-            "status": "completed",
-        },
-        {
-            "id": "2",
-            "title": "设计组件层级和数据流",
-            "description": "消息流、工具流、文件流和终端流分层管理。",
-            "status": "running",
-        },
-        {
-            "id": "3",
-            "title": "实现聊天面板与消息流式输出",
-            "description": "普通文本尽量实时推送，工具链单独展示。",
-            "status": "pending",
-        },
-        {
-            "id": "4",
-            "title": "集成文件预览与终端执行能力",
-            "description": "文件树联动代码预览，命令输出持续滚动。",
-            "status": "pending",
-        },
-        {
-            "id": "5",
-            "title": "完善工具面板与状态管理",
-            "description": "沉淀调用历史、错误状态和执行结果。",
-            "status": "pending",
-        },
-    ]
 
 
 def session_has_persistable_history(session: UISession) -> bool:
@@ -1453,6 +1422,9 @@ def hydrate_session_from_state(state: PersistedSessionState) -> UISession:
         history_tools=state.history_tools,
         code_changes=state.code_changes,
         thoughts=state.thoughts,
+        token_usage=state.token_usage,
+        cumulative_token_usage=state.cumulative_token_usage,
+        max_context_tokens=state.max_context_tokens,
         created_at=state.created_at,
         updated_at=state.updated_at,
         plan_steps=state.plan_steps,
@@ -1602,10 +1574,12 @@ async def switch_session_model(session_id: str, request: SwitchModelRequest) -> 
         )
         sync_session_runtime_state_for_agent(session)
     session.model = config.model
+    session.max_context_tokens = infer_model_context_limit(session.model)
     session.reasoning_effort = config.reasoning_effort
     session.env_file = normalized_model_ref
     session.mode = "agent"
     session.startup_error = None
+    invalidate_session_context_usage(session)
     session.touch()
 
     return JSONResponse({
@@ -2781,6 +2755,7 @@ def activate_plan_for_coding(session: UISession, request: PlanSubmitRequest) -> 
     session.history_messages = []
     session.history_tools = []
     session.thoughts = []
+    invalidate_session_context_usage(session)
     session.pending_user_input_requests.clear()
     session.pending_connect_requests.clear()
     session.pending_delete_confirmations.clear()
@@ -2794,7 +2769,7 @@ def activate_plan_for_coding(session: UISession, request: PlanSubmitRequest) -> 
         pending_coding_input=coding_input,
     )
     rebuild_chat_session_for_agent_type(session, "coding")
-    session.plan_steps = build_default_plan_steps("coding")
+    session.plan_steps = []
     set_session_phase(session, "idle")
     sync_session_runtime_state_for_agent(session)
     session.touch()
@@ -3403,14 +3378,7 @@ async def run_agent_stream(
             "type": "data-session-state",
             "payload": {
                 "assistant_id": assistant_id,
-                "data": {
-                    "agentType": session.agent_type,
-                    "phase": session.phase,
-                    "deployState": session.deploy_state,
-                    "planState": session.plan_state,
-                    "codeChangeCount": len(session.code_changes),
-                    "recentCodeChanges": session.code_changes[-8:],
-                },
+                "data": build_session_state_payload(session),
             },
         }
 
@@ -3436,6 +3404,11 @@ async def run_agent_stream(
                     },
                 },
             )
+            return
+
+        if event.type == "usage":
+            merge_session_token_usage(session, event.usage)
+            loop.call_soon_threadsafe(queue.put_nowait, _session_state_event())
             return
 
         if event.type == "thought":
@@ -4030,6 +4003,13 @@ async def run_agent_stream(
         )
         await asyncio.sleep(0.03)
 
+    auto_compression_response = await asyncio.to_thread(
+        auto_compress_session_context_if_needed,
+        session,
+    )
+    if auto_compression_response is not None:
+        await queue.put(_session_state_event())
+
     await queue.put({"type": "assistant_done", "payload": {"id": assistant_id}})
     await queue.put(None)
     set_session_generating(session, False)
@@ -4441,6 +4421,7 @@ def restore_session_to_message(session: UISession, message_id: str) -> CreateSes
     session.history_messages = kept_messages
     session.history_tools = kept_tools
     session.thoughts = kept_thoughts
+    invalidate_session_context_usage(session)
     session.code_changes = kept_code_changes
     session.pending_user_input_requests.clear()
     session.pending_connect_requests.clear()
@@ -4748,6 +4729,7 @@ def _summarize_context_with_model(
             {"role": "user", "content": user_prompt},
         ]
     )
+    add_cumulative_session_token_usage(session, client.last_usage)
     return _clean_context_compression_summary(summary)
 
 
@@ -4799,8 +4781,8 @@ def compress_session_context(
     summarizer: Callable[[UISession, str, str | None], str] | None = None,
 ) -> SessionContextCompressionResponse:
     slices = _slice_context_for_compression(session, request)
-    original_estimated_tokens = estimate_session_tokens(session)
-    max_tokens = max(infer_model_context_limit(session.model), 1)
+    original_estimated_tokens = estimate_session_context_tokens(session)
+    max_tokens = max(session.max_context_tokens or infer_model_context_limit(session.model), 1)
     usage_threshold = _clamp_unit_float(
         request.usageThreshold,
         DEFAULT_CONTEXT_COMPRESSION_USAGE_THRESHOLD,
@@ -4895,6 +4877,7 @@ def compress_session_context(
         session.history_messages = projected_history_messages
         session.history_tools = projected_history_tools
         session.thoughts = projected_thoughts
+        invalidate_session_context_usage(session)
         if session.chat_session is not None:
             session.chat_session.clear()
             seed_chat_session_history(session.chat_session, session.history_messages, session.history_tools)
@@ -4925,6 +4908,19 @@ def compress_session_context(
     )
 
 
+def auto_compress_session_context_if_needed(
+    session: UISession,
+) -> SessionContextCompressionResponse | None:
+    response = compress_session_context(
+        session,
+        SessionContextCompressionRequest(
+            mode="apply",
+            usageThreshold=DEFAULT_CONTEXT_COMPRESSION_USAGE_THRESHOLD,
+        ),
+    )
+    return response if response.applied else None
+
+
 def estimate_session_tokens(session: UISession) -> int:
     return _estimate_context_tokens_from_parts(
         session.history_messages,
@@ -4932,6 +4928,59 @@ def estimate_session_tokens(session: UISession) -> int:
         session.history_tools,
         session.workspace,
     )
+
+
+def estimate_session_context_tokens(session: UISession) -> int:
+    token_usage = normalize_session_token_usage(session.token_usage)
+    if token_usage["inputTokens"] > 0:
+        return token_usage["inputTokens"]
+    return estimate_session_tokens(session)
+
+
+def invalidate_session_context_usage(session: UISession) -> None:
+    session.token_usage = _empty_session_token_usage()
+
+
+def add_cumulative_session_token_usage(session: UISession, usage: dict[str, int] | None) -> None:
+    normalized_usage = normalize_session_token_usage(usage)
+    if not any(normalized_usage.values()):
+        return
+
+    cumulative_usage = normalize_session_token_usage(session.cumulative_token_usage)
+    for key, value in normalized_usage.items():
+        cumulative_usage[key] = max(cumulative_usage.get(key, 0) + value, 0)
+    if cumulative_usage["totalTokens"] == 0:
+        cumulative_usage["totalTokens"] = (
+            cumulative_usage["inputTokens"] + cumulative_usage["outputTokens"]
+        )
+    session.cumulative_token_usage = cumulative_usage
+
+
+def merge_session_token_usage(session: UISession, usage: dict[str, int] | None) -> None:
+    normalized_usage = normalize_session_token_usage(usage)
+    if not any(normalized_usage.values()):
+        return
+
+    session.token_usage = normalized_usage
+    add_cumulative_session_token_usage(session, normalized_usage)
+
+
+def build_session_state_payload(session: UISession) -> dict[str, Any]:
+    return {
+        "agentType": session.agent_type,
+        "phase": session.phase,
+        "deployState": session.deploy_state,
+        "planState": session.plan_state,
+        "messageCount": len(session.history_messages),
+        "toolCallCount": len(session.history_tools),
+        "thoughtCount": len(session.thoughts),
+        "estimatedTokens": estimate_session_context_tokens(session),
+        "maxTokens": max(session.max_context_tokens or infer_model_context_limit(session.model), 1),
+        "usage": normalize_session_token_usage(session.token_usage),
+        "cumulativeUsage": normalize_session_token_usage(session.cumulative_token_usage),
+        "codeChangeCount": len(session.code_changes),
+        "recentCodeChanges": session.code_changes[-8:],
+    }
 
 
 def infer_model_context_limit(model_name: str) -> int:
@@ -5042,7 +5091,9 @@ def capture_code_change_before_snapshots(
         if filename:
             raw_targets.append(filename)
     elif tool_name == "apply_patch":
-        raw_targets.extend(extract_apply_patch_paths(str(tool_arguments.get("patch") or "")))
+        filename = str(tool_arguments.get("filename") or "").strip()
+        if filename:
+            raw_targets.append(filename)
 
     snapshots: dict[str, str] = {}
     for raw_target in raw_targets:

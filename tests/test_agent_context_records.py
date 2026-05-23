@@ -151,12 +151,13 @@ class AgentContextRecordTests(unittest.TestCase):
 
         self.assertEqual(messages[-1]["role"], "user")
         self.assertEqual(messages[-1]["content"], "继续")
-        tool_record_message = messages[-2]["content"]
+        system_message = messages[0]["content"]
+        tool_record_message = system_message
         self.assertIn("[内部工具调用记录]", tool_record_message)
         self.assertIn("write_file", tool_record_message)
         self.assertIn("demo.py", tool_record_message)
         self.assertNotIn("工具轨迹摘要", tool_record_message)
-        planning_record_message = messages[-3]["content"]
+        planning_record_message = system_message
         self.assertIn("[内部规划记录]", planning_record_message)
         self.assertIn("方案已经确定", planning_record_message)
 
@@ -184,7 +185,7 @@ class AgentContextRecordTests(unittest.TestCase):
         )
 
         self.assertEqual(messages[-1]["content"], "继续")
-        runtime_state_message = messages[-2]["content"]
+        runtime_state_message = messages[0]["content"]
         self.assertIn("[内部会话状态]", runtime_state_message)
         self.assertIn("\"phase\": \"connected\"", runtime_state_message)
         self.assertIn("deploy-1", runtime_state_message)
@@ -215,7 +216,7 @@ class AgentContextRecordTests(unittest.TestCase):
         )
 
         self.assertEqual(messages[-1]["content"], "继续完成聊天框改造")
-        skill_context_message = messages[-2]["content"]
+        skill_context_message = messages[0]["content"]
         self.assertIn("[已激活技能]", skill_context_message)
         self.assertIn("supercode-chat-ui", skill_context_message)
         self.assertIn("chat-composer-editor.tsx", skill_context_message)
@@ -250,7 +251,7 @@ class AgentContextRecordTests(unittest.TestCase):
         )
 
         self.assertEqual(messages[-1]["content"], "继续改造聊天框")
-        catalog_message = messages[-2]["content"]
+        catalog_message = messages[0]["content"]
         self.assertIn("[技能目录]", catalog_message)
         self.assertIn("supercode-chat-ui", catalog_message)
         self.assertIn("composer", catalog_message)

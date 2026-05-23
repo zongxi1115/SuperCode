@@ -6,6 +6,7 @@ import {
   Conversation,
   ConversationContent,
   ConversationEmptyState,
+  ConversationScrollButton,
 } from "@/components/ai-elements/conversation";
 import {
   ChainOfThought,
@@ -189,7 +190,16 @@ import {
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import type React from "react";
-import { memo, useMemo, useRef, useState, useCallback, useEffect, useId, useLayoutEffect } from "react";
+import {
+  memo,
+  useMemo,
+  useRef,
+  useState,
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+} from "react";
 
 type ElementAttachment = {
   id: string;
@@ -223,7 +233,10 @@ type ChatPanelProps = {
     type: "commit" | "tag",
     approved: boolean,
   ) => void;
-  onResolveConnectInput?: (toolCallId: string, values: Record<string, string>) => void;
+  onResolveConnectInput?: (
+    toolCallId: string,
+    values: Record<string, string>,
+  ) => void;
   onResolvePlanQuestionsInput?: (
     toolCallId: string,
     answers: QuizSubmission,
@@ -233,10 +246,17 @@ type ChatPanelProps = {
   onAgentModeChange: (mode: AgentMode) => void;
   onModelChange: (modelId: string) => void;
   onReasoningEffortChange: (reasoningEffort: string) => void;
-  onCompletionAction?: (action: CompletionActionKey, message: ChatMessage) => void;
-  activeCompletionAction?: { messageId: string; action: CompletionActionKey } | null;
+  onCompletionAction?: (
+    action: CompletionActionKey,
+    message: ChatMessage,
+  ) => void;
+  activeCompletionAction?: {
+    messageId: string;
+    action: CompletionActionKey;
+  } | null;
   elementAttachments?: ElementAttachment[];
   onRemoveElementAttachment?: (id: string) => void;
+  thinkingRendering?: "text" | "markdown";
 };
 
 type MentionSuggestion = {
@@ -298,27 +318,39 @@ const TOOL_TITLES: Record<string, (args: Record<string, unknown>) => string> = {
     return "抓取网页内容";
   },
   list_file: (args) => {
-    const f = ((args.filename || args.path || args.file_path) as string)?.split(/[\\/]/).pop();
+    const f = ((args.filename || args.path || args.file_path) as string)
+      ?.split(/[\\/]/)
+      .pop();
     return f ? `正在搜索项目列表 ${f}` : "正在搜索项目列表";
   },
   read_file: (args) => {
-    const f = ((args.filename || args.path || args.file_path) as string)?.split(/[\\/]/).pop();
+    const f = ((args.filename || args.path || args.file_path) as string)
+      ?.split(/[\\/]/)
+      .pop();
     return f ? `正在阅读 ${f}` : "正在阅读文件";
   },
   write_file: (args) => {
-    const f = ((args.filename || args.path || args.file_path) as string)?.split(/[\\/]/).pop();
+    const f = ((args.filename || args.path || args.file_path) as string)
+      ?.split(/[\\/]/)
+      .pop();
     return f ? `正在创建 ${f}` : "正在创建文件";
   },
   apply_patch: (args) => {
-    const f = ((args.filename || args.path || args.file_path) as string)?.split(/[\\/]/).pop();
+    const f = ((args.filename || args.path || args.file_path) as string)
+      ?.split(/[\\/]/)
+      .pop();
     return f ? `正在编辑 ${f}` : "正在编辑文件";
   },
   replace_file: (args) => {
-    const f = ((args.filename || args.path || args.file_path) as string)?.split(/[\\/]/).pop();
+    const f = ((args.filename || args.path || args.file_path) as string)
+      ?.split(/[\\/]/)
+      .pop();
     return f ? `正在替换 ${f}` : "正在替换文件";
   },
   delete_file: (args) => {
-    const f = ((args.filename || args.path || args.file_path) as string)?.split(/[\\/]/).pop();
+    const f = ((args.filename || args.path || args.file_path) as string)
+      ?.split(/[\\/]/)
+      .pop();
     return f ? `正在删除 ${f}` : "正在删除文件";
   },
   execute: () => "正在执行命令",
@@ -397,7 +429,9 @@ function extractBalancedQuestionObjects(input: string): string[] {
 }
 
 function extractJsonStringField(input: string, field: string) {
-  const match = input.match(new RegExp(`"${field}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"`));
+  const match = input.match(
+    new RegExp(`"${field}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"`),
+  );
   if (!match) return undefined;
   try {
     return JSON.parse(`"${match[1]}"`) as string;
@@ -430,7 +464,9 @@ function normalizePlanQuestions(
         title,
         description: undefined,
         placeholder:
-          typeof record.placeholder === "string" ? record.placeholder : undefined,
+          typeof record.placeholder === "string"
+            ? record.placeholder
+            : undefined,
         required:
           typeof record.required === "boolean" ? record.required : undefined,
         includeOtherOption: true,
@@ -442,15 +478,22 @@ function normalizePlanQuestions(
                 const label = String(optionRecord.label ?? "").trim();
                 if (!label) return null;
                 return {
-                  id: String(optionRecord.id ?? `option_${index + 1}_${optionIndex + 1}`),
+                  id: String(
+                    optionRecord.id ?? `option_${index + 1}_${optionIndex + 1}`,
+                  ),
                   label,
                 };
               })
-              .filter((option): option is NonNullable<typeof option> => option !== null)
+              .filter(
+                (option): option is NonNullable<typeof option> =>
+                  option !== null,
+              )
           : undefined,
       } satisfies PlanQuizQuestion;
     })
-    .filter((question): question is NonNullable<typeof question> => question !== null);
+    .filter(
+      (question): question is NonNullable<typeof question> => question !== null,
+    );
 
   return questions.length > 0 ? questions : undefined;
 }
@@ -473,13 +516,15 @@ function parseStreamingPlanQuestions(streamedInput?: string) {
     };
   } catch {
     const partialQuestions = normalizePlanQuestions(
-      extractBalancedQuestionObjects(streamedInput).map((item) => {
-        try {
-          return JSON.parse(item) as PlanQuestionSource;
-        } catch {
-          return null;
-        }
-      }).filter((item): item is PlanQuestionSource => item !== null),
+      extractBalancedQuestionObjects(streamedInput)
+        .map((item) => {
+          try {
+            return JSON.parse(item) as PlanQuestionSource;
+          } catch {
+            return null;
+          }
+        })
+        .filter((item): item is PlanQuestionSource => item !== null),
     );
 
     return {
@@ -504,14 +549,24 @@ function collectCitations(parts: ContentBlock[]): Map<string, CitationInfo> {
     const output = tc.output;
     if (!output || typeof output !== "object") continue;
     if (tc.name === "search_web") {
-      const results = (output as Record<string, unknown>)?.results as Array<{ url?: string; title?: string; snippet?: string }> | undefined;
+      const results = (output as Record<string, unknown>)?.results as
+        | Array<{ url?: string; title?: string; snippet?: string }>
+        | undefined;
       results?.forEach((r) => {
-        if (r.url) map.set(r.url, { url: r.url, title: r.title, snippet: r.snippet });
+        if (r.url)
+          map.set(r.url, { url: r.url, title: r.title, snippet: r.snippet });
       });
     } else if (tc.name === "fetch_url_content") {
-      const docs = (output as Record<string, unknown>)?.documents as Array<{ url?: string; title?: string; content?: string }> | undefined;
+      const docs = (output as Record<string, unknown>)?.documents as
+        | Array<{ url?: string; title?: string; content?: string }>
+        | undefined;
       docs?.forEach((d) => {
-        if (d.url) map.set(d.url, { url: d.url, title: d.title, snippet: d.content ? d.content.slice(0, 200) : undefined });
+        if (d.url)
+          map.set(d.url, {
+            url: d.url,
+            title: d.title,
+            snippet: d.content ? d.content.slice(0, 200) : undefined,
+          });
       });
     }
   }
@@ -526,7 +581,10 @@ function escapeHtmlAttribute(value: string) {
     .replace(/>/g, "&gt;");
 }
 
-function getCitationDisplayTitle(url: string, citations: Map<string, CitationInfo>) {
+function getCitationDisplayTitle(
+  url: string,
+  citations: Map<string, CitationInfo>,
+) {
   const info = citations.get(url);
   if (info?.title?.trim()) {
     return info.title.trim();
@@ -587,7 +645,10 @@ function serializeCitationMarkdown(
   return markdown;
 }
 
-function renderCitationBadge(sources: string[], citations: Map<string, CitationInfo>) {
+function renderCitationBadge(
+  sources: string[],
+  citations: Map<string, CitationInfo>,
+) {
   const primaryUrl = sources[0];
   if (!primaryUrl) {
     return null;
@@ -827,13 +888,17 @@ function GitCommitPreview({
               <CommitFiles>
                 {changedFiles.map((rawFile: string, i: number) => {
                   const parsed = parseGitStatus(rawFile);
-                  const fileIcon = getFileIcon(parsed.path.split(/[\\/]/).pop() ?? '');
+                  const fileIcon = getFileIcon(
+                    parsed.path.split(/[\\/]/).pop() ?? "",
+                  );
                   return (
                     <CommitFile key={`${rawFile}-${i}`}>
                       <CommitFileInfo>
                         <CommitFileStatus status={parsed.status} />
                         {fileIcon ? (
-                          <span style={{ color: fileIcon.color }}>{fileIcon.icon}</span>
+                          <span style={{ color: fileIcon.color }}>
+                            {fileIcon.icon}
+                          </span>
                         ) : (
                           <CommitFileIcon />
                         )}
@@ -899,7 +964,10 @@ function ToolBody({
     type: "commit" | "tag",
     approved: boolean,
   ) => void;
-  onResolveConnectInput?: (toolCallId: string, values: Record<string, string>) => void;
+  onResolveConnectInput?: (
+    toolCallId: string,
+    values: Record<string, string>,
+  ) => void;
   onResolvePlanQuestionsInput?: (
     toolCallId: string,
     answers: QuizSubmission,
@@ -934,8 +1002,9 @@ function ToolBody({
     (toolCall.name === "replace_file" ? toolCall.streamedInput : undefined)) as
     | string
     | undefined;
-  const patchText = (args.patch ||
-    (toolCall.name === "apply_patch" ? toolCall.streamedInput : undefined)) as
+  const applyPatchPreview = ((toolCall.name === "apply_patch" && isStreaming
+    ? (args.new_content || toolCall.streamedInput)
+    : undefined)) as
     | string
     | undefined;
   const command =
@@ -962,9 +1031,19 @@ function ToolBody({
         : undefined;
   const asTaskObject = (
     value: unknown,
-  ): { title?: string; summary?: string; steps?: Array<Record<string, unknown>> } | undefined =>
+  ):
+    | {
+        title?: string;
+        summary?: string;
+        steps?: Array<Record<string, unknown>>;
+      }
+    | undefined =>
     value && typeof value === "object" && !Array.isArray(value)
-      ? (value as { title?: string; summary?: string; steps?: Array<Record<string, unknown>> })
+      ? (value as {
+          title?: string;
+          summary?: string;
+          steps?: Array<Record<string, unknown>>;
+        })
       : undefined;
   const normalizeQueueStatus = (
     status: unknown,
@@ -974,7 +1053,9 @@ function ToolBody({
     if (status === "running") return "running";
     return "pending";
   };
-  const renderStepQueue = (steps: Array<Record<string, unknown>> | undefined) => {
+  const renderStepQueue = (
+    steps: Array<Record<string, unknown>> | undefined,
+  ) => {
     if (!steps || steps.length === 0) return null;
     return (
       <Queue isStreaming={isStreaming}>
@@ -983,7 +1064,9 @@ function ToolBody({
             key={String(step.id ?? index)}
             status={normalizeQueueStatus(step.status)}
           >
-            <QueueItemTitle>{String(step.title ?? `Step ${index + 1}`)}</QueueItemTitle>
+            <QueueItemTitle>
+              {String(step.title ?? `Step ${index + 1}`)}
+            </QueueItemTitle>
             <QueueItemDescription>
               {String(step.summary ?? step.description ?? "")}
             </QueueItemDescription>
@@ -1008,12 +1091,28 @@ function ToolBody({
       output && typeof output === "object" && !Array.isArray(output)
         ? (output as Record<string, unknown>)
         : undefined;
-    const message = typeof connectOutput?.message === "string" ? connectOutput.message : undefined;
-    const sessionIdOut = typeof connectOutput?.session_id === "string" ? connectOutput.session_id : undefined;
-    const rootPath = typeof connectOutput?.root_path === "string" ? connectOutput.root_path : undefined;
-    const displayName = typeof connectOutput?.display_name === "string" ? connectOutput.display_name : undefined;
-    const hostOut = typeof connectOutput?.host === "string" ? connectOutput.host : undefined;
-    const usernameOut = typeof connectOutput?.username === "string" ? connectOutput.username : undefined;
+    const message =
+      typeof connectOutput?.message === "string"
+        ? connectOutput.message
+        : undefined;
+    const sessionIdOut =
+      typeof connectOutput?.session_id === "string"
+        ? connectOutput.session_id
+        : undefined;
+    const rootPath =
+      typeof connectOutput?.root_path === "string"
+        ? connectOutput.root_path
+        : undefined;
+    const displayName =
+      typeof connectOutput?.display_name === "string"
+        ? connectOutput.display_name
+        : undefined;
+    const hostOut =
+      typeof connectOutput?.host === "string" ? connectOutput.host : undefined;
+    const usernameOut =
+      typeof connectOutput?.username === "string"
+        ? connectOutput.username
+        : undefined;
     return (
       <div className="space-y-2">
         {message && (
@@ -1026,7 +1125,9 @@ function ToolBody({
           <div className="flex items-center gap-2 rounded-md bg-emerald-500/10 px-3 py-2 text-xs">
             <span className="text-emerald-600 font-medium">已连接</span>
             <span className="text-muted-foreground">
-              {hostOut ? `${usernameOut ? `${usernameOut}@` : ''}${hostOut}` : (displayName || rootPath || sessionIdOut)}
+              {hostOut
+                ? `${usernameOut ? `${usernameOut}@` : ""}${hostOut}`
+                : displayName || rootPath || sessionIdOut}
             </span>
           </div>
         )}
@@ -1034,7 +1135,9 @@ function ToolBody({
     );
   }
 
-  const streamingPlanPreview = parseStreamingPlanQuestions(toolCall.streamedInput);
+  const streamingPlanPreview = parseStreamingPlanQuestions(
+    toolCall.streamedInput,
+  );
   const questions =
     normalizePlanQuestions(toolCall.inputRequest?.questions) ??
     normalizePlanQuestions(args.questions) ??
@@ -1043,7 +1146,11 @@ function ToolBody({
     toolCall.inputRequest?.kind === "plan_questions" ||
     toolCall.name === "ask_plan_questions" ||
     Array.isArray(args.questions) ||
-    Boolean(streamingPlanPreview?.title || streamingPlanPreview?.message || streamingPlanPreview?.questions?.length);
+    Boolean(
+      streamingPlanPreview?.title ||
+      streamingPlanPreview?.message ||
+      streamingPlanPreview?.questions?.length,
+    );
 
   if (isPlanQuestionsTool) {
     if (toolCall.state === "input-requested") {
@@ -1112,7 +1219,9 @@ function ToolBody({
         ? (output as Record<string, unknown>)
         : undefined;
     const task = asTaskObject(taskPayload?.task);
-    const stepIds = Array.isArray(taskPayload?.step_ids) ? taskPayload.step_ids : [];
+    const stepIds = Array.isArray(taskPayload?.step_ids)
+      ? taskPayload.step_ids
+      : [];
 
     return (
       <div className="space-y-3 rounded-md bg-muted/40 p-3 text-xs">
@@ -1126,7 +1235,9 @@ function ToolBody({
         </div>
         {renderStepQueue(task?.steps)}
         {stepIds.length > 0 ? (
-          <p className="text-muted-foreground">已创建 {stepIds.length} 个 steps。</p>
+          <p className="text-muted-foreground">
+            已创建 {stepIds.length} 个 steps。
+          </p>
         ) : null}
       </div>
     );
@@ -1156,10 +1267,14 @@ function ToolBody({
             {String(activeTask?.summary ?? "")}
           </p>
         </div>
-        {activeTask?.steps ? renderStepQueue(activeTask.steps) : renderStepQueue(planSteps)}
+        {activeTask?.steps
+          ? renderStepQueue(activeTask.steps)
+          : renderStepQueue(planSteps)}
         {toolCall.name === "finish_task" ? (
           <p className="text-muted-foreground">
-            {nextStepId ? `已推进到下一步：${nextStepId}` : "当前 task 已完成。"}
+            {nextStepId
+              ? `已推进到下一步：${nextStepId}`
+              : "当前 task 已完成。"}
           </p>
         ) : null}
       </div>
@@ -1264,16 +1379,131 @@ function ToolBody({
     );
   }
 
-  if (toolCall.name === "apply_patch" && patchText) {
+  if (toolCall.name === "apply_patch" && applyPatchPreview) {
     return (
       <div className="space-y-2">
+        {filename && (
+          <TaskItemFile>
+            <FileCodeIcon className="size-3" />
+            {filename}
+          </TaskItemFile>
+        )}
         <CodeBlock
-          code={patchText}
+          code={applyPatchPreview}
           enableHighlighting={!isStreaming}
-          language={"diff" as never}
+          language={filename ? (getShikiLanguage(filename) as never) : "text"}
           viewportClassName="overflow-x-auto"
         />
       </div>
+    );
+  }
+
+  if (toolCall.name === "apply_patch" && !isStreaming) {
+    const patchOutput =
+      output && typeof output === "object" && !Array.isArray(output)
+        ? (output as Record<string, unknown>)
+        : undefined;
+    const summary =
+      typeof patchOutput?.summary === "string"
+        ? patchOutput.summary
+        : typeof output === "string"
+          ? output
+          : null;
+    const startLine =
+      typeof args.start_line === "number" ? args.start_line : undefined;
+    const endLine =
+      typeof args.end_line === "number" ? args.end_line : undefined;
+    const fileIcon = filename
+      ? getFileIcon(filename.split(/[\\/]/).pop() ?? "")
+      : null;
+    return (
+      <span className="inline-flex flex-wrap items-center gap-1 text-muted-foreground text-sm">
+        <span>{summary || "已编辑"}</span>
+        {filename && (
+          <TaskItemFile>
+            {fileIcon ? (
+              <span style={{ color: fileIcon.color }}>{fileIcon.icon}</span>
+            ) : (
+              <FileCodeIcon className="size-3" />
+            )}
+            <span>{filename.split(/[\\/]/).pop()}</span>
+            {startLine != null && endLine != null && (
+              <span className="text-muted-foreground">
+                :{startLine}-{endLine}
+              </span>
+            )}
+          </TaskItemFile>
+        )}
+      </span>
+    );
+  }
+
+  if (
+    toolCall.name === "replace_file" &&
+    !(oldContent && newContent) &&
+    !isStreaming
+  ) {
+    const fileIcon = filename
+      ? getFileIcon(filename.split(/[\\/]/).pop() ?? "")
+      : null;
+    const replaceOutput =
+      typeof output === "string"
+        ? output
+        : output && typeof output === "object" && !Array.isArray(output)
+          ? (output as Record<string, unknown>)
+          : undefined;
+    const summary =
+      typeof replaceOutput === "string"
+        ? replaceOutput
+        : typeof (replaceOutput as Record<string, unknown>)?.summary ===
+            "string"
+          ? (replaceOutput as Record<string, unknown>).summary
+          : null;
+    return (
+      <span className="inline-flex flex-wrap items-center gap-1 text-muted-foreground text-sm">
+        <span>{summary || "已更新"}</span>
+        {filename && (
+          <TaskItemFile>
+            {fileIcon ? (
+              <span style={{ color: fileIcon.color }}>{fileIcon.icon}</span>
+            ) : (
+              <FileCodeIcon className="size-3" />
+            )}
+            <span>{filename.split(/[\\/]/).pop()}</span>
+          </TaskItemFile>
+        )}
+      </span>
+    );
+  }
+
+  if (toolCall.name === "write_file" && !content && !isStreaming) {
+    const fileIcon = filename
+      ? getFileIcon(filename.split(/[\\/]/).pop() ?? "")
+      : null;
+    const writeOutput =
+      output && typeof output === "object" && !Array.isArray(output)
+        ? (output as Record<string, unknown>)
+        : undefined;
+    const summary =
+      typeof writeOutput?.summary === "string"
+        ? writeOutput.summary
+        : typeof output === "string"
+          ? output
+          : null;
+    return (
+      <span className="inline-flex flex-wrap items-center gap-1 text-muted-foreground text-sm">
+        <span>{summary || "已创建"}</span>
+        {filename && (
+          <TaskItemFile>
+            {fileIcon ? (
+              <span style={{ color: fileIcon.color }}>{fileIcon.icon}</span>
+            ) : (
+              <FileCodeIcon className="size-3" />
+            )}
+            <span>{filename.split(/[\\/]/).pop()}</span>
+          </TaskItemFile>
+        )}
+      </span>
     );
   }
 
@@ -1531,14 +1761,28 @@ function ToolBody({
   }
 
   if (toolCall.name === "search_web") {
-    const results = output && typeof output === "object"
-      ? (output as Record<string, unknown>)?.results as Array<{ rank?: number; title?: string; url?: string; snippet?: string; source?: string; publishedAt?: string }> | undefined
-      : undefined;
+    const results =
+      output && typeof output === "object"
+        ? ((output as Record<string, unknown>)?.results as
+            | Array<{
+                rank?: number;
+                title?: string;
+                url?: string;
+                snippet?: string;
+                source?: string;
+                publishedAt?: string;
+              }>
+            | undefined)
+        : undefined;
     if (results && results.length > 0) {
       return (
         <Sources title="搜索的内容">
           {results.map((r, i) => (
-            <SourceTag key={i} href={r.url ?? "#"} title={r.title || r.source} />
+            <SourceTag
+              key={i}
+              href={r.url ?? "#"}
+              title={r.title || r.source}
+            />
           ))}
         </Sources>
       );
@@ -1547,9 +1791,12 @@ function ToolBody({
   }
 
   if (toolCall.name === "fetch_url_content") {
-    const documents = output && typeof output === "object"
-      ? (output as Record<string, unknown>)?.documents as Array<{ url?: string; title?: string; content?: string }> | undefined
-      : undefined;
+    const documents =
+      output && typeof output === "object"
+        ? ((output as Record<string, unknown>)?.documents as
+            | Array<{ url?: string; title?: string; content?: string }>
+            | undefined)
+        : undefined;
     if (documents && documents.length > 0) {
       return (
         <Sources title="抓取的内容">
@@ -1653,6 +1900,69 @@ function PlanDraftCard({
   );
 }
 
+function PlanToggle({
+  planSteps,
+  isStreaming,
+}: {
+  planSteps: PlanStep[];
+  isStreaming: boolean;
+}) {
+  const [isOpen, setIsOpen] = useState(false);
+
+  if (planSteps.length === 0) return null;
+
+  const completedCount = planSteps.filter(
+    (s) => s.status === "completed",
+  ).length;
+
+  return (
+    <div className="px-3">
+      <button
+        type="button"
+        onClick={() => setIsOpen((prev) => !prev)}
+        className="flex items-center gap-2 w-full rounded-md px-2 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
+      >
+        <ListChecks className="size-3.5 shrink-0" />
+        <span className="flex-1 text-left">计划</span>
+        <span className="text-[10px] tabular-nums">
+          {completedCount}/{planSteps.length}
+        </span>
+        <motion.div
+          animate={{ rotate: isOpen ? 180 : 0 }}
+          transition={{ type: "spring", stiffness: 300, damping: 25 }}
+        >
+          <ChevronDown className="size-3" />
+        </motion.div>
+      </button>
+
+      <AnimatePresence>
+        {isOpen && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ type: "spring", stiffness: 260, damping: 26 }}
+            className="overflow-hidden"
+          >
+            <div className="px-1 pb-2 pt-1">
+              <Queue isStreaming={isStreaming}>
+                {planSteps.map((step) => (
+                  <QueueItem key={step.id} status={step.status}>
+                    <QueueItemTitle>{step.title}</QueueItemTitle>
+                    <QueueItemDescription>
+                      {step.description}
+                    </QueueItemDescription>
+                  </QueueItem>
+                ))}
+              </Queue>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
 function DataPartView({
   part,
   onViewPlan,
@@ -1666,7 +1976,10 @@ function DataPartView({
     const agentType = data?.agentType as string | undefined;
     if (!agentType) return null;
 
-    const modeConfig: Record<string, { label: string; icon: React.ReactNode; color: string }> = {
+    const modeConfig: Record<
+      string,
+      { label: string; icon: React.ReactNode; color: string }
+    > = {
       plan: {
         label: "计划",
         icon: <LightbulbIcon className="size-3.5" />,
@@ -1690,7 +2003,9 @@ function DataPartView({
     return (
       <div className="flex items-center gap-2 rounded-md bg-muted/30 px-3 py-2 text-xs">
         <span className={config.color}>{config.icon}</span>
-        <span className="font-medium text-foreground">开始 {config.label} 环节</span>
+        <span className="font-medium text-foreground">
+          开始 {config.label} 环节
+        </span>
       </div>
     );
   }
@@ -1714,19 +2029,38 @@ function DataPartView({
     const draftSummary = typeof draft.summary === "string" ? draft.summary : "";
     const draftKeySteps = Array.isArray(draft.keySteps)
       ? draft.keySteps.filter((s): s is string => typeof s === "string")
-      : [] as string[];
-    const draftMarkdown = typeof draft.markdown === "string" ? draft.markdown : "";
+      : ([] as string[]);
+    const draftMarkdown =
+      typeof draft.markdown === "string" ? draft.markdown : "";
 
-    const detailMd = draftMarkdown || [
-      `# ${draftTitle}`,
-      "",
-      draftSummary,
-      "",
-      typeof draft.overview === "string" ? `## 概览\n\n${draft.overview}\n` : "",
-      draftKeySteps.length > 0 ? ["## 关键步骤", "", ...draftKeySteps.map((s, i) => `${i + 1}. ${s}`)].join("\n") : "",
-    ].join("\n");
+    const detailMd =
+      draftMarkdown ||
+      [
+        `# ${draftTitle}`,
+        "",
+        draftSummary,
+        "",
+        typeof draft.overview === "string"
+          ? `## 概览\n\n${draft.overview}\n`
+          : "",
+        draftKeySteps.length > 0
+          ? [
+              "## 关键步骤",
+              "",
+              ...draftKeySteps.map((s, i) => `${i + 1}. ${s}`),
+            ].join("\n")
+          : "",
+      ].join("\n");
 
-    return <PlanDraftCard title={draftTitle} summary={draftSummary} keySteps={draftKeySteps} detailMarkdown={detailMd} onViewPlan={onViewPlan} />;
+    return (
+      <PlanDraftCard
+        title={draftTitle}
+        summary={draftSummary}
+        keySteps={draftKeySteps}
+        detailMarkdown={detailMd}
+        onViewPlan={onViewPlan}
+      />
+    );
   }
 
   if (
@@ -1798,19 +2132,26 @@ const personaLabels: Record<PersonaState, string> = {
 };
 
 const PERSONA_LAYOUT_ID = "chat-persona-shell";
-const CONTEXT_COMPRESSION_USAGE_THRESHOLD = 0.7;
+const CONTEXT_COMPRESSION_USAGE_THRESHOLD = 0.8;
 
 const PersonaShell = memo(function PersonaShell({
   state,
+  onClick,
 }: {
   state: PersonaState;
+  onClick?: () => void;
 }) {
   return (
     <motion.div
       layoutId={PERSONA_LAYOUT_ID}
       transition={{ type: "spring", stiffness: 320, damping: 30 }}
       aria-label={`AI status: ${personaLabels[state]}`}
-      className="pointer-events-none inline-flex items-center justify-start"
+      className={
+        onClick
+          ? "inline-flex items-center justify-start cursor-pointer"
+          : "pointer-events-none inline-flex items-center justify-start"
+      }
+      onClick={onClick}
     >
       <Persona variant="glint" state={state} className="size-12" />
     </motion.div>
@@ -1826,7 +2167,10 @@ const COMPLETION_ACTIONS = [
   { icon: RocketIcon, label: "发布版本", key: "publish" },
 ] as const;
 
-const DEFAULT_DISABLED_COMPLETION_ACTIONS: Record<CompletionActionKey, boolean> = {
+const DEFAULT_DISABLED_COMPLETION_ACTIONS: Record<
+  CompletionActionKey,
+  boolean
+> = {
   copy: false,
   "view-changes": true,
   compress: false,
@@ -1853,12 +2197,14 @@ const CompletionActionToolbar = memo(function CompletionActionToolbar({
                 variant="ghost"
                 disabled={Boolean(
                   DEFAULT_DISABLED_COMPLETION_ACTIONS[action.key] ||
-                    disabledActions?.[action.key] ||
-                    !onAction,
+                  disabledActions?.[action.key] ||
+                  !onAction,
                 )}
                 className={cn(
                   "shrink-0",
-                  DEFAULT_DISABLED_COMPLETION_ACTIONS[action.key] || disabledActions?.[action.key] || !onAction
+                  DEFAULT_DISABLED_COMPLETION_ACTIONS[action.key] ||
+                    disabledActions?.[action.key] ||
+                    !onAction
                     ? "text-muted-foreground/40"
                     : "text-muted-foreground hover:text-foreground hover:bg-accent/60",
                 )}
@@ -1929,11 +2275,27 @@ const PersonaRail = memo(function PersonaRail({
   state: PersonaState;
   isCompleted: boolean;
   message?: ChatMessage | null;
-  onCompletionAction?: (action: CompletionActionKey, message: ChatMessage) => void;
+  onCompletionAction?: (
+    action: CompletionActionKey,
+    message: ChatMessage,
+  ) => void;
   disabledActions?: Partial<Record<CompletionActionKey, boolean>>;
 }) {
   const [isHovered, setIsHovered] = useState(false);
-  const activeState: PersonaState = isCompleted && isHovered ? "asleep" : state;
+  const [easterEggState, setEasterEggState] = useState<PersonaState | null>(
+    null,
+  );
+
+  const activeState: PersonaState =
+    easterEggState ?? (isCompleted && isHovered ? "asleep" : state);
+
+  const handlePersonaClick = useCallback(() => {
+    if (!isCompleted || state !== "idle" || easterEggState) return;
+    const candidates: PersonaState[] = ["listening", "thinking", "speaking"];
+    const pick = candidates[Math.floor(Math.random() * candidates.length)];
+    setEasterEggState(pick);
+    setTimeout(() => setEasterEggState(null), 1000);
+  }, [isCompleted, state, easterEggState]);
 
   return (
     <motion.div
@@ -1942,7 +2304,12 @@ const PersonaRail = memo(function PersonaRail({
       onMouseEnter={() => isCompleted && setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
     >
-      <PersonaShell state={activeState} />
+      <PersonaShell
+        state={activeState}
+        onClick={
+          isCompleted && state === "idle" ? handlePersonaClick : undefined
+        }
+      />
       <AnimatePresence>
         {isCompleted && isHovered && (
           <motion.div
@@ -2001,6 +2368,7 @@ const MessageList = memo(function MessageList({
   activeCompletionAction,
   compressedMessageIds,
   canCompress,
+  thinkingRendering = "text",
 }: {
   sessionId: string | null;
   isLoading: boolean;
@@ -2012,16 +2380,26 @@ const MessageList = memo(function MessageList({
     type: "commit" | "tag",
     approved: boolean,
   ) => void;
-  onResolveConnectInput?: (toolCallId: string, values: Record<string, string>) => void;
+  onResolveConnectInput?: (
+    toolCallId: string,
+    values: Record<string, string>,
+  ) => void;
   onResolvePlanQuestionsInput?: (
     toolCallId: string,
     answers: QuizSubmission,
   ) => void | Promise<void>;
   onViewPlan?: (title: string, markdown: string) => void;
-  onCompletionAction?: (action: CompletionActionKey, message: ChatMessage) => void;
-  activeCompletionAction?: { messageId: string; action: CompletionActionKey } | null;
+  onCompletionAction?: (
+    action: CompletionActionKey,
+    message: ChatMessage,
+  ) => void;
+  activeCompletionAction?: {
+    messageId: string;
+    action: CompletionActionKey;
+  } | null;
   compressedMessageIds: Set<string>;
   canCompress: boolean;
+  thinkingRendering?: "text" | "markdown";
 }) {
   const [taskOpenState, setTaskOpenState] = useState<Record<string, boolean>>(
     {},
@@ -2093,7 +2471,13 @@ const MessageList = memo(function MessageList({
           : {})}
       >
         <TaskTrigger
-          title={tc.state === "running" && isLastRunning ? <Shimmer duration={1}>{toolTitle}</Shimmer> : toolTitle}
+          title={
+            tc.state === "running" && isLastRunning ? (
+              <Shimmer duration={1}>{toolTitle}</Shimmer>
+            ) : (
+              toolTitle
+            )
+          }
           icon={getToolIcon(tc.name)}
         />
         <TaskContent>
@@ -2114,6 +2498,83 @@ const MessageList = memo(function MessageList({
         </TaskContent>
       </Task>
     );
+  };
+
+  const renderParallelGroupedToolCalls = (
+    toolCalls: ToolCallRecord[],
+    lastRunningIdx: number,
+  ) => {
+    const items: React.ReactNode[] = [];
+    let i = 0;
+    while (i < toolCalls.length) {
+      const tc = toolCalls[i];
+      if (tc.name === "read_file") {
+        const readFiles: { tc: ToolCallRecord; idx: number }[] = [];
+        let j = i;
+        while (j < toolCalls.length && toolCalls[j].name === "read_file") {
+          readFiles.push({ tc: toolCalls[j], idx: j });
+          j++;
+        }
+        if (readFiles.length === 1) {
+          const rf = readFiles[0];
+          items.push(renderToolCall(rf.tc, rf.idx === lastRunningIdx));
+        } else {
+          const anyRunning = readFiles.some((rf) => rf.tc.state === "running");
+          const allCompleted = readFiles.every(
+            (rf) =>
+              rf.tc.state === "completed" || rf.tc.state === "output-available",
+          );
+          items.push(
+            <Task key={`read-file-group-${i}`} defaultOpen={anyRunning}>
+              <TaskTrigger
+                title={
+                  anyRunning ? (
+                    <Shimmer duration={1}>
+                      {`正在阅读 ${readFiles.length} 个文件 · 执行中`}
+                    </Shimmer>
+                  ) : (
+                    `已阅读 ${readFiles.length} 个文件 · ${allCompleted ? "已完成" : "执行中"}`
+                  )
+                }
+                icon={<FileSearchIcon className="size-4" />}
+              />
+              <TaskContent>
+                <TaskItem>
+                  <span className="inline-flex flex-wrap items-center gap-1">
+                    <span>{anyRunning ? "正在阅读" : "已阅读"}</span>
+                    {readFiles.map((rf, rfi) => {
+                      const rfArgs = rf.tc.arguments || {};
+                      const rfFilename = (rfArgs.filename ||
+                        rfArgs.path ||
+                        rfArgs.file_path) as string | undefined;
+                      const leaf = rfFilename?.split(/[\\/]/).pop();
+                      const fileIcon = leaf ? getFileIcon(leaf) : null;
+                      return (
+                        <TaskItemFile key={rfi}>
+                          {fileIcon ? (
+                            <span style={{ color: fileIcon.color }}>
+                              {fileIcon.icon}
+                            </span>
+                          ) : (
+                            <FileCodeIcon className="size-3" />
+                          )}
+                          <span>{leaf || (rfFilename ?? "...")}</span>
+                        </TaskItemFile>
+                      );
+                    })}
+                  </span>
+                </TaskItem>
+              </TaskContent>
+            </Task>,
+          );
+        }
+        i = j;
+      } else {
+        items.push(renderToolCall(tc, i === lastRunningIdx));
+        i++;
+      }
+    }
+    return items;
   };
 
   const renderLegacyAssistant = (msg: ChatMessage, isLast: boolean) => {
@@ -2137,9 +2598,12 @@ const MessageList = memo(function MessageList({
                 {hasToolCalls ? (
                   <div className="space-y-2">
                     {(() => {
-                      const lastRunningIdx = [...(msg.toolCalls ?? [])].findLastIndex((tc) => tc.state === "running");
-                      return msg.toolCalls?.map((tc, tci) =>
-                        renderToolCall(tc, tci === lastRunningIdx),
+                      const lastRunningIdx = [
+                        ...(msg.toolCalls ?? []),
+                      ].findLastIndex((tc) => tc.state === "running");
+                      return renderParallelGroupedToolCalls(
+                        msg.toolCalls ?? [],
+                        lastRunningIdx,
                       );
                     })()}
                   </div>
@@ -2149,9 +2613,12 @@ const MessageList = memo(function MessageList({
           ) : hasToolCalls ? (
             <div className="space-y-2">
               {(() => {
-                const lastRunningIdx = [...(msg.toolCalls ?? [])].findLastIndex((tc) => tc.state === "running");
-                return msg.toolCalls?.map((tc, tci) =>
-                  renderToolCall(tc, tci === lastRunningIdx),
+                const lastRunningIdx = [...(msg.toolCalls ?? [])].findLastIndex(
+                  (tc) => tc.state === "running",
+                );
+                return renderParallelGroupedToolCalls(
+                  msg.toolCalls ?? [],
+                  lastRunningIdx,
                 );
               })()}
             </div>
@@ -2163,9 +2630,12 @@ const MessageList = memo(function MessageList({
     return (msg.toolCalls?.length ?? 0) > 0 ? (
       <div className="space-y-2">
         {(() => {
-          const lastRunningIdx = [...(msg.toolCalls ?? [])].findLastIndex((tc) => tc.state === "running");
-          return msg.toolCalls?.map((tc, tci) =>
-            renderToolCall(tc, tci === lastRunningIdx),
+          const lastRunningIdx = [...(msg.toolCalls ?? [])].findLastIndex(
+            (tc) => tc.state === "running",
+          );
+          return renderParallelGroupedToolCalls(
+            msg.toolCalls ?? [],
+            lastRunningIdx,
           );
         })()}
       </div>
@@ -2205,7 +2675,8 @@ const MessageList = memo(function MessageList({
         groups.push({ type: "text", block: part });
       } else if (part.type === "data") {
         if (part.dataType === "data-session-state") {
-          const agentType = (part.data as Record<string, unknown> | undefined)?.agentType as string | undefined;
+          const agentType = (part.data as Record<string, unknown> | undefined)
+            ?.agentType as string | undefined;
           if (agentType && agentType !== lastAgentType) {
             lastAgentType = agentType;
             cotBuffer.push(part);
@@ -2236,21 +2707,121 @@ const MessageList = memo(function MessageList({
       }
 
       if (group.type === "data") {
-        return <DataPartView key={`data-${gi}`} part={group.block} onViewPlan={onViewPlan} />;
+        return (
+          <DataPartView
+            key={`data-${gi}`}
+            part={group.block}
+            onViewPlan={onViewPlan}
+          />
+        );
       }
 
       if (group.type === "tools") {
         const lastRunningIdx = group.blocks.findLastIndex(
           (b) => b.type === "tool_call" && b.toolCall.state === "running",
         );
+        const toolItems: React.ReactNode[] = [];
+        let ti = 0;
+        while (ti < group.blocks.length) {
+          const block = group.blocks[ti];
+          if (
+            block.type === "tool_call" &&
+            block.toolCall.name === "read_file"
+          ) {
+            const readFiles: {
+              block: Extract<ContentBlock, { type: "tool_call" }>;
+              idx: number;
+            }[] = [];
+            let tj = ti;
+            while (
+              tj < group.blocks.length &&
+              group.blocks[tj].type === "tool_call" &&
+              (group.blocks[tj] as Extract<ContentBlock, { type: "tool_call" }>)
+                .toolCall.name === "read_file"
+            ) {
+              readFiles.push({
+                block: group.blocks[tj] as Extract<
+                  ContentBlock,
+                  { type: "tool_call" }
+                >,
+                idx: tj,
+              });
+              tj++;
+            }
+            if (readFiles.length === 1) {
+              const rf = readFiles[0];
+              toolItems.push(
+                renderToolCall(rf.block.toolCall, rf.idx === lastRunningIdx),
+              );
+            } else {
+              const anyRunning = readFiles.some(
+                (rf) => rf.block.toolCall.state === "running",
+              );
+              const allCompleted = readFiles.every(
+                (rf) =>
+                  rf.block.toolCall.state === "completed" ||
+                  rf.block.toolCall.state === "output-available",
+              );
+              toolItems.push(
+                <Task
+                  key={`read-file-group-${gi}-${ti}`}
+                  defaultOpen={anyRunning}
+                >
+                  <TaskTrigger
+                    title={
+                      anyRunning ? (
+                        <Shimmer duration={1}>
+                          {`正在阅读 ${readFiles.length} 个文件 · 执行中`}
+                        </Shimmer>
+                      ) : (
+                        `已阅读 ${readFiles.length} 个文件 · ${allCompleted ? "已完成" : "执行中"}`
+                      )
+                    }
+                    icon={<FileSearchIcon className="size-4" />}
+                  />
+                  <TaskContent>
+                    <TaskItem>
+                      <span className="inline-flex flex-wrap items-center gap-1">
+                        <span>{anyRunning ? "正在阅读" : "已阅读"}</span>
+                        {readFiles.map((rf, rfi) => {
+                          const rfArgs = rf.block.toolCall.arguments || {};
+                          const rfFilename = (rfArgs.filename ||
+                            rfArgs.path ||
+                            rfArgs.file_path) as string | undefined;
+                          const leaf = rfFilename?.split(/[\\/]/).pop();
+                          const fileIcon = leaf ? getFileIcon(leaf) : null;
+                          return (
+                            <TaskItemFile key={rfi}>
+                              {fileIcon ? (
+                                <span style={{ color: fileIcon.color }}>
+                                  {fileIcon.icon}
+                                </span>
+                              ) : (
+                                <FileCodeIcon className="size-3" />
+                              )}
+                              <span>{leaf || (rfFilename ?? "...")}</span>
+                            </TaskItemFile>
+                          );
+                        })}
+                      </span>
+                    </TaskItem>
+                  </TaskContent>
+                </Task>,
+              );
+            }
+            ti = tj;
+          } else if (block.type === "tool_call") {
+            toolItems.push(
+              renderToolCall(block.toolCall, ti === lastRunningIdx),
+            );
+            ti++;
+          } else {
+            ti++;
+          }
+        }
         return (
           <div key={`tools-${gi}`} className="space-y-2">
-            {group.blocks.map((block, bi) => {
-              if (block.type === "tool_call") {
-                return renderToolCall(block.toolCall, bi === lastRunningIdx);
-              }
-              return null;
-            })}
+            {toolItems}
           </div>
         );
       }
@@ -2275,9 +2846,7 @@ const MessageList = memo(function MessageList({
         ? [...group.blocks]
             .reverse()
             .find(
-              (b) =>
-                b.type === "tool_call" &&
-                b.toolCall.state === "running",
+              (b) => b.type === "tool_call" && b.toolCall.state === "running",
             )
         : undefined;
       const isDraftingPlan = group.blocks.some(
@@ -2313,42 +2882,164 @@ const MessageList = memo(function MessageList({
               const lastRunningIdx = isActive
                 ? group.blocks.findLastIndex(
                     (b) =>
-                      (b.type === "tool_call" && b.toolCall.state === "running") ||
+                      (b.type === "tool_call" &&
+                        b.toolCall.state === "running") ||
                       b.type === "thinking",
                   )
                 : -1;
-              return group.blocks.map((block, bi) => {
+              const rendered: React.ReactNode[] = [];
+              let i = 0;
+              while (i < group.blocks.length) {
+                const block = group.blocks[i];
                 if (block.type === "thinking") {
-                  return block.text.trim() ? (
-                    <ChainOfThoughtStep
-                      key={`thinking-${gi}-${bi}`}
-                      label={renderCitationMessage(block.text, citations)}
-                      status={bi === lastRunningIdx && isActive ? "active" : "complete"}
-                    />
-                  ) : null;
-                }
-                if (block.type === "tool_call") {
-                  return (
-                    <div key={`tool-${gi}-${bi}`}>
-                      {renderToolCall(block.toolCall, bi === lastRunningIdx, {
+                  if (block.text.trim()) {
+                    const thinkingLabel =
+                      thinkingRendering === "markdown" ? (
+                        renderCitationMessage(block.text, citations)
+                      ) : (
+                        <span className="whitespace-pre-wrap break-words">
+                          {block.text}
+                        </span>
+                      );
+                    rendered.push(
+                      <ChainOfThoughtStep
+                        key={`thinking-${gi}-${i}`}
+                        label={thinkingLabel}
+                        status={
+                          i === lastRunningIdx && isActive
+                            ? "active"
+                            : "complete"
+                        }
+                      />,
+                    );
+                  }
+                  i++;
+                } else if (
+                  block.type === "tool_call" &&
+                  block.toolCall.name === "read_file"
+                ) {
+                  const readFiles: {
+                    block: Extract<ContentBlock, { type: "tool_call" }>;
+                    idx: number;
+                  }[] = [];
+                  let j = i;
+                  while (
+                    j < group.blocks.length &&
+                    group.blocks[j].type === "tool_call" &&
+                    (
+                      group.blocks[j] as Extract<
+                        ContentBlock,
+                        { type: "tool_call" }
+                      >
+                    ).toolCall.name === "read_file"
+                  ) {
+                    readFiles.push({
+                      block: group.blocks[j] as Extract<
+                        ContentBlock,
+                        { type: "tool_call" }
+                      >,
+                      idx: j,
+                    });
+                    j++;
+                  }
+                  if (readFiles.length === 1) {
+                    const rf = readFiles[0];
+                    rendered.push(
+                      <div key={`tool-${gi}-${rf.idx}`}>
+                        {renderToolCall(
+                          rf.block.toolCall,
+                          rf.idx === lastRunningIdx,
+                          {
+                            replaceCompletedPlanQuestionsWithLoading:
+                              isDraftingPlan &&
+                              (rf.block.toolCall.inputRequest?.kind ===
+                                "plan_questions" ||
+                                rf.block.toolCall.name ===
+                                  "ask_plan_questions"),
+                          },
+                        )}
+                      </div>,
+                    );
+                  } else {
+                    const allCompleted = readFiles.every(
+                      (rf) =>
+                        rf.block.toolCall.state === "completed" ||
+                        rf.block.toolCall.state === "output-available",
+                    );
+                    const anyRunning = readFiles.some(
+                      (rf) => rf.block.toolCall.state === "running",
+                    );
+                    const isLastInGroup = readFiles.some(
+                      (rf) => rf.idx === lastRunningIdx,
+                    );
+                    const status: "complete" | "active" | "pending" =
+                      anyRunning && isLastInGroup && isActive
+                        ? "active"
+                        : allCompleted
+                          ? "complete"
+                          : "active";
+                    rendered.push(
+                      <ChainOfThoughtStep
+                        key={`read-file-group-${gi}-${i}`}
+                        icon={FileSearchIcon}
+                        label={
+                          <span className="inline-flex flex-wrap items-center gap-1">
+                            <span>{anyRunning ? "正在阅读" : "已阅读"}</span>
+                            {readFiles.map((rf, rfi) => {
+                              const rfArgs = rf.block.toolCall.arguments || {};
+                              const rfFilename = (rfArgs.filename ||
+                                rfArgs.path ||
+                                rfArgs.file_path) as string | undefined;
+                              const leaf = rfFilename?.split(/[\\/]/).pop();
+                              const fileIcon = leaf ? getFileIcon(leaf) : null;
+                              return (
+                                <TaskItemFile key={rfi}>
+                                  {fileIcon ? (
+                                    <span style={{ color: fileIcon.color }}>
+                                      {fileIcon.icon}
+                                    </span>
+                                  ) : (
+                                    <FileCodeIcon className="size-3" />
+                                  )}
+                                  <span>{leaf || (rfFilename ?? "...")}</span>
+                                </TaskItemFile>
+                              );
+                            })}
+                          </span>
+                        }
+                        status={status}
+                      />,
+                    );
+                  }
+                  i = j;
+                } else if (block.type === "tool_call") {
+                  rendered.push(
+                    <div key={`tool-${gi}-${i}`}>
+                      {renderToolCall(block.toolCall, i === lastRunningIdx, {
                         replaceCompletedPlanQuestionsWithLoading:
                           isDraftingPlan &&
                           (block.toolCall.inputRequest?.kind ===
                             "plan_questions" ||
                             block.toolCall.name === "ask_plan_questions"),
                       })}
-                    </div>
+                    </div>,
                   );
-                }
-                if (block.type === "data" && block.dataType === "data-session-state") {
-                  return (
-                    <div key={`session-state-${gi}-${bi}`}>
+                  i++;
+                } else if (
+                  block.type === "data" &&
+                  block.dataType === "data-session-state"
+                ) {
+                  rendered.push(
+                    <div key={`session-state-${gi}-${i}`}>
                       <DataPartView part={block} />
-                    </div>
+                    </div>,
                   );
+                  i++;
+                } else {
+                  i++;
                 }
-                return null;
-              });
+              }
+              return rendered;
             })()}
           </ChainOfThoughtContent>
         </ChainOfThought>
@@ -2369,14 +3060,25 @@ const MessageList = memo(function MessageList({
         const isLast = idx === messages.length - 1;
         const isLastAssistant = idx === lastAssistantIdx;
         const showInlineActions = msg.role === "assistant" && !isLastAssistant;
-        const isCompressing = activeCompletionAction?.action === "compress" && activeCompletionAction.messageId === msg.id;
+        const isCompressing =
+          activeCompletionAction?.action === "compress" &&
+          activeCompletionAction.messageId === msg.id;
         const isCompressed = compressedMessageIds.has(msg.id ?? "");
-        const compressStatus: "compressing" | "compressed" | null = isCompressing ? "compressing" : isCompressed ? "compressed" : null;
+        const compressStatus: "compressing" | "compressed" | null =
+          isCompressing ? "compressing" : isCompressed ? "compressed" : null;
         const msgToolCallIds = new Set([
           ...(msg.toolCalls?.map((tc) => tc.id) ?? []),
-          ...(msg.parts?.filter((p) => p.type === "tool_call").map((p) => (p as { type: "tool_call"; toolCall: { id: string } }).toolCall.id) ?? []),
+          ...(msg.parts
+            ?.filter((p) => p.type === "tool_call")
+            .map(
+              (p) =>
+                (p as { type: "tool_call"; toolCall: { id: string } }).toolCall
+                  .id,
+            ) ?? []),
         ]);
-        const msgCodeChanges = codeChanges.filter((c) => c.toolCallId && msgToolCallIds.has(c.toolCallId));
+        const msgCodeChanges = codeChanges.filter(
+          (c) => c.toolCallId && msgToolCallIds.has(c.toolCallId),
+        );
         return (
           <Message key={msg.id || idx} from={msg.role} data-message-id={msg.id}>
             <MessageContent>
@@ -2384,16 +3086,19 @@ const MessageList = memo(function MessageList({
                 (msg.parts
                   ? renderPartsAssistant(msg, isLast)
                   : renderLegacyAssistant(msg, isLast))}
-              {!msg.parts && msg.content ? (
-                renderCitationMessage(msg.content, new Map(), {
-                  className: isLast && isLoading ? "streaming-tail-fade" : undefined,
-                  isAnimating: isLast && isLoading,
-                })
-              ) : null}
+              {!msg.parts && msg.content
+                ? renderCitationMessage(msg.content, new Map(), {
+                    className:
+                      isLast && isLoading ? "streaming-tail-fade" : undefined,
+                    isAnimating: isLast && isLoading,
+                  })
+                : null}
             </MessageContent>
-            {msg.role === "assistant" && msgCodeChanges.length > 0 && (
-              <TurnFileChangeList changes={msgCodeChanges} />
-            )}
+            {msg.role === "assistant" &&
+              msgCodeChanges.length > 0 &&
+              !(isLastAssistant && isLoading) && (
+                <TurnFileChangeList changes={msgCodeChanges} />
+              )}
             {msg.role === "assistant" && compressStatus && (
               <CompressStatusLine status={compressStatus} />
             )}
@@ -2401,7 +3106,11 @@ const MessageList = memo(function MessageList({
               <CompletionActionToolbar
                 disabledActions={{
                   copy: !msg.content.trim(),
-                  compress: isLoading || Boolean(activeCompletionAction) || isCompressed || !canCompress,
+                  compress:
+                    isLoading ||
+                    Boolean(activeCompletionAction) ||
+                    isCompressed ||
+                    !canCompress,
                   fork: isLoading || Boolean(activeCompletionAction),
                   restore: isLoading || Boolean(activeCompletionAction),
                 }}
@@ -2433,6 +3142,7 @@ const ChatStreamBody = memo(function ChatStreamBody({
   onCompletionAction,
   activeCompletionAction,
   canCompress,
+  thinkingRendering = "text",
 }: {
   sessionId: string | null;
   isLoading: boolean;
@@ -2444,18 +3154,30 @@ const ChatStreamBody = memo(function ChatStreamBody({
     type: "commit" | "tag",
     approved: boolean,
   ) => void;
-  onResolveConnectInput?: (toolCallId: string, values: Record<string, string>) => void;
+  onResolveConnectInput?: (
+    toolCallId: string,
+    values: Record<string, string>,
+  ) => void;
   onResolvePlanQuestionsInput?: (
     toolCallId: string,
     answers: QuizSubmission,
   ) => void | Promise<void>;
   onViewPlan?: (title: string, markdown: string) => void;
   personaState: PersonaState;
-  onCompletionAction?: (action: CompletionActionKey, message: ChatMessage) => void;
-  activeCompletionAction?: { messageId: string; action: CompletionActionKey } | null;
+  onCompletionAction?: (
+    action: CompletionActionKey,
+    message: ChatMessage,
+  ) => void;
+  activeCompletionAction?: {
+    messageId: string;
+    action: CompletionActionKey;
+  } | null;
   canCompress: boolean;
+  thinkingRendering?: "text" | "markdown";
 }) {
-  const [compressedMessageIds, setCompressedMessageIds] = useState<Set<string>>(new Set());
+  const [compressedMessageIds, setCompressedMessageIds] = useState<Set<string>>(
+    new Set(),
+  );
 
   useEffect(() => {
     if (!activeCompletionAction) return;
@@ -2476,12 +3198,15 @@ const ChatStreamBody = memo(function ChatStreamBody({
   }
 
   const lastAssistantMessage =
-    [...messages].reverse().find((message) => message.role === "assistant") ?? null;
+    [...messages].reverse().find((message) => message.role === "assistant") ??
+    null;
 
   const lastCompressStatus: "compressing" | "compressed" | null =
-    activeCompletionAction?.action === "compress" && activeCompletionAction.messageId === lastAssistantMessage?.id
+    activeCompletionAction?.action === "compress" &&
+    activeCompletionAction.messageId === lastAssistantMessage?.id
       ? "compressing"
-      : lastAssistantMessage?.id && compressedMessageIds.has(lastAssistantMessage.id)
+      : lastAssistantMessage?.id &&
+          compressedMessageIds.has(lastAssistantMessage.id)
         ? "compressed"
         : null;
 
@@ -2501,6 +3226,7 @@ const ChatStreamBody = memo(function ChatStreamBody({
         activeCompletionAction={activeCompletionAction}
         compressedMessageIds={compressedMessageIds}
         canCompress={canCompress}
+        thinkingRendering={thinkingRendering}
       />
       <PersonaRail
         state={personaState}
@@ -2509,7 +3235,11 @@ const ChatStreamBody = memo(function ChatStreamBody({
         onCompletionAction={onCompletionAction}
         disabledActions={{
           copy: !lastAssistantMessage?.content?.trim(),
-          compress: isLoading || Boolean(activeCompletionAction) || Boolean(lastCompressStatus) || !canCompress,
+          compress:
+            isLoading ||
+            Boolean(activeCompletionAction) ||
+            Boolean(lastCompressStatus) ||
+            !canCompress,
           fork: isLoading || Boolean(activeCompletionAction),
           restore: true,
         }}
@@ -2530,7 +3260,10 @@ function useCompletionNotification(isLoading: boolean, hasMessages: boolean) {
 
   useEffect(() => {
     if (wasLoading.current && !isLoading && hasMessages) {
-      if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+      if (
+        typeof Notification !== "undefined" &&
+        Notification.permission === "granted"
+      ) {
         try {
           new Notification("SuperCode", {
             body: "生成完成",
@@ -2553,16 +3286,27 @@ const MessageOutline = memo(function MessageOutline({
   isLoading: boolean;
 }) {
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
-  const [tooltipRect, setTooltipRect] = useState<{ top: number; right: number } | null>(null);
+  const [tooltipRect, setTooltipRect] = useState<{
+    top: number;
+    right: number;
+  } | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
   const getPreview = useCallback((msg: ChatMessage): string => {
-    const raw = msg.parts
-      ?.filter((p) => p.type === "text")
-      .map((p) => (p as { type: "text"; text: string }).text)
-      .join("") ?? msg.content ?? "";
-    const clean = raw.replace(/[#*`\n]/g, " ").replace(/\s+/g, " ").trim();
-    return clean.length > 28 ? clean.slice(0, 28) + "…" : clean || (msg.role === "user" ? "用户消息" : "AI 回复");
+    const raw =
+      msg.parts
+        ?.filter((p) => p.type === "text")
+        .map((p) => (p as { type: "text"; text: string }).text)
+        .join("") ??
+      msg.content ??
+      "";
+    const clean = raw
+      .replace(/[#*`\n]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    return clean.length > 28
+      ? clean.slice(0, 28) + "…"
+      : clean || (msg.role === "user" ? "用户消息" : "AI 回复");
   }, []);
 
   const scrollToMessage = useCallback((msgId: string) => {
@@ -2574,7 +3318,9 @@ const MessageOutline = memo(function MessageOutline({
 
   const handleHover = useCallback((idx: number) => {
     setHoveredIdx(idx);
-    const bar = containerRef.current?.querySelector(`[data-outline-idx="${idx}"]`);
+    const bar = containerRef.current?.querySelector(
+      `[data-outline-idx="${idx}"]`,
+    );
     if (bar) {
       const barRect = bar.getBoundingClientRect();
       const containerRect = containerRef.current!.getBoundingClientRect();
@@ -2592,10 +3338,14 @@ const MessageOutline = memo(function MessageOutline({
 
   const lineLengths = useMemo(() => {
     return messages.map((msg) => {
-      const textLen = (msg.parts
-        ?.filter((p) => p.type === "text")
-        .map((p) => (p as { type: "text"; text: string }).text)
-        .join("") ?? msg.content ?? "").length;
+      const textLen = (
+        msg.parts
+          ?.filter((p) => p.type === "text")
+          .map((p) => (p as { type: "text"; text: string }).text)
+          .join("") ??
+        msg.content ??
+        ""
+      ).length;
       if (msg.role === "user") return 10;
       if (textLen === 0) return 6;
       if (textLen < 20) return 8;
@@ -2641,7 +3391,11 @@ const MessageOutline = memo(function MessageOutline({
                         : "bg-foreground/12",
                 )}
                 animate={isStreaming ? { opacity: [1, 0.4, 1] } : undefined}
-                transition={isStreaming ? { duration: 2, repeat: Infinity, ease: "easeInOut" } : { duration: 0.15 }}
+                transition={
+                  isStreaming
+                    ? { duration: 2, repeat: Infinity, ease: "easeInOut" }
+                    : { duration: 0.15 }
+                }
                 style={{ width: w * (isActive ? 1.3 : isHovered ? 1.15 : 1) }}
               />
             </div>
@@ -2674,9 +3428,10 @@ const MessageOutline = memo(function MessageOutline({
               <span
                 className="size-1.5 rounded-full shrink-0"
                 style={{
-                  background: messages[hoveredIdx].role === "user"
-                    ? "oklch(0.65 0.15 250)"
-                    : "oklch(0.7 0.14 160)",
+                  background:
+                    messages[hoveredIdx].role === "user"
+                      ? "oklch(0.65 0.15 250)"
+                      : "oklch(0.7 0.14 160)",
                 }}
               />
               <span className="truncate max-w-[160px]">
@@ -2698,7 +3453,11 @@ function getPathLeaf(input: string) {
 function getActiveMentionAtCaret(value: string, caret: number) {
   const safeCaret = Math.max(0, Math.min(caret, value.length));
   const mentionToken = findMentionTokenAtCaret(value, safeCaret);
-  if (mentionToken && safeCaret > mentionToken.start && safeCaret <= mentionToken.end) {
+  if (
+    mentionToken &&
+    safeCaret > mentionToken.start &&
+    safeCaret <= mentionToken.end
+  ) {
     return null;
   }
   const mentionStart = value.lastIndexOf("@", safeCaret - 1);
@@ -2797,7 +3556,11 @@ function getComposerNodeLength(node: Node): number {
   );
 }
 
-function getComposerPointOffset(root: HTMLElement, container: Node, offset: number): number {
+function getComposerPointOffset(
+  root: HTMLElement,
+  container: Node,
+  offset: number,
+): number {
   if (container === root) {
     return Array.from(root.childNodes)
       .slice(0, offset)
@@ -2821,7 +3584,9 @@ function getComposerPointOffset(root: HTMLElement, container: Node, offset: numb
         return total + (offset > 0 ? child.dataset.mentionToken.length : 0);
       }
 
-      return total + getComposerPointOffset(child as HTMLElement, container, offset);
+      return (
+        total + getComposerPointOffset(child as HTMLElement, container, offset)
+      );
     }
 
     total += getComposerNodeLength(child);
@@ -2837,12 +3602,19 @@ function getComposerSelectionOffsets(
   if (!selection || selection.rangeCount === 0) return null;
 
   const range = selection.getRangeAt(0);
-  if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) {
+  if (
+    !root.contains(range.startContainer) ||
+    !root.contains(range.endContainer)
+  ) {
     return null;
   }
 
   return {
-    start: getComposerPointOffset(root, range.startContainer, range.startOffset),
+    start: getComposerPointOffset(
+      root,
+      range.startContainer,
+      range.startOffset,
+    ),
     end: getComposerPointOffset(root, range.endContainer, range.endOffset),
   };
 }
@@ -2957,17 +3729,19 @@ function buildMentionRenderSegments(
 }
 
 const MENTION_KIND_ICON_COLORS: Record<MentionSuggestion["kind"], string> = {
-  workspace: "text-amber-600 bg-amber-50 dark:text-amber-400 dark:bg-amber-950/60",
+  workspace:
+    "text-amber-600 bg-amber-50 dark:text-amber-400 dark:bg-amber-950/60",
   file: "text-blue-600 bg-blue-50 dark:text-blue-400 dark:bg-blue-950/60",
-  change: "text-emerald-600 bg-emerald-50 dark:text-emerald-400 dark:bg-emerald-950/60",
-  element: "text-violet-600 bg-violet-50 dark:text-violet-400 dark:bg-violet-950/60",
+  change:
+    "text-emerald-600 bg-emerald-50 dark:text-emerald-400 dark:bg-emerald-950/60",
+  element:
+    "text-violet-600 bg-violet-50 dark:text-violet-400 dark:bg-violet-950/60",
 };
 
 const MENTION_KIND_BADGE_STYLES: Record<MentionSuggestion["kind"], string> = {
   workspace:
     "border-amber-200/80 bg-amber-50/95 text-amber-950 dark:border-amber-900/80 dark:bg-amber-950/70 dark:text-amber-100",
-  file:
-    "border-blue-200/80 bg-blue-50/95 text-blue-950 dark:border-blue-900/80 dark:bg-blue-950/70 dark:text-blue-100",
+  file: "border-blue-200/80 bg-blue-50/95 text-blue-950 dark:border-blue-900/80 dark:bg-blue-950/70 dark:text-blue-100",
   change:
     "border-emerald-200/80 bg-emerald-50/95 text-emerald-950 dark:border-emerald-900/80 dark:bg-emerald-950/70 dark:text-emerald-100",
   element:
@@ -3022,8 +3796,9 @@ export function ChatPanel({
   activeCompletionAction,
   elementAttachments = [],
   onRemoveElementAttachment,
+  thinkingRendering = "text",
 }: ChatPanelProps) {
-
+  const planSteps = contextData?.planSteps ?? [];
   const composerRef = useRef<HTMLDivElement>(null);
   const [isFocused, setIsFocused] = useState(false);
   const [attachmentFiles, setAttachmentFiles] = useState<AttachmentData[]>([]);
@@ -3031,10 +3806,11 @@ export function ChatPanel({
   const composerInputRef = useRef<HTMLDivElement>(null);
   const composerInputId = useId();
   const [isModelSelectorOpen, setIsModelSelectorOpen] = useState(false);
-  const [composerSelection, setComposerSelection] = useState<ComposerSelectionOffsets>({
-    start: 0,
-    end: 0,
-  });
+  const [composerSelection, setComposerSelection] =
+    useState<ComposerSelectionOffsets>({
+      start: 0,
+      end: 0,
+    });
   const [mentionNavigation, setMentionNavigation] = useState<{
     key: string | null;
     index: number;
@@ -3042,7 +3818,9 @@ export function ChatPanel({
     key: null,
     index: 0,
   });
-  const [dismissedMentionKey, setDismissedMentionKey] = useState<string | null>(null);
+  const [dismissedMentionKey, setDismissedMentionKey] = useState<string | null>(
+    null,
+  );
 
   useCompletionNotification(isLoading, messages.length > 0);
 
@@ -3194,11 +3972,9 @@ export function ChatPanel({
     }
 
     return mentionSuggestions.filter((suggestion) =>
-      [
-        suggestion.label,
-        suggestion.description,
-        suggestion.insertValue,
-      ].some((value) => value.toLowerCase().includes(normalizedQuery)),
+      [suggestion.label, suggestion.description, suggestion.insertValue].some(
+        (value) => value.toLowerCase().includes(normalizedQuery),
+      ),
     );
   }, [activeMention, mentionSuggestions]);
   const mentionSelectedIndex =
@@ -3220,7 +3996,8 @@ export function ChatPanel({
     return null;
   }, [messages]);
   const canCompress =
-    ((contextData?.estimatedTokens ?? 0) / Math.max(contextData?.maxTokens ?? 1, 1)) >=
+    (contextData?.estimatedTokens ?? 0) /
+      Math.max(contextData?.maxTokens ?? 1, 1) >=
     CONTEXT_COMPRESSION_USAGE_THRESHOLD;
 
   const hasDraftInput = isFocused && input.trim().length > 0;
@@ -3271,22 +4048,25 @@ export function ChatPanel({
     );
   }, [composerSelection, input]);
 
-  const syncComposerSelection = useCallback((target: HTMLElement) => {
-    const selection = getComposerSelectionOffsets(target);
-    if (!selection) return;
-    const normalizedStart = normalizeMentionCaret(input, selection.start);
-    const normalizedEnd = normalizeMentionCaret(input, selection.end);
-    if (
-      normalizedStart !== selection.start ||
-      normalizedEnd !== selection.end
-    ) {
-      setComposerSelectionOffsets(target, normalizedStart, normalizedEnd);
-    }
-    setComposerSelection({
-      start: normalizedStart,
-      end: normalizedEnd,
-    });
-  }, [input]);
+  const syncComposerSelection = useCallback(
+    (target: HTMLElement) => {
+      const selection = getComposerSelectionOffsets(target);
+      if (!selection) return;
+      const normalizedStart = normalizeMentionCaret(input, selection.start);
+      const normalizedEnd = normalizeMentionCaret(input, selection.end);
+      if (
+        normalizedStart !== selection.start ||
+        normalizedEnd !== selection.end
+      ) {
+        setComposerSelectionOffsets(target, normalizedStart, normalizedEnd);
+      }
+      setComposerSelection({
+        start: normalizedStart,
+        end: normalizedEnd,
+      });
+    },
+    [input],
+  );
 
   const buildMentionInsertion = useCallback(
     (suggestion: MentionSuggestion) => {
@@ -3320,8 +4100,14 @@ export function ChatPanel({
       const selection = getComposerSelectionOffsets(e.currentTarget);
       onInputChange(nextValue);
       setComposerSelection({
-        start: normalizeMentionCaret(nextValue, selection?.start ?? nextValue.length),
-        end: normalizeMentionCaret(nextValue, selection?.end ?? nextValue.length),
+        start: normalizeMentionCaret(
+          nextValue,
+          selection?.start ?? nextValue.length,
+        ),
+        end: normalizeMentionCaret(
+          nextValue,
+          selection?.end ?? nextValue.length,
+        ),
       });
     },
     [onInputChange],
@@ -3342,7 +4128,13 @@ export function ChatPanel({
       setComposerSelection({ start: nextCaret, end: nextCaret });
       focusComposerAtOffset(composerInputId, nextCaret);
     },
-    [composerInputId, composerSelection.end, composerSelection.start, input, onInputChange],
+    [
+      composerInputId,
+      composerSelection.end,
+      composerSelection.start,
+      input,
+      onInputChange,
+    ],
   );
 
   const handleComposerKeyDown = useCallback(
@@ -3420,7 +4212,8 @@ export function ChatPanel({
 
       if (e.key === "Enter" && e.shiftKey) {
         e.preventDefault();
-        const nextValue = input.slice(0, caretStart) + "\n" + input.slice(caretEnd);
+        const nextValue =
+          input.slice(0, caretStart) + "\n" + input.slice(caretEnd);
         const nextCaret = caretStart + 1;
         onInputChange(nextValue);
         setComposerSelection({ start: nextCaret, end: nextCaret });
@@ -3486,8 +4279,10 @@ export function ChatPanel({
               onCompletionAction={onCompletionAction}
               activeCompletionAction={activeCompletionAction}
               canCompress={canCompress}
+              thinkingRendering={thinkingRendering}
             />
           </ConversationContent>
+          <ConversationScrollButton className="bottom-16" />
         </Conversation>
         <div className="absolute right-2 top-0 bottom-0 flex items-center pointer-events-none z-10">
           <div className="pointer-events-auto">
@@ -3496,42 +4291,43 @@ export function ChatPanel({
         </div>
       </div>
 
-        <div className="shrink-0 border-t bg-background">
-          <div className="max-w-[720px] mx-auto w-full">
-            <div className="p-3">
-              <div className="flex flex-col rounded-lg border bg-muted/30 p-2 shadow-sm focus-within:ring-1 focus-within:ring-ring">
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  className="hidden"
-                  multiple
-                  onChange={handleFileInputChange}
-                />
+      <div className="shrink-0 border-t bg-background">
+        <div className="max-w-[720px] mx-auto w-full">
+          <PlanToggle planSteps={planSteps} isStreaming={isLoading} />
+          <div className="p-3 pt-2">
+            <div className="flex flex-col rounded-lg border bg-muted/30 p-2 shadow-sm focus-within:ring-1 focus-within:ring-ring">
+              <input
+                ref={fileInputRef}
+                type="file"
+                className="hidden"
+                multiple
+                onChange={handleFileInputChange}
+              />
 
-                {attachmentFiles.length > 0 && (
-                  <div className="pb-2">
-                    <Attachments variant="inline">
-                      {attachmentFiles.map((file) => (
-                        <Attachment
-                          key={file.id}
-                          data={file}
-                          onRemove={() => handleRemoveAttachment(file.id)}
-                        >
-                          <AttachmentPreview />
-                          <AttachmentInfo />
-                          <AttachmentRemove />
-                        </Attachment>
-                      ))}
-                    </Attachments>
-                  </div>
-                )}
+              {attachmentFiles.length > 0 && (
+                <div className="pb-2">
+                  <Attachments variant="inline">
+                    {attachmentFiles.map((file) => (
+                      <Attachment
+                        key={file.id}
+                        data={file}
+                        onRemove={() => handleRemoveAttachment(file.id)}
+                      >
+                        <AttachmentPreview />
+                        <AttachmentInfo />
+                        <AttachmentRemove />
+                      </Attachment>
+                    ))}
+                  </Attachments>
+                </div>
+              )}
 
-                {elementAttachments.length > 0 && (
-                  <div className="pb-2 flex flex-wrap gap-1.5">
-                    {elementAttachments.map((el) => (
-                      <div
-                        key={el.id}
-                        className="group relative flex h-16 items-center gap-1.5 rounded-md border border-border px-1.5 py-1 transition-all hover:bg-accent/50"
+              {elementAttachments.length > 0 && (
+                <div className="pb-2 flex flex-wrap gap-1.5">
+                  {elementAttachments.map((el) => (
+                    <div
+                      key={el.id}
+                      className="group relative flex h-16 items-center gap-1.5 rounded-md border border-border px-1.5 py-1 transition-all hover:bg-accent/50"
                     >
                       <div className="size-12 shrink-0 overflow-hidden rounded bg-white">
                         <iframe
@@ -3611,7 +4407,9 @@ export function ChatPanel({
                           provider={selectedModel?.provider ?? "openrouter"}
                         />
                         <ModelSelectorName>
-                          {selectedModel?.label ?? selectedModel?.name ?? "选择模型"}
+                          {selectedModel?.label ??
+                            selectedModel?.name ??
+                            "选择模型"}
                         </ModelSelectorName>
                       </Button>
                     </ModelSelectorTrigger>
@@ -3630,7 +4428,9 @@ export function ChatPanel({
                               className="gap-2"
                             >
                               <ModelSelectorLogo provider={m.provider} />
-                              <ModelSelectorName>{m.label ?? m.name}</ModelSelectorName>
+                              <ModelSelectorName>
+                                {m.label ?? m.name}
+                              </ModelSelectorName>
                             </ModelSelectorItem>
                           ))}
                         </ModelSelectorGroup>
@@ -3640,7 +4440,9 @@ export function ChatPanel({
 
                   <Select
                     value={agentMode}
-                    onValueChange={(value) => onAgentModeChange(value as AgentMode)}
+                    onValueChange={(value) =>
+                      onAgentModeChange(value as AgentMode)
+                    }
                   >
                     <SelectTrigger
                       size="sm"

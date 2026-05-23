@@ -155,6 +155,30 @@ class UIMessageStreamAdapterTests(unittest.TestCase):
         self.assertIn("tool-input-available", part_types)
         self.assertNotIn("tool-input-delta", part_types)
 
+    def test_apply_patch_tool_call_exposes_new_content_as_streamable_input(self) -> None:
+        adapter = UIMessageStreamAdapter()
+
+        parts = adapter.convert(
+            {
+                "type": "tool_call",
+                "payload": {
+                    "assistant_id": "m_1",
+                    "id": "call_1",
+                    "name": "apply_patch",
+                    "arguments": {
+                        "filename": "src/a.ts",
+                        "start_line": 1,
+                        "end_line": 1,
+                        "new_content": "const after = 1;\n",
+                    },
+                },
+            }
+        )
+
+        tool_input = next(part for part in parts if part["type"] == "tool-input-available")
+        self.assertEqual(tool_input["toolName"], "apply_patch")
+        self.assertEqual(tool_input["input"]["new_content"], "const after = 1;\n")
+
     def test_forwards_custom_data_parts_from_tool_output(self) -> None:
         adapter = UIMessageStreamAdapter()
 

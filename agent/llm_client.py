@@ -49,6 +49,7 @@ class OpenAICompatibleClient:
 
     def __init__(self, config: AgentLLMConfig) -> None:
         self.config = config
+        self.last_usage: dict[str, int] | None = None
 
     def chat(self, system_prompt: str, user_prompt: str) -> str:
         """向模型发送一轮对话并返回文本内容。"""
@@ -60,7 +61,7 @@ class OpenAICompatibleClient:
             ]
         )
 
-    def chat_messages(self, messages: list[dict[str, str]]) -> str:
+    def chat_messages(self, messages: list[dict[str, object]]) -> str:
         """向模型发送一轮消息数组并返回文本内容。"""
 
         response = self.chat_completion_messages(messages)
@@ -86,7 +87,7 @@ class OpenAICompatibleClient:
 
     def chat_stream_messages(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, object]],
         on_delta: Callable[[str], None] | None = None,
     ) -> str:
         """以 OpenAI 兼容 SSE 方式流式获取文本，支持直接传 messages 数组。"""
@@ -101,7 +102,7 @@ class OpenAICompatibleClient:
 
     def chat_completion_messages(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, object]],
         tools: list[dict[str, object]] | None = None,
         tool_choice: str | dict[str, object] | None = None,
     ) -> CompletionResponse:
@@ -140,7 +141,7 @@ class OpenAICompatibleClient:
 
     def chat_stream_completion_messages(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, object]],
         tools: list[dict[str, object]] | None = None,
         tool_choice: str | dict[str, object] | None = None,
         on_text_delta: Callable[[str], None] | None = None,
@@ -203,7 +204,7 @@ class OpenAICompatibleClient:
 
     def _chat_stream_completion_messages_once(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, object]],
         tools: list[dict[str, object]] | None = None,
         tool_choice: str | dict[str, object] | None = None,
         on_text_delta: Callable[[str], None] | None = None,
@@ -297,7 +298,7 @@ class OpenAICompatibleClient:
 
     def _build_request(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, object]],
         stream: bool,
         api_url: str,
         tools: list[dict[str, object]] | None = None,
@@ -327,7 +328,7 @@ class OpenAICompatibleClient:
 
     def _send_chat_request(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, object]],
         stream: bool,
         tools: list[dict[str, object]] | None = None,
         tool_choice: str | dict[str, object] | None = None,
@@ -476,21 +477,24 @@ class OpenAICompatibleClient:
         return tool_calls
 
     def _log_usage(self, usage: object) -> None:
-        if not isinstance(usage, dict):
+        normalized_usage = self._normalize_usage(usage)
+        self.last_usage = normalized_usage
+        if normalized_usage is None:
             return
 
-        prompt_tokens = usage.get("prompt_tokens")
-        completion_tokens = usage.get("completion_tokens")
-        hit_tokens = usage.get("prompt_cache_hit_tokens")
-        miss_tokens = usage.get("prompt_cache_miss_tokens")
-        if not any(value is not None for value in (prompt_tokens, completion_tokens, hit_tokens, miss_tokens)):
-            return
+        prompt_tokens = normalized_usage.get("inputTokens")
+        completion_tokens = normalized_usage.get("outputTokens")
+        hit_tokens = normalized_usage.get("cachedInputTokens")
+        miss_tokens = max((prompt_tokens or 0) - (hit_tokens or 0), 0)
 
         extra_parts: list[str] = []
         if isinstance(prompt_tokens, int):
             extra_parts.append(f"prompt_tokens={prompt_tokens}")
         if isinstance(completion_tokens, int):
             extra_parts.append(f"completion_tokens={completion_tokens}")
+        reasoning_tokens = normalized_usage.get("reasoningTokens")
+        if isinstance(reasoning_tokens, int) and reasoning_tokens > 0:
+            extra_parts.append(f"reasoning_tokens={reasoning_tokens}")
         if isinstance(hit_tokens, int):
             extra_parts.append(f"cache_hit={hit_tokens}")
         if isinstance(miss_tokens, int):
@@ -500,6 +504,81 @@ class OpenAICompatibleClient:
             extra_parts.append(f"cache_hit_rate={hit_rate:.1%}")
 
         logger.info("LLM usage: %s", ", ".join(extra_parts))
+
+    def _normalize_usage(self, usage: object) -> dict[str, int] | None:
+        if not isinstance(usage, dict):
+            return None
+
+        prompt_tokens = self._coerce_int(usage.get("prompt_tokens"))
+        if prompt_tokens is None:
+            prompt_tokens = self._coerce_int(usage.get("input_tokens"))
+
+        completion_tokens = self._coerce_int(usage.get("completion_tokens"))
+        if completion_tokens is None:
+            completion_tokens = self._coerce_int(usage.get("output_tokens"))
+
+        reasoning_tokens = self._coerce_int(usage.get("reasoning_tokens"))
+        if reasoning_tokens is None:
+            reasoning_tokens = self._coerce_nested_int(
+                usage,
+                ("completion_tokens_details", "reasoning_tokens"),
+                ("output_tokens_details", "reasoning_tokens"),
+            )
+
+        cached_input_tokens = self._coerce_int(usage.get("prompt_cache_hit_tokens"))
+        if cached_input_tokens is None:
+            cached_input_tokens = self._coerce_nested_int(
+                usage,
+                ("prompt_tokens_details", "cached_tokens"),
+                ("input_tokens_details", "cached_tokens"),
+            )
+
+        total_tokens = self._coerce_int(usage.get("total_tokens"))
+        if total_tokens is None and prompt_tokens is not None and completion_tokens is not None:
+            total_tokens = prompt_tokens + completion_tokens
+
+        if not any(
+            value is not None
+            for value in (
+                prompt_tokens,
+                completion_tokens,
+                reasoning_tokens,
+                cached_input_tokens,
+                total_tokens,
+            )
+        ):
+            return None
+
+        return {
+            "inputTokens": max(prompt_tokens or 0, 0),
+            "outputTokens": max(completion_tokens or 0, 0),
+            "reasoningTokens": max(reasoning_tokens or 0, 0),
+            "cachedInputTokens": max(cached_input_tokens or 0, 0),
+            "totalTokens": max(total_tokens or 0, 0),
+        }
+
+    def _coerce_int(self, value: object) -> int | None:
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return int(value)
+        return None
+
+    def _coerce_nested_int(
+        self,
+        payload: dict[str, object],
+        *paths: tuple[str, str],
+    ) -> int | None:
+        for parent_key, child_key in paths:
+            parent = payload.get(parent_key)
+            if not isinstance(parent, dict):
+                continue
+            coerced = self._coerce_int(parent.get(child_key))
+            if coerced is not None:
+                return coerced
+        return None
 
     def _is_deepseek_request(self) -> bool:
         model_lower = self.config.model.lower()

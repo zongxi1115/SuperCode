@@ -110,3 +110,6 @@ class AgentBrain(ABC):
         on_stream: Callable[[BrainStreamingUpdate], None] | None = None,
     ) -> BrainDecision:
         """根据当前状态决定下一步动作。"""
+
+    def latest_usage(self) -> dict[str, int] | None:
+        return None

@@ -34,6 +34,21 @@ class SessionStoreTests(unittest.TestCase):
             ],
             history_tools=[{"id": "t1", "name": "read_file", "state": "completed"}],
             thoughts=["先看文件"],
+            token_usage={
+                "inputTokens": 1200,
+                "outputTokens": 260,
+                "reasoningTokens": 80,
+                "cachedInputTokens": 300,
+                "totalTokens": 1460,
+            },
+            cumulative_token_usage={
+                "inputTokens": 3600,
+                "outputTokens": 940,
+                "reasoningTokens": 220,
+                "cachedInputTokens": 900,
+                "totalTokens": 4760,
+            },
+            max_context_tokens=128000,
             code_changes=[
                 {
                     "id": "change-1",
@@ -100,6 +115,9 @@ class SessionStoreTests(unittest.TestCase):
         self.assertEqual(loaded.phase, "connected")
         self.assertEqual(loaded.history_messages[1]["content"], "收到")
         self.assertEqual(loaded.history_tools[0]["name"], "read_file")
+        self.assertEqual(loaded.token_usage["inputTokens"], 1200)
+        self.assertEqual(loaded.cumulative_token_usage["totalTokens"], 4760)
+        self.assertEqual(loaded.max_context_tokens, 128000)
         self.assertEqual(loaded.code_changes[0]["path"], "src/app.tsx")
         self.assertEqual(loaded.plan_state["draft"]["title"], "后台计划")
         self.assertEqual(loaded.pending_user_input_requests["tool-plan-1"]["tool_name"], "ask_plan_questions")
