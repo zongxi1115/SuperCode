@@ -9,6 +9,51 @@ from typing import Any
 from fastapi_app.api_models import TerminalSnapshotResponse
 
 
+TERMINAL_INTERRUPT_KEYS = {
+    "ctrl+c",
+    "ctrl-c",
+    "ctrl_c",
+    "control+c",
+    "control-c",
+    "interrupt",
+    "cancel",
+    "^c",
+    "\x03",
+}
+
+TERMINAL_KEY_INPUTS = {
+    "enter": "\n",
+    "return": "\n",
+    "newline": "\n",
+    "linefeed": "\n",
+    "tab": "\t",
+    "escape": "\x1b",
+    "esc": "\x1b",
+    "backspace": "\b",
+    "delete": "\x7f",
+    "ctrl+d": "\x04",
+    "ctrl-d": "\x04",
+    "ctrl_d": "\x04",
+    "eof": "\x04",
+    "ctrl+z": "\x1a",
+    "ctrl-z": "\x1a",
+    "ctrl_z": "\x1a",
+    "up": "\x1b[A",
+    "arrowup": "\x1b[A",
+    "down": "\x1b[B",
+    "arrowdown": "\x1b[B",
+    "right": "\x1b[C",
+    "arrowright": "\x1b[C",
+    "left": "\x1b[D",
+    "arrowleft": "\x1b[D",
+}
+
+
+def _normalize_terminal_key(value: object) -> str:
+    normalized = " ".join(str(value or "").strip().lower().split())
+    return re.sub(r"\s*([+_-])\s*", r"\1", normalized)
+
+
 @dataclass
 class TerminalRuntimeBase:
     workspace: str
@@ -170,6 +215,16 @@ class TerminalRuntimeBase:
 
     def write(self, command: str) -> None:
         self.send_input(command, submit=True)
+
+    def send_key(self, key: str) -> bool:
+        normalized_key = _normalize_terminal_key(key)
+        if normalized_key in TERMINAL_INTERRUPT_KEYS:
+            return self.interrupt()
+        payload = TERMINAL_KEY_INPUTS.get(normalized_key)
+        if payload is None:
+            raise ValueError(f"不支持的终端按键: {key}")
+        self.send_input(payload, submit=False)
+        return True
 
     def interrupt(self) -> bool:
         if self.pty_process is None or not hasattr(self.pty_process, "sendcontrol"):

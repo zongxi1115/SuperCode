@@ -22,7 +22,7 @@ from agent.schema import AgentResponse, AgentState, StepRecord, ToolCall
 from agent.tools import BaseTool, ToolContext
 from coding_agent.brain import CodeExplorationPromptBrain
 
-INTERACTIVE_IDLE_SECONDS = 1.0
+INTERACTIVE_INPUT_PROMPT_IDLE_SECONDS = 0.2
 INTERACTIVE_POLL_SECONDS = 0.05
 DEFAULT_IGNORED_DIR_NAMES = {
     ".git",
@@ -168,6 +168,79 @@ def _kill_processes_by_pid(pids: list[int]) -> None:
             )
         except Exception:
             continue
+
+
+TERMINAL_INTERRUPT_KEYS = {
+    "ctrl+c",
+    "ctrl-c",
+    "ctrl_c",
+    "control+c",
+    "control-c",
+    "interrupt",
+    "cancel",
+    "^c",
+    "\x03",
+}
+
+TERMINAL_KEY_INPUTS = {
+    "enter": "\n",
+    "return": "\n",
+    "newline": "\n",
+    "linefeed": "\n",
+    "tab": "\t",
+    "escape": "\x1b",
+    "esc": "\x1b",
+    "backspace": "\b",
+    "delete": "\x7f",
+    "ctrl+d": "\x04",
+    "ctrl-d": "\x04",
+    "ctrl_d": "\x04",
+    "eof": "\x04",
+    "ctrl+z": "\x1a",
+    "ctrl-z": "\x1a",
+    "ctrl_z": "\x1a",
+    "up": "\x1b[A",
+    "arrowup": "\x1b[A",
+    "down": "\x1b[B",
+    "arrowdown": "\x1b[B",
+    "right": "\x1b[C",
+    "arrowright": "\x1b[C",
+    "left": "\x1b[D",
+    "arrowleft": "\x1b[D",
+}
+
+TERMINAL_INLINE_KEY_TOKENS = {
+    "<enter>": "\n",
+    "[enter]": "\n",
+    "{enter}": "\n",
+    "<tab>": "\t",
+    "[tab]": "\t",
+    "{tab}": "\t",
+    "<esc>": "\x1b",
+    "<escape>": "\x1b",
+    "[esc]": "\x1b",
+    "[escape]": "\x1b",
+    "<backspace>": "\b",
+    "[backspace]": "\b",
+    "<delete>": "\x7f",
+    "[delete]": "\x7f",
+    "<ctrl+d>": "\x04",
+    "[ctrl+d]": "\x04",
+    "<ctrl+z>": "\x1a",
+    "[ctrl+z]": "\x1a",
+}
+
+
+def _normalize_terminal_key(value: object) -> str:
+    normalized = " ".join(str(value or "").strip().lower().split())
+    return re.sub(r"\s*([+_-])\s*", r"\1", normalized)
+
+
+def _expand_terminal_inline_key_tokens(content: str) -> str:
+    expanded = content
+    for token, replacement in TERMINAL_INLINE_KEY_TOKENS.items():
+        expanded = expanded.replace(token, replacement)
+    return expanded
 
 
 def _query_process_table() -> list[dict[str, Any]]:
@@ -362,10 +435,14 @@ class InteractiveCommand:
     def is_alive(self) -> bool:
         return self.process.poll() is None
 
-    def write_input(self, content: str) -> None:
+    def write_input(self, content: str, *, submit: bool = True) -> None:
         if self.process.stdin is None or not self.is_alive():
             raise RuntimeError("当前命令已经不能继续输入。")
-        payload = content if content.endswith(("\n", "\r")) else f"{content}\n"
+        payload = content
+        if submit and not payload.endswith(("\n", "\r")):
+            payload = f"{payload}\n"
+        if payload == "":
+            return
         self.process.stdin.write(payload)
         self.process.stdin.flush()
         with self.lock:
@@ -412,7 +489,7 @@ class InteractiveCommandSession:
     """管理当前会话里多个可继续输入的命令。"""
 
     workspace: Path
-    idle_timeout: float = INTERACTIVE_IDLE_SECONDS
+    input_prompt_idle_timeout: float = INTERACTIVE_INPUT_PROMPT_IDLE_SECONDS
     active_commands: dict[str, InteractiveCommand] = field(
         default_factory=dict, init=False, repr=False
     )
@@ -462,6 +539,8 @@ class InteractiveCommandSession:
         content: str,
         timeout: int,
         terminal_id: str | None = None,
+        *,
+        submit: bool = True,
     ) -> dict[str, object]:
         with self.lock:
             self._clear_finished_locked()
@@ -471,8 +550,36 @@ class InteractiveCommandSession:
                     raise RuntimeError(f"终端 {terminal_id} 已完成，无法继续输入。")
             active_command = self._resolve_active_command_locked(terminal_id)
 
-        active_command.write_input(content)
+        active_command.write_input(content, submit=submit)
         return self._await_progress(active_command, timeout)
+
+    def interrupt_command(
+        self,
+        terminal_id: str | None = None,
+    ) -> dict[str, object]:
+        with self.lock:
+            self._clear_finished_locked()
+            active_command = self._resolve_active_command_locked(terminal_id)
+            self.active_commands.pop(active_command.terminal_id, None)
+
+        active_command.close()
+
+        with self.lock:
+            managed_process = self.managed_processes.get(active_command.terminal_id)
+            if managed_process is not None:
+                managed_process.terminated_at = time.time()
+                managed_process.last_return_code = active_command.process.returncode
+            result = self._build_result(
+                active_command,
+                status="terminated",
+                exit_reason="interrupted",
+            )
+            self.completed_commands[active_command.terminal_id] = CompletedCommandResult(
+                result=dict(result),
+                delivered=True,
+            )
+        active_command.close_streams()
+        return result
 
     def wait_for_command(
         self,
@@ -491,8 +598,6 @@ class InteractiveCommandSession:
         return self._await_progress(
             active_command,
             timeout,
-            return_on_idle=True,
-            require_new_output_for_idle=True,
             return_on_existing_prompt=True,
         )
 
@@ -586,8 +691,6 @@ class InteractiveCommandSession:
         self,
         active_command: InteractiveCommand,
         timeout: int,
-        return_on_idle: bool = True,
-        require_new_output_for_idle: bool = False,
         return_on_existing_prompt: bool = False,
     ) -> dict[str, object]:
         deadline = time.monotonic() + timeout
@@ -618,19 +721,16 @@ class InteractiveCommandSession:
             if prompt_text is not None and (
                 saw_new_output or return_on_existing_prompt
             ):
-                return self._build_result(
-                    active_command,
-                    status="running",
-                    exit_reason="awaiting_input",
-                    input_prompt=prompt_text,
-                )
-
-            if return_on_idle and active_command.idle_for() >= self.idle_timeout:
-                if saw_new_output or not require_new_output_for_idle:
+                if self._prompt_needs_idle_confirmation(full_output) and (
+                    active_command.idle_for() < self.input_prompt_idle_timeout
+                ):
+                    pass
+                else:
                     return self._build_result(
                         active_command,
                         status="running",
-                        exit_reason="idle",
+                        exit_reason="awaiting_input",
+                        input_prompt=prompt_text,
                     )
 
             if time.monotonic() >= deadline:
@@ -870,6 +970,11 @@ class InteractiveCommandSession:
         if normalized_last_line.endswith(":"):
             return last_line
         return None
+
+    def _prompt_needs_idle_confirmation(self, full_output: str) -> bool:
+        if full_output.endswith(("\n", "\r")):
+            return False
+        return True
 
     def _looks_like_prompt(self, full_output: str) -> bool:
         return self._extract_prompt_text(full_output) is not None
@@ -2419,34 +2524,71 @@ class TerminalInputTool(CodingBaseTool):
 
     name = "terminal_input"
     description = (
-        "向当前正在运行的交互式终端命令发送输入，参数：content、timeout（必填，单位秒）、terminal_id（可选）。"
-        "如果同时存在多个活动终端，terminal_id 为必填；如果 content 不带换行，会自动补一个回车。"
+        "向当前正在运行的交互式终端命令发送输入，参数：content（文本，可选）、key（按键，可选）、"
+        "timeout（必填，单位秒）、terminal_id（可选）、submit（可选，默认 true）。"
+        "key 支持 enter、tab、escape、backspace、delete、ctrl+c、ctrl+d、ctrl+z、up/down/left/right。"
+        "如果同时存在多个活动终端，terminal_id 为必填；普通 content 默认会自动补一个回车。"
     )
     parameters_schema = {
         "type": "object",
         "properties": {
             "content": {"type": "string"},
+            "key": {"type": "string"},
             "timeout": {"type": "integer"},
             "terminal_id": {"type": "string"},
+            "submit": {"type": "boolean"},
         },
-        "required": ["content", "timeout"],
+        "required": ["timeout"],
         "additionalProperties": False,
     }
 
     def run(
         self, arguments: dict[str, object], context: ToolContext
     ) -> dict[str, object]:
-        content = str(arguments.get("content", ""))
         timeout = self._parse_timeout(arguments)
         terminal_id = self._parse_terminal_id(arguments)
-        if content == "":
-            raise ValueError("content 不能为空。")
 
         interactive_session = context.metadata.get("interactive_command_session")
         if not isinstance(interactive_session, InteractiveCommandSession):
             raise RuntimeError("当前会话没有可交互的终端命令。")
 
-        return interactive_session.send_input(content, timeout, terminal_id=terminal_id)
+        key = _normalize_terminal_key(arguments.get("key"))
+        raw_content_key = _normalize_terminal_key(arguments.get("content"))
+        if key in TERMINAL_INTERRUPT_KEYS or (
+            not key and raw_content_key in TERMINAL_INTERRUPT_KEYS
+        ):
+            return interactive_session.interrupt_command(terminal_id=terminal_id)
+
+        content, submit = self._resolve_input(arguments)
+        if content == "":
+            raise ValueError("content 或 key 不能为空。")
+
+        return interactive_session.send_input(
+            content,
+            timeout,
+            terminal_id=terminal_id,
+            submit=submit,
+        )
+
+    def _resolve_input(self, arguments: dict[str, object]) -> tuple[str, bool]:
+        key = _normalize_terminal_key(arguments.get("key"))
+        if key:
+            if key not in TERMINAL_KEY_INPUTS:
+                supported = ", ".join(
+                    sorted({*TERMINAL_KEY_INPUTS.keys(), *TERMINAL_INTERRUPT_KEYS})
+                )
+                raise ValueError(f"不支持的终端按键: {key}。支持: {supported}")
+            return TERMINAL_KEY_INPUTS[key], False
+
+        raw_content = str(arguments.get("content", ""))
+        content = _expand_terminal_inline_key_tokens(raw_content)
+        submit = _parse_bool_argument(arguments.get("submit", True))
+        raw_content_key = _normalize_terminal_key(raw_content)
+        if raw_content_key in TERMINAL_INTERRUPT_KEYS:
+            return "\x03", False
+        if raw_content_key in TERMINAL_KEY_INPUTS:
+            return TERMINAL_KEY_INPUTS[raw_content_key], False
+        return content, submit
 
     def _parse_timeout(self, arguments: dict[str, object]) -> int:
         raw_timeout = arguments.get("timeout")

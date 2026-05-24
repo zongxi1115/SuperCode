@@ -14,6 +14,8 @@ interface KanbanColumnProps {
   onDrop: (e: React.DragEvent<HTMLDivElement>, status: CardStatus) => void;
   onDragOver: (e: React.DragEvent<HTMLDivElement>) => void;
   onDragLeave: (e: React.DragEvent<HTMLDivElement>) => void;
+  onCreateCard: (column: KanbanColumnType) => void;
+  isCreatingCard?: boolean;
 }
 
 export function KanbanColumn({
@@ -23,7 +25,9 @@ export function KanbanColumn({
   onDragStart,
   onDrop,
   onDragOver,
-  onDragLeave
+  onDragLeave,
+  onCreateCard,
+  isCreatingCard = false,
 }: KanbanColumnProps) {
   const [isDragOver, setIsDragOver] = React.useState(false);
 
@@ -59,7 +63,15 @@ export function KanbanColumn({
             {cards.length}
           </span>
         </div>
-        <Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground hover:text-foreground">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-6 w-6 text-muted-foreground hover:text-foreground"
+          onClick={() => onCreateCard(column)}
+          disabled={isCreatingCard}
+          aria-label={`在${column.name}中添加卡片`}
+          title={`在${column.name}中添加卡片`}
+        >
           <Plus className="h-4 w-4" />
         </Button>
       </div>

@@ -32,7 +32,7 @@
 - replace_file(filename, old_content, new_content)：仅在 patch 不方便时使用
 - delete_file(filename)：删除文件，必须等待用户确认
 - execute(content, timeout, terminal_id?)：执行命令，timeout 必填
-- terminal_input(content, timeout, terminal_id?)：给交互式命令输入
+- terminal_input(content?, key?, timeout, terminal_id?, submit?)：给交互式命令输入；文本用 content，按键用 key（enter/tab/ctrl+c 等）
 - terminal_wait(timeout, terminal_id?)：等待运行中的命令
 - read_current_plan()：读取当前会话里最新的计划草案/计划正文
 - create_task(title, summary, steps)：创建一个结构化 task，steps 中每项都要有 title 和 summary

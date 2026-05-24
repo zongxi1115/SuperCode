@@ -161,16 +161,80 @@ class ExecuteToolTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "当前没有可(继续输入|交互)的终端命令"):
             terminal_input_tool.run({"content": "y", "timeout": 1}, interactive_context)
 
-    def test_terminal_wait_can_observe_background_progress(self) -> None:
+    def test_terminal_input_key_enter_sends_blank_line(self) -> None:
         self.interactive_session = InteractiveCommandSession(workspace=self.workspace)
         interactive_context = ToolContext(
             workspace=self.workspace,
             metadata={"interactive_command_session": self.interactive_session},
         )
         execute_tool = ExecuteTool()
-        wait_tool = TerminalWaitTool()
+        terminal_input_tool = TerminalInputTool()
 
         first_result = execute_tool.run(
+            {
+                "content": "[Console]::Write('Press enter: '); [Console]::ReadLine() | Out-Null; Write-Output 'Done'",
+                "timeout": 3,
+            },
+            interactive_context,
+        )
+
+        self.assertEqual(first_result["status"], "running")
+        self.assertEqual(first_result["exit_reason"], "awaiting_input")
+
+        second_result = terminal_input_tool.run(
+            {
+                "key": "enter",
+                "timeout": 3,
+                "terminal_id": str(first_result["terminal_id"]),
+            },
+            interactive_context,
+        )
+
+        self.assertEqual(second_result["status"], "completed")
+        self.assertEqual(second_result["exit_reason"], "completed")
+        self.assertIn("Done", str(second_result["full_output"]))
+
+    def test_terminal_input_key_ctrl_c_interrupts_running_command(self) -> None:
+        self.interactive_session = InteractiveCommandSession(workspace=self.workspace)
+        interactive_context = ToolContext(
+            workspace=self.workspace,
+            metadata={"interactive_command_session": self.interactive_session},
+        )
+        execute_tool = ExecuteTool()
+        terminal_input_tool = TerminalInputTool()
+
+        first_result = execute_tool.run(
+            {
+                "content": "Start-Sleep -Seconds 10",
+                "timeout": 1,
+            },
+            interactive_context,
+        )
+
+        self.assertEqual(first_result["status"], "running")
+        self.assertEqual(first_result["exit_reason"], "timeout")
+
+        interrupted = terminal_input_tool.run(
+            {
+                "key": "Ctrl + C",
+                "timeout": 1,
+                "terminal_id": str(first_result["terminal_id"]),
+            },
+            interactive_context,
+        )
+
+        self.assertEqual(interrupted["status"], "terminated")
+        self.assertEqual(interrupted["exit_reason"], "interrupted")
+
+    def test_execute_waits_until_command_completes_before_returning(self) -> None:
+        self.interactive_session = InteractiveCommandSession(workspace=self.workspace)
+        interactive_context = ToolContext(
+            workspace=self.workspace,
+            metadata={"interactive_command_session": self.interactive_session},
+        )
+        execute_tool = ExecuteTool()
+
+        result = execute_tool.run(
             {
                 "content": "Write-Output 'Installing'; Start-Sleep -Seconds 2; Write-Output 'Done'",
                 "timeout": 3,
@@ -178,16 +242,11 @@ class ExecuteToolTests(unittest.TestCase):
             interactive_context,
         )
 
-        self.assertEqual(first_result["status"], "running")
-        self.assertEqual(first_result["exit_reason"], "idle")
-        self.assertFalse(bool(first_result["awaiting_input"]))
-        self.assertIn("Installing", str(first_result["full_output"]))
-
-        second_result = wait_tool.run({"timeout": 4}, interactive_context)
-
-        self.assertEqual(second_result["status"], "completed")
-        self.assertEqual(second_result["exit_reason"], "completed")
-        self.assertIn("Done", str(second_result["full_output"]))
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["exit_reason"], "completed")
+        self.assertFalse(bool(result["awaiting_input"]))
+        self.assertIn("Installing", str(result["full_output"]))
+        self.assertIn("Done", str(result["full_output"]))
 
     def test_terminal_wait_returns_prompt_without_waiting_full_timeout(self) -> None:
         self.interactive_session = InteractiveCommandSession(workspace=self.workspace)
@@ -233,14 +292,14 @@ class ExecuteToolTests(unittest.TestCase):
 
         first_result = execute_tool.run(
             {
-                "content": "Start-Sleep -Seconds 4",
-                "timeout": 3,
+                "content": "Start-Sleep -Seconds 10",
+                "timeout": 1,
             },
             interactive_context,
         )
 
         self.assertEqual(first_result["status"], "running")
-        self.assertEqual(first_result["exit_reason"], "idle")
+        self.assertEqual(first_result["exit_reason"], "timeout")
         self.assertEqual(str(first_result["delta"]), "")
 
         started_at = time.monotonic()
@@ -269,12 +328,13 @@ class ExecuteToolTests(unittest.TestCase):
         first_result = execute_tool.run(
             {
                 "content": "Write-Output 'Installing'; Start-Sleep -Seconds 2; Write-Output 'Done'",
-                "timeout": 3,
+                "timeout": 1,
             },
             interactive_context,
         )
 
         self.assertEqual(first_result["status"], "running")
+        self.assertEqual(first_result["exit_reason"], "timeout")
         terminal_id = str(first_result["terminal_id"])
 
         time.sleep(2.5)

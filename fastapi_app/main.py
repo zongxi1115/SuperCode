@@ -3376,9 +3376,18 @@ async def post_session_terminal_input(
     session = require_session(session_id)
     if session.terminal_runtime is None:
         raise HTTPException(status_code=404, detail="terminal 不存在")
-    if request.command == "" and not request.submit:
+    key = str(request.key or "").strip()
+    if key:
+        try:
+            handled = session.terminal_runtime.send_key(key)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not handled:
+            raise HTTPException(status_code=409, detail="当前终端后端不支持该按键")
+    elif request.command == "" and not request.submit:
         raise HTTPException(status_code=400, detail="command 和 submit 不能同时为空")
-    session.terminal_runtime.send_input(request.command, submit=request.submit)
+    else:
+        session.terminal_runtime.send_input(request.command, submit=request.submit)
     session.touch()
     snapshot = session.terminal_runtime.snapshot(session_id)
     session.terminal_output = snapshot.output

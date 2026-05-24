@@ -208,6 +208,7 @@ class ContinueChatStreamRequest(BaseModel):
 
 class TerminalInputRequest(BaseModel):
     command: str = ""
+    key: str | None = None
     submit: bool = True
 
 

@@ -42,10 +42,17 @@ class _FakePtyProcess:
 class _FakeTerminalRuntime:
     def __init__(self, supports_interrupt: bool = True) -> None:
         self.calls: list[tuple[str, bool]] = []
+        self.keys: list[str] = []
         self.supports_interrupt = supports_interrupt
 
     def send_input(self, command: str, submit: bool = True) -> None:
         self.calls.append((command, submit))
+
+    def send_key(self, key: str) -> bool:
+        self.keys.append(key)
+        if key.strip().lower() in {"ctrl+c", "ctrl-c", "control+c"}:
+            return self.supports_interrupt
+        return True
 
     def interrupt(self) -> bool:
         return self.supports_interrupt
@@ -73,12 +80,17 @@ class TerminalRuntimeTests(unittest.TestCase):
             try:
                 runtime.send_input("", submit=True)
                 runtime.send_input("Get-Location", submit=True)
+                runtime.send_key("enter")
+                runtime.send_key("tab")
 
                 self.assertEqual(runtime.backend, "winpty")
                 self.assertTrue(runtime.supports_interrupt)
-                self.assertTrue(runtime.interrupt())
+                self.assertTrue(runtime.send_key("Ctrl + C"))
                 self.assertIsNotNone(runtime.pty_process)
-                self.assertEqual(runtime.pty_process.writes[:2], ["\n", "Get-Location\n"])
+                self.assertEqual(
+                    runtime.pty_process.writes[:4],
+                    ["\n", "Get-Location\n", "\n", "\t"],
+                )
                 self.assertEqual(runtime.pty_process.controls, ["c"])
                 self.assertIn("Set-Location -LiteralPath", _FakePtyProcess.last_command or "")
                 self.assertIn("$env:PYTHONIOENCODING = 'utf-8';", _FakePtyProcess.last_command or "")
@@ -108,6 +120,50 @@ class TerminalRuntimeTests(unittest.TestCase):
         self.assertEqual(runtime.calls, [("", True)])
         self.assertEqual(payload["cwd"], "D:\\vibe_projs\\SuperCode\\frontend")
         self.assertTrue(payload["supportsInterrupt"])
+
+    def test_terminal_input_endpoint_accepts_key_input(self) -> None:
+        workspace = Path(tempfile.mkdtemp(prefix="supercode-terminal-key-")).resolve()
+        runtime = _FakeTerminalRuntime()
+        session = api_main.UISession(
+            session_id="session-terminal-key",
+            model="test-model",
+            workspace=str(workspace),
+            terminal_runtime=runtime,
+        )
+
+        with mock.patch.object(api_main, "require_session", return_value=session):
+            response = asyncio.run(
+                api_main.post_session_terminal_input(
+                    "session-terminal-key",
+                    api_main.TerminalInputRequest(key="enter", submit=False),
+                )
+            )
+
+        payload = json.loads(response.body)
+        self.assertEqual(runtime.keys, ["enter"])
+        self.assertEqual(runtime.calls, [])
+        self.assertEqual(payload["revision"], 2)
+
+    def test_terminal_input_endpoint_rejects_unhandled_key(self) -> None:
+        workspace = Path(tempfile.mkdtemp(prefix="supercode-terminal-key-reject-")).resolve()
+        runtime = _FakeTerminalRuntime(supports_interrupt=False)
+        session = api_main.UISession(
+            session_id="session-terminal-key-reject",
+            model="test-model",
+            workspace=str(workspace),
+            terminal_runtime=runtime,
+        )
+
+        with mock.patch.object(api_main, "require_session", return_value=session):
+            with self.assertRaises(HTTPException) as error:
+                asyncio.run(
+                    api_main.post_session_terminal_input(
+                        "session-terminal-key-reject",
+                        api_main.TerminalInputRequest(key="ctrl+c", submit=False),
+                    )
+                )
+
+        self.assertEqual(error.exception.status_code, 409)
 
     def test_terminal_input_endpoint_rejects_empty_payload_without_submit(self) -> None:
         workspace = Path(tempfile.mkdtemp(prefix="supercode-terminal-empty-")).resolve()

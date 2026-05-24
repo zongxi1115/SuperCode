@@ -21,6 +21,7 @@ type TerminalPanelProps = {
   processes: ManagedProcessPayload[];
   onInputChange: (value: string) => void;
   onSubmit: () => void;
+  onSendKey: (key: string) => void;
   onInterrupt: () => void;
   onToggle: () => void;
   onClear: () => void;
@@ -41,6 +42,7 @@ export function TerminalPanel({
   processes,
   onInputChange,
   onSubmit,
+  onSendKey,
   onInterrupt,
   onToggle,
   onClear,
@@ -66,12 +68,21 @@ export function TerminalPanel({
   const handleKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c" && input.length === 0 && supportsInterrupt) {
       event.preventDefault();
-      onInterrupt();
+      onSendKey("ctrl+c");
+      return;
+    }
+    if (event.key === "Tab") {
+      event.preventDefault();
+      onSendKey("tab");
       return;
     }
     if (event.key === "Enter") {
       event.preventDefault();
-      onSubmit();
+      if (input.length === 0) {
+        onSendKey("enter");
+      } else {
+        onSubmit();
+      }
     }
   };
 

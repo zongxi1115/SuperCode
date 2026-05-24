@@ -1,5 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import type { KanbanBoard as KanbanBoardType, KanbanCard, CardStatus, Priority } from '@/lib/kanban-types';
+import type {
+  KanbanBoard as KanbanBoardType,
+  KanbanCard,
+  KanbanColumn as KanbanColumnType,
+  CardStatus,
+  Priority,
+} from '@/lib/kanban-types';
 import { KanbanColumn } from './kanban-column';
 import { KanbanCardDrawer } from './kanban-card-drawer';
 import { ScrollArea, ScrollBar } from '@/components/ui/scroll-area';
@@ -200,10 +206,10 @@ export function KanbanBoard({ workspace }: KanbanBoardProps) {
     }
   };
 
-  const handleCreateCard = async () => {
+  const handleCreateCard = async (column?: KanbanColumnType) => {
     if (!board || board.columns.length === 0) return;
 
-    const firstColumn = board.columns[0];
+    const targetColumn = column ?? board.columns[0];
     setIsSaving(true);
     setErrorMessage(null);
     try {
@@ -212,7 +218,7 @@ export function KanbanBoard({ workspace }: KanbanBoardProps) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           boardId: board.id,
-          columnId: firstColumn.id,
+          columnId: targetColumn.id,
           title: '新卡片',
           description: '',
           priority: 'none',
@@ -310,6 +316,8 @@ export function KanbanBoard({ workspace }: KanbanBoardProps) {
                   onDragOver={handleDragOver}
                   onDragLeave={handleDragLeave}
                   onDrop={handleDrop}
+                  onCreateCard={handleCreateCard}
+                  isCreatingCard={isSaving}
                 />
               );
             })}

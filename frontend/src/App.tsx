@@ -906,6 +906,31 @@ export default function App() {
     }
   }, [applyTerminalSnapshot, isTerminalSubmitting, refreshFileTreeAfterTerminalActivity, sessionId, terminalInput]);
 
+  const sendTerminalKey = useCallback(async (key: string) => {
+    if (!sessionId || isTerminalSubmitting) {
+      return;
+    }
+
+    setIsTerminalSubmitting(true);
+    try {
+      const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/terminal/input`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key, submit: false }),
+      });
+      if (!res.ok) {
+        throw new Error('终端按键发送失败');
+      }
+      const data: TerminalSnapshotPayload = await res.json();
+      applyTerminalSnapshot(data);
+      refreshFileTreeAfterTerminalActivity(sessionId);
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setIsTerminalSubmitting(false);
+    }
+  }, [applyTerminalSnapshot, isTerminalSubmitting, refreshFileTreeAfterTerminalActivity, sessionId]);
+
   const interruptTerminal = useCallback(async () => {
     if (!sessionId || isTerminalSubmitting || !terminalSupportsInterrupt) {
       return;
@@ -2667,6 +2692,7 @@ export default function App() {
           processes={managedProcesses}
           onInputChange={setTerminalInput}
           onSubmit={() => void sendTerminalCommand()}
+          onSendKey={(key) => void sendTerminalKey(key)}
           onInterrupt={() => void interruptTerminal()}
           onToggle={handleTerminalToggle}
           onClear={() => void clearTerminal()}
