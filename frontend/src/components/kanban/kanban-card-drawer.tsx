@@ -1,33 +1,75 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import type { KanbanCard, CardStatus, Priority } from '@/lib/kanban-types';
 import { CARD_STATUS_LABELS, PRIORITY_LABELS } from '@/lib/kanban-types';
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from '@/components/ui/sheet';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Label } from '@/components/ui/label';
+import { Maximize2, Minimize2, Sparkles } from 'lucide-react';
+import { cn } from '@/lib/utils';
+import type { FileTreeNode } from '@/lib/app-types';
+import { KanbanDescriptionEditor } from './kanban-description-editor';
 
 interface KanbanCardDrawerProps {
   card: KanbanCard | null;
   isOpen: boolean;
   isSaving?: boolean;
+  fileTree?: FileTreeNode[];
   onClose: () => void;
   onSave: (card: KanbanCard) => void;
+  onSendToAi?: (card: KanbanCard) => void;
 }
 
-export function KanbanCardDrawer({ card, isOpen, isSaving = false, onClose, onSave }: KanbanCardDrawerProps) {
-  const [editedCard, setEditedCard] = useState<KanbanCard | null>(null);
+export function KanbanCardDrawer({
+  card,
+  isOpen,
+  isSaving = false,
+  fileTree = [],
+  onClose,
+  onSave,
+  onSendToAi,
+}: KanbanCardDrawerProps) {
+  if (!card) return null;
 
-  useEffect(() => {
-    if (card) {
-      setEditedCard({ ...card });
-    } else {
-      setEditedCard(null);
-    }
-  }, [card, isOpen]);
+  return (
+    <KanbanCardDrawerContent
+      key={card.id}
+      card={card}
+      isOpen={isOpen}
+      isSaving={isSaving}
+      fileTree={fileTree}
+      onClose={onClose}
+      onSave={onSave}
+      onSendToAi={onSendToAi}
+    />
+  );
+}
 
-  if (!editedCard) return null;
+function KanbanCardDrawerContent({
+  card,
+  isOpen,
+  isSaving,
+  fileTree,
+  onClose,
+  onSave,
+  onSendToAi,
+}: {
+  card: KanbanCard;
+  isOpen: boolean;
+  isSaving: boolean;
+  fileTree: FileTreeNode[];
+  onClose: () => void;
+  onSave: (card: KanbanCard) => void;
+  onSendToAi?: (card: KanbanCard) => void;
+}) {
+  const [editedCard, setEditedCard] = useState<KanbanCard>(() => ({ ...card }));
+  const [isExpanded, setIsExpanded] = useState(false);
+
+  const handleClose = () => {
+    setIsExpanded(false);
+    onClose();
+  };
 
   const handleSave = () => {
     onSave({
@@ -36,17 +78,53 @@ export function KanbanCardDrawer({ card, isOpen, isSaving = false, onClose, onSa
     });
   };
 
+  const handleSendToAi = () => {
+    onSendToAi?.({
+      ...editedCard,
+      updatedAt: new Date().toISOString(),
+    });
+  };
+
   return (
-    <Sheet open={isOpen} onOpenChange={(open) => !open && onClose()}>
-      <SheetContent className="sm:max-w-[425px] flex flex-col gap-6 overflow-y-auto">
-        <SheetHeader>
-          <SheetTitle>编辑卡片</SheetTitle>
-          <SheetDescription>
-            修改卡片内容、状态和优先级，保存后会同步到当前工作区看板。
-          </SheetDescription>
+    <Sheet
+      open={isOpen}
+      onOpenChange={(open) => {
+        if (!open) {
+          handleClose();
+        }
+      }}
+    >
+      <SheetContent
+        className={cn(
+          "flex flex-col gap-6 overflow-hidden",
+          isExpanded
+            ? "left-4 right-4 top-4 bottom-4 h-auto w-auto rounded-lg border sm:max-w-none"
+            : "sm:max-w-[425px]",
+        )}
+      >
+        <SheetHeader className="pr-10">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <SheetTitle>编辑卡片</SheetTitle>
+              <SheetDescription>
+                修改卡片内容、状态和优先级，保存后会同步到当前工作区看板。
+              </SheetDescription>
+            </div>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 shrink-0"
+              onClick={() => setIsExpanded((value) => !value)}
+              aria-label={isExpanded ? '还原侧边栏' : '全屏编辑'}
+              title={isExpanded ? '还原侧边栏' : '全屏编辑'}
+            >
+              {isExpanded ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+            </Button>
+          </div>
         </SheetHeader>
         
-        <div className="flex flex-col gap-4">
+        <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pr-1">
           <div className="grid gap-2">
             <Label htmlFor="title">标题</Label>
             <Input 
@@ -56,13 +134,16 @@ export function KanbanCardDrawer({ card, isOpen, isSaving = false, onClose, onSa
             />
           </div>
           
-          <div className="grid gap-2">
+          <div className={cn("grid gap-2", isExpanded && "min-h-0 flex-1")}>
             <Label htmlFor="description">描述</Label>
-            <Textarea 
-              id="description" 
-              value={editedCard.description} 
-              onChange={(e) => setEditedCard({ ...editedCard, description: e.target.value })}
-              className="min-h-[100px]"
+            <KanbanDescriptionEditor
+              value={editedCard.description}
+              fileTree={fileTree}
+              isExpanded={isExpanded}
+              onChange={(description) => {
+                setEditedCard((currentCard) => currentCard ? { ...currentCard, description } : currentCard);
+              }}
+              className={isExpanded ? "flex-1" : "min-h-[220px]"}
             />
           </div>
 
@@ -114,9 +195,21 @@ export function KanbanCardDrawer({ card, isOpen, isSaving = false, onClose, onSa
           </div>
         </div>
 
-        <div className="mt-auto flex items-center justify-end gap-2 pt-4 border-t">
-          <Button variant="outline" onClick={onClose}>取消</Button>
-          <Button onClick={handleSave} disabled={isSaving}>{isSaving ? '保存中...' : '保存更改'}</Button>
+        <div className="mt-auto flex items-center justify-between gap-2 pt-4 border-t">
+          <Button
+            type="button"
+            variant="secondary"
+            className="gap-1.5"
+            onClick={handleSendToAi}
+            disabled={!onSendToAi || isSaving}
+          >
+            <Sparkles className="h-3.5 w-3.5" />
+            交给 AI
+          </Button>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" onClick={handleClose}>取消</Button>
+            <Button onClick={handleSave} disabled={isSaving}>{isSaving ? '保存中...' : '保存更改'}</Button>
+          </div>
         </div>
       </SheetContent>
     </Sheet>

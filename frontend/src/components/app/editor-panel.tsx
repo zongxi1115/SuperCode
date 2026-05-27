@@ -11,7 +11,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { getFileLanguage } from '@/lib/app-utils';
 import type { FileTreeNode } from '@/lib/app-types';
-import { CircleAlert, FileCode, FolderTree, PanelsTopLeft, Rocket, SquareTerminal } from 'lucide-react';
+import { CircleAlert, FileCode, FolderTree, PanelsTopLeft, Sparkles, SquareTerminal } from 'lucide-react';
 import type { editor as MonacoEditor } from 'monaco-editor';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
@@ -272,8 +272,8 @@ export function EditorPanel({
                         className="h-7 gap-1.5 text-xs bg-primary hover:bg-primary/90"
                         onClick={() => onSubmitPlan?.(planEditContent, planAnnotationsRef.current)}
                       >
-                        <Rocket className="w-3.5 h-3.5" />
-                        提交方案
+                        <Sparkles className="w-3.5 h-3.5" />
+                        交给 AI
                       </Button>
                       <Button size="sm" variant="ghost" className="h-7 gap-1.5 text-xs" onClick={onClosePlan}>
                         返回编辑器

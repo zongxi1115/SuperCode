@@ -132,6 +132,62 @@
   gap: 0.5rem;
 }
 
+[data-streamdown="code-block"] pre {
+  max-height: 20rem;
+  overflow-y: auto;
+}
+
+[data-streamdown="code-block"] pre::-webkit-scrollbar {
+  width: 6px;
+}
+
+[data-streamdown="code-block"] pre::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+[data-streamdown="code-block"] pre::-webkit-scrollbar-thumb {
+  background: oklch(0.556 0 0 / 0.25);
+  border-radius: 3px;
+}
+
+[data-streamdown="code-block"] pre::-webkit-scrollbar-thumb:hover {
+  background: oklch(0.556 0 0 / 0.4);
+}
+
+.dark [data-streamdown="code-block"] pre::-webkit-scrollbar-thumb {
+  background: oklch(0.708 0 0 / 0.25);
+}
+
+.dark [data-streamdown="code-block"] pre::-webkit-scrollbar-thumb:hover {
+  background: oklch(0.708 0 0 / 0.4);
+}
+
+@keyframes stagger-bounce {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+}
+
+.stagger-dot {
+  animation: stagger-bounce 0.6s ease-in-out infinite;
+}
+
+.streaming-code-badge {
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+.streaming-code-badge.badge-state-enter {
+  opacity: 0;
+  transform: translateX(-50%) translateY(4px);
+}
+
+.streaming-code-badge[data-badge-arrow] {
+  pointer-events: auto;
+}
+
+.streaming-code-badge[data-badge-arrow]:hover {
+  color: var(--foreground);
+}
+
 [data-streamdown="code-block-header"] {
   min-height: 1.75rem;
 }

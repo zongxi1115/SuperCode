@@ -6,6 +6,7 @@ import type {
   CardStatus,
   Priority,
 } from '@/lib/kanban-types';
+import type { FileTreeNode } from '@/lib/app-types';
 import { KanbanColumn } from './kanban-column';
 import { KanbanCardDrawer } from './kanban-card-drawer';
 import { ScrollArea, ScrollBar } from '@/components/ui/scroll-area';
@@ -15,6 +16,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 
 type KanbanBoardProps = {
   workspace: string;
+  fileTree?: FileTreeNode[];
+  onSendCardToAi?: (card: KanbanCard) => void;
 };
 
 type BoardPayload = {
@@ -39,7 +42,7 @@ async function readApiError(response: Response, fallback: string) {
   return fallback;
 }
 
-export function KanbanBoard({ workspace }: KanbanBoardProps) {
+export function KanbanBoard({ workspace, fileTree = [], onSendCardToAi }: KanbanBoardProps) {
   const [board, setBoard] = useState<KanbanBoardType | null>(null);
   const [draggedCardId, setDraggedCardId] = useState<string | null>(null);
   const [selectedCard, setSelectedCard] = useState<KanbanCard | null>(null);
@@ -92,7 +95,10 @@ export function KanbanBoard({ workspace }: KanbanBoardProps) {
   }, [workspace]);
 
   useEffect(() => {
-    void loadBoard();
+    const timeoutId = window.setTimeout(() => {
+      void loadBoard();
+    }, 0);
+    return () => window.clearTimeout(timeoutId);
   }, [loadBoard]);
 
   useEffect(() => {
@@ -330,8 +336,13 @@ export function KanbanBoard({ workspace }: KanbanBoardProps) {
         card={selectedCard}
         isOpen={isDrawerOpen}
         isSaving={isSaving}
+        fileTree={fileTree}
         onClose={() => setIsDrawerOpen(false)}
         onSave={(card) => void handleSaveCard(card)}
+        onSendToAi={(card) => {
+          setIsDrawerOpen(false);
+          onSendCardToAi?.(card);
+        }}
       />
     </div>
   );

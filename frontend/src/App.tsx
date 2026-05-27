@@ -8,6 +8,7 @@ import { TerminalPanel } from '@/components/app/terminal-panel';
 import { SettingsDialog } from '@/components/app/settings-dialog';
 import { WorkspacePicker } from '@/components/app/workspace-picker';
 import { KanbanBoard } from '@/components/kanban/kanban-board';
+import type { KanbanCard } from '@/lib/kanban-types';
 import type {
   AgentMode,
   AppSettings,
@@ -146,6 +147,37 @@ function formatPlanAnnotations(annotations: Annotation[], title?: string) {
 
   const titleSuffix = title?.trim() ? ` (${title.trim()})` : '';
   return `\n\n---\n**批注${titleSuffix}:**\n${items.join('\n')}`;
+}
+
+function formatKanbanCardTaskPrompt(card: KanbanCard) {
+  const lines = [
+    `请根据这张看板卡片创建执行方案并开始完成它。`,
+    '',
+    `# ${card.title || '未命名卡片'}`,
+    '',
+    `- 状态：${card.status}`,
+    `- 优先级：${card.priority}`,
+  ];
+
+  if (card.assignee?.trim()) {
+    lines.push(`- 负责人：${card.assignee.trim()}`);
+  }
+
+  if (card.labels.length > 0) {
+    lines.push(`- 标签：${card.labels.join(', ')}`);
+  }
+
+  const description = card.description.trim();
+  if (description) {
+    lines.push('', '## 描述', description);
+  }
+
+  lines.push(
+    '',
+    '请先确认你理解的目标和约束，然后直接推进实现；如果信息不足，请提出最少量的关键问题。',
+  );
+
+  return lines.join('\n');
 }
 
 function isAgentMode(value: unknown): value is AgentMode {
@@ -619,6 +651,7 @@ export default function App() {
   }, [fetchSessionSnapshot, syncVisibleSessionSnapshot]);
 
   const applySessionPayload = useCallback((data: SessionPayload) => {
+    currentSessionIdRef.current = data.sessionId;
     setSessionId(data.sessionId);
     setSelectedWorkspace(data.workspace);
     syncVisibleSessionSnapshot(data);
@@ -652,7 +685,10 @@ export default function App() {
     }
   }, []);
 
-  const createSessionWithWorkspace = useCallback(async (workspace: string) => {
+  const createSessionWithWorkspace = useCallback(async (
+    workspace: string,
+    options?: { agentMode?: AgentMode },
+  ) => {
     setIsSessionBooting(true);
     setSessionError(null);
 
@@ -667,7 +703,7 @@ export default function App() {
           workspace,
           model: selectedModelId,
           reasoning_effort: selectedReasoningEffort,
-          agent_type: resolveAgentModeForRequest(selectedAgentMode),
+          agent_type: resolveAgentModeForRequest(options?.agentMode ?? selectedAgentMode),
         }),
         signal: controller.signal,
       });
@@ -680,6 +716,7 @@ export default function App() {
       const data: SessionPayload = await res.json();
       applySessionPayload(data);
       await loadSessionHistory();
+      return data;
     } catch (error) {
       console.error(error);
       if (error instanceof DOMException && error.name === 'AbortError') {
@@ -687,6 +724,7 @@ export default function App() {
       } else {
         setSessionError(error instanceof Error ? error.message : '创建会话失败');
       }
+      return null;
     } finally {
       setIsSessionBooting(false);
     }
@@ -1947,6 +1985,29 @@ export default function App() {
     }
   };
 
+  const handleSendKanbanCardToAi = useCallback(
+    async (card: KanbanCard) => {
+      if (!sessionId || isLoading) return;
+
+      const message = formatKanbanCardTaskPrompt(card);
+      setActivePlugin(null);
+      setSelectedAgentMode('coding');
+
+      await streamAssistantResponse({
+        url: 'http://localhost:8000/api/chat/stream',
+        body: {
+          session_id: sessionId,
+          message,
+          agent_mode: 'coding',
+        },
+        streamSessionId: sessionId,
+        userVisibleMessage: message,
+        clearComposer: true,
+      });
+    },
+    [isLoading, sessionId, streamAssistantResponse],
+  );
+
   const resolveDeleteConfirmation = useCallback(
     async (toolCallId: string, approved: boolean) => {
       if (!sessionId) return;
@@ -2506,7 +2567,11 @@ export default function App() {
       )}
       {activePlugin === 'kanban' ? (
         <div className="flex-1 flex flex-col min-w-0 bg-background overflow-hidden relative z-10">
-          <KanbanBoard workspace={selectedWorkspace} />
+          <KanbanBoard
+            workspace={selectedWorkspace}
+            fileTree={fileTree}
+            onSendCardToAi={(card) => void handleSendKanbanCardToAi(card)}
+          />
         </div>
       ) : (
       <>

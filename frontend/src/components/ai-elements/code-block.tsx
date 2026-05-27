@@ -26,6 +26,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { AnimatePresence, motion } from "motion/react";
 import type {
   BundledLanguage,
   BundledTheme,
@@ -113,8 +114,29 @@ type CodeBlockProps = HTMLAttributes<HTMLDivElement> & {
   enableHighlighting?: boolean;
   wordWrap?: boolean;
   viewportClassName?: string;
+  isStreaming?: boolean;
   children?: ReactNode;
 };
+
+function StreamingDots() {
+  return (
+    <span className="inline-flex items-center gap-[3px]">
+      {[0, 1, 2].map((i) => (
+        <motion.span
+          key={i}
+          className="size-1 rounded-full bg-current"
+          animate={{ y: [0, -3, 0] }}
+          transition={{
+            duration: 0.6,
+            repeat: Infinity,
+            delay: i * 0.15,
+            ease: "easeInOut",
+          }}
+        />
+      ))}
+    </span>
+  );
+}
 
 interface TokenizedCode {
   tokens: ThemedToken[][];
@@ -371,6 +393,7 @@ export const CodeBlockContent = ({
   enableHighlighting = true,
   wordWrap = false,
   viewportClassName,
+  isStreaming = false,
 }: {
   code?: string;
   language: BundledLanguage;
@@ -378,6 +401,7 @@ export const CodeBlockContent = ({
   enableHighlighting?: boolean;
   wordWrap?: boolean;
   viewportClassName?: string;
+  isStreaming?: boolean;
 }) => {
   const safeCode = code ?? "";
 
@@ -418,15 +442,137 @@ export const CodeBlockContent = ({
   const tokenized =
     asyncTokens && asyncCodeRef.current === safeCode ? asyncTokens : syncTokens;
 
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const isUserScrolling = useRef(false);
+  const skipNextAutoScroll = useRef(false);
+
+  useEffect(() => {
+    if (!isStreaming) return;
+    const el = scrollRef.current;
+    if (!el) return;
+
+    const onScroll = () => {
+      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 20;
+      isUserScrolling.current = !atBottom;
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, [isStreaming]);
+
+  useEffect(() => {
+    if (!isStreaming) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    if (isUserScrolling.current) return;
+    skipNextAutoScroll.current = true;
+    requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight;
+      skipNextAutoScroll.current = false;
+    });
+  }, [safeCode, isStreaming]);
+
+  const [isScrolledUp, setIsScrolledUp] = useState(false);
+
+  useEffect(() => {
+    if (!isStreaming) {
+      setIsScrolledUp(false);
+      return;
+    }
+    const el = scrollRef.current;
+    if (!el) return;
+    const check = () => {
+      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 20;
+      setIsScrolledUp(!atBottom);
+      isUserScrolling.current = !atBottom;
+    };
+    check();
+    const mo = new MutationObserver(check);
+    mo.observe(el, { childList: true, subtree: true, characterData: true });
+    const onScroll = () => check();
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      mo.disconnect();
+      el.removeEventListener("scroll", onScroll);
+    };
+  }, [isStreaming, safeCode]);
+
+  const badgeState: "loading" | "arrow" | null = isStreaming
+    ? isScrolledUp ? "arrow" : "loading"
+    : null;
+
   return (
     <div
+      ref={scrollRef}
       className={cn(
-        "relative min-w-0",
-        wordWrap ? "overflow-x-hidden" : "overflow-x-auto",
+        "relative min-w-0 max-h-80 overflow-y-auto overflow-x-auto",
+        wordWrap && "overflow-x-hidden",
         viewportClassName
       )}
     >
       <CodeBlockBody showLineNumbers={showLineNumbers} tokenized={tokenized} wordWrap={wordWrap} />
+      <AnimatePresence mode="wait">
+        {badgeState && (
+          <motion.div
+            key={badgeState}
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 4 }}
+            transition={{ duration: 0.2 }}
+            className="sticky bottom-1 flex justify-center pointer-events-none z-10"
+          >
+            <div
+              className={cn(
+                "inline-flex items-center gap-1.5 rounded-full bg-muted/90 px-2.5 py-1 text-muted-foreground text-xs backdrop-blur-sm border border-border/50 pointer-events-auto",
+                badgeState === "arrow" && "hover:text-foreground cursor-pointer",
+              )}
+              onClick={() => {
+                if (badgeState === "arrow") {
+                  const el = scrollRef.current;
+                  if (el) {
+                    el.scrollTop = el.scrollHeight;
+                    isUserScrolling.current = false;
+                  }
+                }
+              }}
+            >
+              <AnimatePresence mode="wait" initial={false}>
+                {badgeState === "loading" ? (
+                  <motion.span
+                    key="dots"
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    transition={{ duration: 0.15 }}
+                    className="inline-flex items-center gap-[3px]"
+                  >
+                    <StreamingDots />
+                  </motion.span>
+                ) : (
+                  <motion.span
+                    key="arrow-icon"
+                    initial={{ opacity: 0, rotate: -90 }}
+                    animate={{ opacity: 1, rotate: 0 }}
+                    exit={{ opacity: 0, rotate: -90 }}
+                    transition={{ duration: 0.2 }}
+                    className="inline-flex items-center"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14"/><path d="m19 12-7 7-7-7"/></svg>
+                  </motion.span>
+                )}
+              </AnimatePresence>
+              <motion.span
+                key={badgeState === "loading" ? "label-loading" : "label-scroll"}
+                initial={{ opacity: 0, x: -4 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: 4 }}
+                transition={{ duration: 0.15 }}
+              >
+                {badgeState === "loading" ? "加载中" : "回到底部"}
+              </motion.span>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 };
@@ -438,6 +584,7 @@ export const CodeBlock = ({
   enableHighlighting = true,
   wordWrap = false,
   viewportClassName,
+  isStreaming = false,
   className,
   children,
   ...props
@@ -457,6 +604,7 @@ export const CodeBlock = ({
           showLineNumbers={showLineNumbers}
           wordWrap={wordWrap}
           viewportClassName={viewportClassName}
+          isStreaming={isStreaming}
         />
       </CodeBlockContainer>
     </CodeBlockContext.Provider>
@@ -648,7 +796,7 @@ export const CodeBlockDiff = ({
       )}
       {...props}
     >
-      <div className="relative overflow-auto">
+      <div className="relative max-h-80 overflow-auto">
         <pre className="m-0 p-4 text-sm font-mono">
           <code
             className={cn(

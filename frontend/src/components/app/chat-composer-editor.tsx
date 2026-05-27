@@ -13,6 +13,7 @@ import {
   PencilIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 type MentionKind = "workspace" | "file" | "change" | "element" | "skill";
 
@@ -31,6 +32,7 @@ type ActiveMention = {
   left: number;
   top: number;
   bottom: number;
+  viewportLeft: number;
   viewportTop: number;
   viewportBottom: number;
 };
@@ -217,6 +219,7 @@ function getActiveMentionFromEditor(
     left: coords.left - (anchorRect?.left ?? 0),
     top: coords.top - (anchorRect?.top ?? 0),
     bottom: coords.bottom - (anchorRect?.top ?? 0),
+    viewportLeft: coords.left,
     viewportTop: coords.top,
     viewportBottom: coords.bottom,
   };
@@ -491,13 +494,17 @@ export function ChatComposerEditor({
   const dropdownStyle = useMemo(() => {
     if (!activeMention) return null;
     const estimatedHeight = Math.min(filteredSuggestions.length || 1, 6) * 44 + 12;
+    const estimatedWidth = Math.min(480, window.innerWidth - 32);
     const fitsBelow =
       activeMention.viewportBottom + estimatedHeight < window.innerHeight - 16;
     return {
-      left: Math.max(0, activeMention.left),
+      left: Math.min(
+        Math.max(12, activeMention.viewportLeft),
+        Math.max(12, window.innerWidth - estimatedWidth - 12),
+      ),
       top: fitsBelow
-        ? activeMention.bottom + 10
-        : Math.max(0, activeMention.top - estimatedHeight - 10),
+        ? activeMention.viewportBottom + 10
+        : Math.max(12, activeMention.viewportTop - estimatedHeight - 10),
     };
   }, [activeMention, filteredSuggestions.length]);
 
@@ -513,9 +520,9 @@ export function ChatComposerEditor({
         <EditorContent editor={editor} />
       </div>
 
-      {activeMention && dropdownStyle ? (
+      {activeMention && dropdownStyle ? createPortal(
         <div
-          className="absolute z-50 w-fit min-w-[16rem] max-w-[min(30rem,calc(100vw-2rem))] rounded-xl border border-border/50 bg-popover/98 p-1 shadow-xl backdrop-blur"
+          className="fixed z-[100] w-fit min-w-[16rem] max-w-[min(30rem,calc(100vw-2rem))] rounded-xl border border-border/50 bg-popover/98 p-1 shadow-xl backdrop-blur"
           style={dropdownStyle}
         >
           {filteredSuggestions.length > 0 ? (
@@ -561,7 +568,8 @@ export function ChatComposerEditor({
               没有匹配的上下文项
             </div>
           )}
-        </div>
+        </div>,
+        document.body,
       ) : null}
     </div>
   );

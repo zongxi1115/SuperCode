@@ -702,6 +702,190 @@ function renderCitationBadge(
   );
 }
 
+function useStreamingCodeBlocks(
+  containerRef: React.RefObject<HTMLDivElement | null>,
+  isAnimating: boolean,
+) {
+  useEffect(() => {
+    if (!isAnimating) return;
+    const container = containerRef.current;
+    if (!container) return;
+
+    const scrollStates = new WeakMap<HTMLElement, boolean>();
+    const badgeMap = new WeakMap<HTMLElement, HTMLElement>();
+
+    const setBadgeState = (
+      badge: HTMLElement,
+      state: "loading" | "arrow",
+    ) => {
+      const iconSlot = badge.querySelector("[data-icon-slot]");
+      const labelSlot = badge.querySelector("[data-label-slot]");
+      if (!iconSlot || !labelSlot) return;
+
+      if (state === "loading") {
+        iconSlot.innerHTML = "";
+        const dots = document.createElement("span");
+        dots.className = "inline-flex items-center gap-[3px]";
+        for (let i = 0; i < 3; i++) {
+          const dot = document.createElement("span");
+          dot.className = "stagger-dot size-1 rounded-full bg-current";
+          dot.style.animationDelay = `${i * 0.15}s`;
+          dots.appendChild(dot);
+        }
+        iconSlot.appendChild(dots);
+        labelSlot.textContent = "加载中";
+        badge.classList.remove("cursor-pointer");
+        badge.removeAttribute("data-badge-arrow");
+      } else {
+        iconSlot.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="m19 12-7 7-7-7"/></svg>`;
+        labelSlot.textContent = "回到底部";
+        badge.classList.add("cursor-pointer");
+        badge.setAttribute("data-badge-arrow", "");
+      }
+
+      badge.setAttribute("data-badge-state", state);
+      badge.classList.add("badge-state-enter");
+      requestAnimationFrame(() => {
+        badge.classList.remove("badge-state-enter");
+      });
+    };
+
+    const createBadge = (pre: HTMLElement) => {
+      const el = document.createElement("div");
+      el.className =
+        "streaming-code-badge pointer-events-none absolute bottom-1 left-1/2 -translate-x-1/2 z-20 inline-flex items-center gap-1.5 rounded-full bg-muted/90 px-2.5 py-1 text-muted-foreground text-xs backdrop-blur-sm border border-border/50 transition-colors duration-150";
+      el.style.display = isAnimating ? "" : "none";
+
+      const iconSlot = document.createElement("span");
+      iconSlot.setAttribute("data-icon-slot", "");
+      iconSlot.className = "inline-flex items-center transition-opacity duration-150";
+      el.appendChild(iconSlot);
+
+      const labelSlot = document.createElement("span");
+      labelSlot.setAttribute("data-label-slot", "");
+      labelSlot.className = "transition-opacity duration-150";
+      el.appendChild(labelSlot);
+
+      el.addEventListener("click", () => {
+        if (el.getAttribute("data-badge-state") === "arrow") {
+          pre.scrollTop = pre.scrollHeight;
+          scrollStates.set(pre, true);
+          updateOverlay(pre);
+        }
+      });
+
+      setBadgeState(el, "loading");
+      return el;
+    };
+
+    const updateOverlay = (pre: HTMLElement) => {
+      const block = pre.closest('[data-streamdown="code-block"]') as HTMLElement;
+      if (!block) return;
+
+      const atBottom =
+        pre.scrollHeight - pre.scrollTop - pre.clientHeight < 20;
+      const wasAtBottom = scrollStates.get(pre) ?? true;
+      scrollStates.set(pre, atBottom);
+
+      const badge = badgeMap.get(pre);
+      if (badge) {
+        badge.style.display = isAnimating ? "" : "none";
+        if (isAnimating) {
+          const currentState = badge.getAttribute("data-badge-state");
+          const nextState = atBottom ? "loading" : "arrow";
+          if (currentState !== nextState) {
+            setBadgeState(badge, nextState as "loading" | "arrow");
+          }
+        }
+      }
+
+      if (atBottom && wasAtBottom !== false) {
+        requestAnimationFrame(() => {
+          pre.scrollTop = pre.scrollHeight;
+        });
+      }
+    };
+
+    const onScroll = (e: Event) => {
+      const pre = e.target as HTMLElement;
+      updateOverlay(pre);
+    };
+
+    const scanBlocks = () => {
+      const blocks = container.querySelectorAll<HTMLDivElement>(
+        '[data-streamdown="code-block"]',
+      );
+      blocks.forEach((block) => {
+        const pre = block.querySelector("pre");
+        if (!pre) return;
+
+        block.style.position = "relative";
+
+        if (!badgeMap.has(pre)) {
+          const badge = createBadge(pre);
+          block.appendChild(badge);
+          badgeMap.set(pre, badge);
+        }
+
+        if (!scrollStates.has(pre)) {
+          scrollStates.set(pre, true);
+          pre.addEventListener("scroll", onScroll, { passive: true });
+        }
+
+        updateOverlay(pre);
+      });
+    };
+
+    scanBlocks();
+
+    const mo = new MutationObserver(() => {
+      scanBlocks();
+      requestAnimationFrame(() => {
+        container
+          .querySelectorAll<HTMLPreElement>(
+            '[data-streamdown="code-block"] pre',
+          )
+          .forEach((pre) => {
+            const atBottom = scrollStates.get(pre) ?? true;
+            if (atBottom) {
+              pre.scrollTop = pre.scrollHeight;
+            }
+          });
+      });
+    });
+    mo.observe(container, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+
+    return () => {
+      mo.disconnect();
+      container
+        .querySelectorAll<HTMLPreElement>(
+          '[data-streamdown="code-block"] pre',
+        )
+        .forEach((pre) => {
+          pre.removeEventListener("scroll", onScroll);
+          const badge = badgeMap.get(pre);
+          if (badge) badge.remove();
+        });
+    };
+  }, [isAnimating, containerRef]);
+}
+
+const StreamingMessageWrapper = memo(function StreamingMessageWrapper({
+  isAnimating,
+  children,
+}: {
+  isAnimating: boolean;
+  children: React.ReactNode;
+}) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  useStreamingCodeBlocks(containerRef, isAnimating);
+  return <div ref={containerRef}>{children}</div>;
+});
+
 function renderCitationMessage(
   text: string,
   citations: Map<string, CitationInfo>,
@@ -712,33 +896,35 @@ function renderCitationMessage(
   },
 ) {
   const markdown = serializeCitationMarkdown(text, citations);
+  const isAnimating = options?.isAnimating ?? false;
 
   return (
-    <MessageResponse
-      allowedTags={{ citation: ["title", "urls"] }}
-      className={options?.className}
-      components={{
-        citation: ({ urls }) => {
-          if (typeof urls !== "string") {
-            return null;
-          }
-          try {
-            const parsed = JSON.parse(urls);
-            return Array.isArray(parsed) &&
-              parsed.every((item) => typeof item === "string")
-              ? renderCitationBadge(parsed, citations)
-              : null;
-          } catch {
-            return null;
-          }
-        },
-      }}
-      isAnimating={options?.isAnimating}
-      key={options?.key}
-      literalTagContent={["citation"]}
-    >
-      {markdown}
-    </MessageResponse>
+    <StreamingMessageWrapper isAnimating={isAnimating} key={options?.key}>
+      <MessageResponse
+        allowedTags={{ citation: ["title", "urls"] }}
+        className={options?.className}
+        components={{
+          citation: ({ urls }) => {
+            if (typeof urls !== "string") {
+              return null;
+            }
+            try {
+              const parsed = JSON.parse(urls);
+              return Array.isArray(parsed) &&
+                parsed.every((item) => typeof item === "string")
+                ? renderCitationBadge(parsed, citations)
+                : null;
+            } catch {
+              return null;
+            }
+          },
+        }}
+        isAnimating={isAnimating}
+        literalTagContent={["citation"]}
+      >
+        {markdown}
+      </MessageResponse>
+    </StreamingMessageWrapper>
   );
 }
 
@@ -1295,8 +1481,8 @@ function ToolBody({
         <CodeBlock
           code={content}
           enableHighlighting={!isStreaming}
+          isStreaming={isStreaming}
           language={filename ? (getShikiLanguage(filename) as never) : "text"}
-          viewportClassName="overflow-x-auto"
         />
       </div>
     );
@@ -1374,8 +1560,8 @@ function ToolBody({
         <CodeBlock
           code={newContent}
           enableHighlighting={!isStreaming}
+          isStreaming={isStreaming}
           language={filename ? (getShikiLanguage(filename) as never) : "text"}
-          viewportClassName="overflow-x-auto"
         />
       </div>
     );
@@ -1393,8 +1579,8 @@ function ToolBody({
         <CodeBlock
           code={applyPatchPreview}
           enableHighlighting={!isStreaming}
+          isStreaming={isStreaming}
           language={filename ? (getShikiLanguage(filename) as never) : "text"}
-          viewportClassName="overflow-x-auto"
         />
       </div>
     );

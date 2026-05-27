@@ -27,6 +27,7 @@ import {
   TableIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { AnimatePresence, motion } from "motion/react";
 
 export type Annotation = {
@@ -50,6 +51,8 @@ type SlashMenuState = {
   left: number;
   top: number;
   bottom: number;
+  viewportLeft: number;
+  viewportTop: number;
   viewportBottom: number;
 };
 
@@ -188,6 +191,8 @@ function getSlashMenuState(
     left: coords.left - (anchorRect?.left ?? 0) + scrollOffset.x,
     top: coords.top - (anchorRect?.top ?? 0) + scrollOffset.y,
     bottom: coords.bottom - (anchorRect?.top ?? 0) + scrollOffset.y,
+    viewportLeft: coords.left,
+    viewportTop: coords.top,
     viewportBottom: coords.bottom,
   };
 }
@@ -210,10 +215,10 @@ function ToolbarButton({
       title={label}
       onMouseDown={onMouseDown}
       className={cn(
-        "inline-flex h-8 items-center justify-center rounded-md border px-2 text-muted-foreground transition-colors",
+        "inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors",
         active
-          ? "border-primary/30 bg-primary/10 text-primary"
-          : "border-border/60 bg-background hover:bg-accent hover:text-foreground",
+          ? "bg-violet-100 text-violet-700 dark:bg-violet-950/60 dark:text-violet-300"
+          : "hover:bg-muted hover:text-foreground",
       )}
     >
       {children}
@@ -614,18 +619,25 @@ export function PlanRichTextEditor({
   const dropdownStyle = useMemo(() => {
     if (!slashMenu) return null;
     const estimatedHeight = Math.min(filteredSlashCommands.length || 1, 6) * 52 + 12;
+    const estimatedWidth = Math.min(512, window.innerWidth - 32);
     const fitsBelow = slashMenu.viewportBottom + estimatedHeight < window.innerHeight - 16;
     return {
-      left: Math.max(0, slashMenu.left),
+      left: Math.min(
+        Math.max(12, slashMenu.viewportLeft),
+        Math.max(12, window.innerWidth - estimatedWidth - 12),
+      ),
       top: fitsBelow
-        ? slashMenu.bottom + 10
-        : Math.max(0, slashMenu.top - estimatedHeight - 10),
+        ? slashMenu.viewportBottom + 10
+        : Math.max(12, slashMenu.viewportTop - estimatedHeight - 10),
     };
   }, [filteredSlashCommands.length, slashMenu]);
 
+  const characterCount = editor?.state.doc.textContent.length ?? normalizeMarkdown(value).length;
+
   return (
-    <div className="flex h-full min-h-0 flex-col bg-[radial-gradient(circle_at_top,_rgba(59,130,246,0.07),_transparent_34%),linear-gradient(180deg,rgba(255,255,255,0.04),transparent)]">
-      <div className="flex flex-wrap items-center gap-2 border-b border-border/60 bg-muted/25 px-4 py-3">
+    <div className="flex h-full min-h-0 bg-background p-2">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-[1.35rem] border border-violet-400/80 bg-background shadow-[0_0_0_4px_rgba(139,92,246,0.13),0_18px_42px_rgba(15,23,42,0.08)] transition-colors focus-within:border-violet-500">
+      <div className="flex min-h-14 shrink-0 flex-wrap items-center gap-1 border-b border-border/55 bg-background px-5 py-2.5">
         <ToolbarButton
           label="加粗"
           active={editor?.isActive("bold")}
@@ -666,7 +678,7 @@ export function PlanRichTextEditor({
         >
           <Code className="size-3.5" />
         </ToolbarButton>
-        <div className="mx-1 h-5 w-px bg-border/70" />
+        <div className="mx-2 h-6 w-px bg-border/70" />
         <ToolbarButton
           label="一级标题"
           active={editor?.isActive("heading", { level: 1 })}
@@ -746,7 +758,7 @@ export function PlanRichTextEditor({
         >
           <Minus className="size-3.5" />
         </ToolbarButton>
-        <div className="mx-1 h-5 w-px bg-border/70" />
+        <div className="mx-2 h-6 w-px bg-border/70" />
         <ToolbarButton
           label="批注"
           onMouseDown={(event) => {
@@ -758,7 +770,8 @@ export function PlanRichTextEditor({
         </ToolbarButton>
       </div>
 
-      <div ref={anchorRef} className="relative flex-1 min-h-0 overflow-auto">
+      <div className="relative min-h-0 flex-1">
+      <div ref={anchorRef} className="relative h-full min-h-0 overflow-auto pb-12">
         <EditorContent editor={editor} onKeyDown={handleKeyDown} />
 
         <AnimatePresence>
@@ -945,9 +958,9 @@ export function PlanRichTextEditor({
           )}
         </AnimatePresence>
 
-        {slashMenu && dropdownStyle ? (
+        {slashMenu && dropdownStyle ? createPortal(
           <div
-            className="absolute z-50 w-fit min-w-[17rem] max-w-[min(32rem,calc(100vw-4rem))] rounded-xl border border-border/60 bg-popover/98 p-1.5 shadow-xl backdrop-blur"
+            className="fixed z-[100] w-fit min-w-[17rem] max-w-[min(32rem,calc(100vw-4rem))] rounded-xl border border-border/60 bg-popover/98 p-1.5 shadow-xl backdrop-blur"
             style={dropdownStyle}
           >
             {filteredSlashCommands.length > 0 ? (
@@ -1004,8 +1017,16 @@ export function PlanRichTextEditor({
                 没有匹配的结构命令
               </div>
             )}
-          </div>
+          </div>,
+          document.body,
         ) : null}
+      </div>
+
+      <div className="pointer-events-none absolute bottom-4 right-6 flex items-center gap-2 text-[11px] font-bold uppercase tracking-[0.08em] text-muted-foreground">
+        <span className="h-2 w-2 rounded-full bg-emerald-500" />
+        <span>{characterCount}</span>
+        <span>chars</span>
+      </div>
       </div>
 
       <AnimatePresence>
@@ -1105,6 +1126,7 @@ export function PlanRichTextEditor({
           pointer-events: none;
         }
       `}</style>
+      </div>
     </div>
   );
 }
