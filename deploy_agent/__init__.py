@@ -1,6 +1,6 @@
 """部署智能体场景包。"""
 
-from .brain import DeployPromptBrain
+from .model import DeployPromptModel
 from .tools import (
     ConnectTool,
     DeployConnectionManager,
@@ -16,7 +16,7 @@ __all__ = [
     "DeployConnectionManager",
     "DeployExecuteTool",
     "DeployListFilesTool",
-    "DeployPromptBrain",
+    "DeployPromptModel",
     "DeployReadFileTool",
     "DeployTransferFilesTool",
     "build_deploy_tools",

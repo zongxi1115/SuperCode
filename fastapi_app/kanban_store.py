@@ -101,7 +101,7 @@ class KanbanStore:
             card_rows = connection.execute(
                 """
                 SELECT id, board_id, column_id, title, description, priority, labels, assignee,
-                       position, created_at, updated_at
+                       position, ai_state, created_at, updated_at
                 FROM kanban_cards
                 WHERE board_id = ?
                 ORDER BY position ASC, created_at ASC
@@ -147,9 +147,9 @@ class KanbanStore:
                 """
                 INSERT INTO kanban_cards (
                     id, board_id, column_id, title, description, priority, labels, assignee,
-                    position, created_at, updated_at
+                    position, ai_state, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     card_id,
@@ -161,6 +161,7 @@ class KanbanStore:
                     json.dumps(normalized_labels, ensure_ascii=False),
                     self._clean_optional(assignee),
                     position,
+                    None,
                     now,
                     now,
                 ),
@@ -174,7 +175,7 @@ class KanbanStore:
             row = connection.execute(
                 """
                 SELECT cards.id, cards.board_id, cards.column_id, cards.title, cards.description,
-                       cards.priority, cards.labels, cards.assignee, cards.position,
+                       cards.priority, cards.labels, cards.assignee, cards.position, cards.ai_state,
                        cards.created_at, cards.updated_at
                 FROM kanban_cards AS cards
                 JOIN kanban_boards AS boards ON boards.id = cards.board_id
@@ -203,6 +204,7 @@ class KanbanStore:
         column_id: str | None = None,
         status: str | None = None,
         position: float | None = None,
+        ai_state: dict[str, Any] | None | object = ...,
     ) -> dict[str, Any]:
         now = self._now()
         with self._lock, self._connect() as connection:
@@ -234,6 +236,8 @@ class KanbanStore:
                 updates["position"] = float(position)
             elif next_column_id != str(row["column_id"]):
                 updates["position"] = self._next_card_position(connection, board_id, next_column_id)
+            if ai_state is not ...:
+                updates["ai_state"] = self._dump_ai_state(ai_state)
 
             set_clause = ", ".join(f"{key} = ?" for key in updates)
             connection.execute(
@@ -350,6 +354,7 @@ class KanbanStore:
                     labels TEXT NOT NULL DEFAULT '[]',
                     assignee TEXT,
                     position REAL NOT NULL,
+                    ai_state TEXT,
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL,
                     FOREIGN KEY(board_id) REFERENCES kanban_boards(id) ON DELETE CASCADE,
@@ -357,6 +362,12 @@ class KanbanStore:
                 )
                 """
             )
+            existing_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(kanban_cards)").fetchall()
+            }
+            if "ai_state" not in existing_columns:
+                connection.execute("ALTER TABLE kanban_cards ADD COLUMN ai_state TEXT")
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_kanban_boards_workspace ON kanban_boards(workspace)"
             )
@@ -496,6 +507,7 @@ class KanbanStore:
             "labels": self._load_labels(row["labels"]),
             "assignee": row["assignee"],
             "position": position,
+            "aiState": self._load_ai_state(row["ai_state"]),
             "createdAt": self._timestamp_to_iso(int(row["created_at"])),
             "updatedAt": self._timestamp_to_iso(int(row["updated_at"])),
         }
@@ -531,6 +543,26 @@ class KanbanStore:
         if not isinstance(parsed, list):
             return []
         return [str(item) for item in parsed if str(item).strip()]
+
+    @staticmethod
+    def _load_ai_state(value: object) -> dict[str, Any] | None:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+    @staticmethod
+    def _dump_ai_state(value: dict[str, Any] | None | object) -> str | None:
+        if value is None:
+            return None
+        if value is ...:
+            return None
+        if not isinstance(value, dict):
+            raise HTTPException(status_code=400, detail="卡片 AI 状态格式无效。")
+        return json.dumps(value, ensure_ascii=False)
 
     @staticmethod
     def _clean_optional(value: str | None) -> str | None:

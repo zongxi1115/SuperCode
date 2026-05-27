@@ -16,11 +16,11 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
-from agent.agent import CodingAgent
+from agent.core import Agent
 from agent.llm_client import OpenAICompatibleClient
 from agent.schema import AgentResponse, AgentState, StepRecord, ToolCall
 from agent.tools import BaseTool, ToolContext
-from coding_agent.brain import CodeExplorationPromptBrain
+from coding_agent.model import CodeExplorationPromptModel
 
 INTERACTIVE_INPUT_PROMPT_IDLE_SECONDS = 0.2
 INTERACTIVE_POLL_SECONDS = 0.05
@@ -948,26 +948,22 @@ class InteractiveCommandSession:
 
         last_line = lines[-1]
         normalized_last_line = last_line.lower()
-        prompt_hints = [
-            "select",
-            "choose",
-            "continue",
-            "overwrite",
+        if normalized_last_line.endswith("?"):
+            return last_line
+        if normalized_last_line.endswith(":"):
+            return last_line
+        explicit_prompt_markers = [
             "yes/no",
             "[y/n]",
             "(y/n)",
             "(y/n/a)",
-            "enter",
-            "input",
             "请输入",
             "是否",
             "请选择",
         ]
-        if any(hint in normalized_last_line for hint in prompt_hints):
+        if any(marker in normalized_last_line for marker in explicit_prompt_markers):
             return last_line
-        if normalized_last_line.endswith("?"):
-            return last_line
-        if normalized_last_line.endswith(":"):
+        if re.fullmatch(r"(press|hit)\s+(enter|return)(\s+to\s+\w+)?", normalized_last_line):
             return last_line
         return None
 
@@ -1987,7 +1983,7 @@ class DelegateCodeExplorationTool(CodingBaseTool):
                 break
         return paths
 
-    def _build_subagent(self, context: ToolContext, *, max_steps: int) -> CodingAgent:
+    def _build_subagent(self, context: ToolContext, *, max_steps: int) -> Agent:
         factory = context.metadata.get("code_exploration_subagent_factory")
         if callable(factory):
             return factory(context, max_steps)
@@ -1996,8 +1992,8 @@ class DelegateCodeExplorationTool(CodingBaseTool):
         if not isinstance(client, OpenAICompatibleClient):
             raise RuntimeError("缺少 llm_client，无法启动代码探索子智能体。")
 
-        return CodingAgent(
-            brain=CodeExplorationPromptBrain(client, workspace=context.workspace),
+        return Agent(
+            model=CodeExplorationPromptModel(client, workspace=context.workspace),
             tools=build_code_exploration_tools(),
             workspace=context.workspace,
             max_steps=max_steps,
@@ -2032,7 +2028,7 @@ class DelegateCodeExplorationTool(CodingBaseTool):
         )
         return "\n".join(lines)
 
-    def _run_subagent(self, subagent: CodingAgent, *, task: str) -> AgentResponse:
+    def _run_subagent(self, subagent: Agent, *, task: str) -> AgentResponse:
         state = AgentState(
             task="你是一个只读代码探索子智能体，请围绕主智能体委派的任务收集代码事实。",
             current_input=task,

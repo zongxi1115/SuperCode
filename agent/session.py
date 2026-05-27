@@ -12,6 +12,7 @@ from .schema import (
     ToolCall,
     ToolResult,
 )
+from .state import AgentStateView
 
 
 MAX_STORED_TOOL_RECORDS = 80
@@ -132,7 +133,8 @@ class ChatSession:
     def _append_tool_records(self, response: AgentResponse) -> None:
         """把工具调用事实追加到模型上下文账本，不伪装成对话消息。"""
 
-        next_records = list(self.state.data.get("tool_records", []))
+        state_view = AgentStateView(self.state)
+        next_records = list(state_view.tool_records)
         for step in response.steps:
             next_records.extend(self._records_from_step(step))
         if next_records:
@@ -193,7 +195,8 @@ class ChatSession:
     def _append_planning_records(self, response: AgentResponse) -> None:
         """把每一步已经确定的规划思路留下，避免后续重新推导。"""
 
-        next_records = list(self.state.data.get("planning_records", []))
+        state_view = AgentStateView(self.state)
+        next_records = list(state_view.planning_records)
         for step in response.steps:
             record = self._planning_record(step)
             if record is not None:

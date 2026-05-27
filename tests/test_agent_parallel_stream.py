@@ -3,7 +3,7 @@ import time
 import unittest
 from pathlib import Path
 
-from agent.agent import CodingAgent
+from agent import Agent
 from agent.schema import ToolCall
 from agent.tools import BaseTool, ToolContext
 
@@ -25,8 +25,8 @@ class ParallelToolStreamingTests(unittest.TestCase):
     def test_parallel_tool_results_are_reported_as_completed(self) -> None:
         fast_tool = _DelayedTool("fast", 0.01)
         slow_tool = _DelayedTool("slow", 0.15)
-        agent = CodingAgent(
-            brain=object(),  # type: ignore[arg-type]
+        agent = Agent(
+            model=object(),  # type: ignore[arg-type]
             tools=[fast_tool, slow_tool],
             workspace=Path(tempfile.mkdtemp(prefix="supercode-agent-")),
         )

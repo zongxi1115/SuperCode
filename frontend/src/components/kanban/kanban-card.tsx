@@ -1,8 +1,7 @@
-import React from 'react';
-import type { KanbanCard as KanbanCardType } from '@/lib/kanban-types';
+import type { KanbanAiState, KanbanCard as KanbanCardType } from '@/lib/kanban-types';
 import { PRIORITY_LABELS } from '@/lib/kanban-types';
 import { cn } from '@/lib/utils';
-import { Clock } from 'lucide-react';
+import { CheckCircle2, CircleDashed, Clock, LoaderCircle, TriangleAlert } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 
 interface KanbanCardProps {
@@ -22,6 +21,41 @@ export function KanbanCard({ card, onClick, onDragStart }: KanbanCardProps) {
     }
   };
 
+  const getAiStatusMeta = (aiState?: KanbanAiState | null) => {
+    switch (aiState?.status) {
+      case 'completed':
+        return {
+          label: '已完成',
+          className: 'border-emerald-500/20 bg-emerald-500/10 text-emerald-600',
+          icon: <CheckCircle2 className="h-3 w-3" />,
+        };
+      case 'error':
+        return {
+          label: '失败',
+          className: 'border-destructive/20 bg-destructive/10 text-destructive',
+          icon: <TriangleAlert className="h-3 w-3" />,
+        };
+      case 'queued':
+        return {
+          label: '排队中',
+          className: 'border-sky-500/20 bg-sky-500/10 text-sky-600',
+          icon: <CircleDashed className="h-3 w-3" />,
+        };
+      case 'running':
+        return {
+          label: '进行中',
+          className: 'border-amber-500/20 bg-amber-500/10 text-amber-600',
+          icon: <LoaderCircle className="h-3 w-3 animate-spin" />,
+        };
+      default:
+        return null;
+    }
+  };
+
+  const aiStatusMeta = getAiStatusMeta(card.aiState);
+  const aiProgress = card.aiState?.progress;
+  const aiStepText = card.aiState?.activeStepTitle || card.aiState?.lastMessage || '';
+
   return (
     <div
       draggable
@@ -34,6 +68,12 @@ export function KanbanCard({ card, onClick, onDragStart }: KanbanCardProps) {
     >
       <div className="flex items-start justify-between gap-2">
         <h4 className="text-sm font-medium leading-snug">{card.title}</h4>
+        {aiStatusMeta ? (
+          <Badge variant="outline" className={cn('h-5 gap-1 px-1.5 text-[10px]', aiStatusMeta.className)}>
+            {aiStatusMeta.icon}
+            {aiStatusMeta.label}
+          </Badge>
+        ) : null}
       </div>
       
       {card.labels && card.labels.length > 0 && (
@@ -45,6 +85,21 @@ export function KanbanCard({ card, onClick, onDragStart }: KanbanCardProps) {
           ))}
         </div>
       )}
+
+      {card.aiState ? (
+        <div className="rounded-md border border-border/50 bg-muted/40 px-2 py-1.5">
+          {aiProgress ? (
+            <div className="text-[10px] font-medium text-muted-foreground">
+              进度 {aiProgress.completed}/{aiProgress.total}
+            </div>
+          ) : null}
+          {aiStepText ? (
+            <div className="mt-0.5 line-clamp-2 text-[11px] text-foreground/80">
+              {aiStepText}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
       
       <div className="mt-1 flex items-center justify-between text-muted-foreground">
         <div className="flex items-center gap-3">

@@ -66,7 +66,7 @@ class StepRecord:
 class AgentState:
     """智能体运行时状态。
 
-    `data` 用于保存 brain 在多轮执行中的中间变量，避免引入复杂链式调用。
+    `data` 用于保存 model/runtime 在多轮执行中的中间变量，避免引入复杂链式调用。
     """
 
     task: str

@@ -1,13 +1,12 @@
 """编码智能体专用包。
 
-这里放与“编码任务”强相关的内容：
-
-1. 编码提示词
-2. 编码场景专用 brain
-3. 文件读写、搜索、命令执行等工具实现
+这里放与“编码任务”强相关的提示词模型和工具实现。
 """
 
-from .brain import CodeExplorationPromptBrain, CodingPromptBrain
+from .model import (
+    CodeExplorationPromptModel,
+    CodingPromptModel,
+)
 from .tools import (
     CreateTaskTool,
     DelegateCodeExplorationTool,
@@ -37,8 +36,8 @@ from .tools import (
 )
 
 __all__ = [
-    "CodingPromptBrain",
-    "CodeExplorationPromptBrain",
+    "CodingPromptModel",
+    "CodeExplorationPromptModel",
     "CreateTaskTool",
     "DelegateCodeExplorationTool",
     "ExcecuteTool",

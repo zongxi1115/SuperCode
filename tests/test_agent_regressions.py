@@ -3,17 +3,16 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from agent.agent import CodingAgent
-from agent.brain import BrainDecision
+from agent import Agent, ModelStep
 from agent.schema import AgentState, StepRecord, ToolCall, ToolResult
 from agent.tools import BaseTool, ToolContext
-from coding_agent.brain import CodingPromptBrain
+from coding_agent.model import CodingPromptModel
 from coding_agent.tools import ReadFileTool
 
 
-class CodingPromptBrainMessageTests(unittest.TestCase):
+class CodingPromptModelMessageTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.brain = CodingPromptBrain(client=object())
+        self.model = CodingPromptModel(client=object())
         self.state = AgentState(task="task", current_input="继续")
         self.state.data["turn_index"] = 1
         self.state.data["step_records"] = [
@@ -36,7 +35,7 @@ class CodingPromptBrainMessageTests(unittest.TestCase):
         ]
 
     def test_native_tools_mode_uses_assistant_and_tool_messages_for_current_turn(self) -> None:
-        messages = self.brain._build_messages(
+        messages = self.model._build_messages(
             self.state,
             tool_definitions={},
             response_mode="native_tools",
@@ -51,7 +50,7 @@ class CodingPromptBrainMessageTests(unittest.TestCase):
         self.assertEqual(messages[-1]["content"], "# README")
 
     def test_legacy_continuation_instruction_keeps_json_protocol(self) -> None:
-        messages = self.brain._build_messages(
+        messages = self.model._build_messages(
             self.state,
             tool_definitions={},
             response_mode="legacy_json",
@@ -60,7 +59,7 @@ class CodingPromptBrainMessageTests(unittest.TestCase):
         self.assertIn("继续输出下一步决策 JSON", messages[-1]["content"])
 
     def test_native_tools_mode_does_not_append_textual_continuation_prompt(self) -> None:
-        messages = self.brain._build_messages(
+        messages = self.model._build_messages(
             self.state,
             tool_definitions={},
             response_mode="native_tools",
@@ -84,7 +83,7 @@ class CodingPromptBrainMessageTests(unittest.TestCase):
     def test_legacy_current_turn_history_keeps_planning_thoughts_when_enabled(self) -> None:
         self.state.data["include_thoughts_in_context"] = True
 
-        messages = self.brain._build_messages(
+        messages = self.model._build_messages(
             self.state,
             tool_definitions={},
             response_mode="legacy_json",
@@ -221,56 +220,56 @@ class _UserInputTool(BaseTool):
         }
 
 
-class _StopAfterConfirmationBrain:
+class _StopAfterConfirmationModel:
     def __init__(self) -> None:
         self.calls = 0
 
-    def decide(self, state, tool_definitions, on_stream=None):  # noqa: ANN001
+    def next_step(self, state, tool_definitions, on_stream=None):  # noqa: ANN001
         self.calls += 1
         if self.calls == 1:
-            return BrainDecision.call_tool(
+            return ModelStep.call_tool(
                 thought="先发起提交确认",
                 tool_name="git_commit",
                 tool_arguments={"message": "test commit"},
             )
-        return BrainDecision.finish(
+        return ModelStep.finish(
             thought="如果还能走到这里，说明没有暂停",
             final_answer="unexpected",
         )
 
 
-class _DelayedFinishBrain:
+class _DelayedFinishModel:
     def __init__(self, final_on_call: int) -> None:
         self.calls = 0
         self.final_on_call = final_on_call
 
-    def decide(self, state, tool_definitions, on_stream=None):  # noqa: ANN001
+    def next_step(self, state, tool_definitions, on_stream=None):  # noqa: ANN001
         self.calls += 1
         if self.calls >= self.final_on_call:
-            return BrainDecision.finish(
+            return ModelStep.finish(
                 thought="步数足够了，直接收尾",
                 final_answer="done",
             )
-        return BrainDecision.call_tool(
+        return ModelStep.call_tool(
             thought=f"继续第 {self.calls} 次占位调用",
             tool_name="git_commit",
             tool_arguments={"message": f"round-{self.calls}"},
         )
 
 
-class _StopAfterUserInputBrain:
+class _StopAfterUserInputModel:
     def __init__(self) -> None:
         self.calls = 0
 
-    def decide(self, state, tool_definitions, on_stream=None):  # noqa: ANN001
+    def next_step(self, state, tool_definitions, on_stream=None):  # noqa: ANN001
         self.calls += 1
         if self.calls == 1:
-            return BrainDecision.call_tool(
+            return ModelStep.call_tool(
                 thought="先发起 connect",
                 tool_name="connect",
                 tool_arguments={},
             )
-        return BrainDecision.finish(
+        return ModelStep.finish(
             thought="如果还能走到这里，说明没有暂停",
             final_answer="unexpected",
         )
@@ -279,8 +278,8 @@ class _StopAfterUserInputBrain:
 class HumanInLoopPauseTests(unittest.TestCase):
     def test_agent_pauses_turn_when_tool_requires_confirmation(self) -> None:
         workspace = Path(tempfile.mkdtemp(prefix="supercode-confirmation-"))
-        agent = CodingAgent(
-            brain=_StopAfterConfirmationBrain(),
+        agent = Agent(
+            model=_StopAfterConfirmationModel(),
             tools=[_ConfirmationTool()],
             workspace=workspace,
             max_steps=3,
@@ -294,8 +293,8 @@ class HumanInLoopPauseTests(unittest.TestCase):
 
     def test_agent_pauses_turn_when_tool_requires_user_input(self) -> None:
         workspace = Path(tempfile.mkdtemp(prefix="supercode-user-input-"))
-        agent = CodingAgent(
-            brain=_StopAfterUserInputBrain(),
+        agent = Agent(
+            model=_StopAfterUserInputModel(),
             tools=[_UserInputTool()],
             workspace=workspace,
             max_steps=3,
@@ -309,8 +308,8 @@ class HumanInLoopPauseTests(unittest.TestCase):
 
     def test_continue_existing_turn_continues_step_index(self) -> None:
         workspace = Path(tempfile.mkdtemp(prefix="supercode-confirmation-"))
-        agent = CodingAgent(
-            brain=_StopAfterConfirmationBrain(),
+        agent = Agent(
+            model=_StopAfterConfirmationModel(),
             tools=[_ConfirmationTool()],
             workspace=workspace,
             max_steps=3,
@@ -327,8 +326,8 @@ class HumanInLoopPauseTests(unittest.TestCase):
 class MaxStepsCompatibilityTests(unittest.TestCase):
     def test_agent_default_step_budget_allows_longer_tasks(self) -> None:
         workspace = Path(tempfile.mkdtemp(prefix="supercode-max-steps-"))
-        agent = CodingAgent(
-            brain=_DelayedFinishBrain(final_on_call=5),
+        agent = Agent(
+            model=_DelayedFinishModel(final_on_call=5),
             tools=[_NoopTool()],
             workspace=workspace,
         )
@@ -341,8 +340,8 @@ class MaxStepsCompatibilityTests(unittest.TestCase):
 
     def test_agent_honors_explicit_step_budget_as_safety_guard(self) -> None:
         workspace = Path(tempfile.mkdtemp(prefix="supercode-max-steps-"))
-        agent = CodingAgent(
-            brain=_DelayedFinishBrain(final_on_call=5),
+        agent = Agent(
+            model=_DelayedFinishModel(final_on_call=5),
             tools=[_NoopTool()],
             workspace=workspace,
             max_steps=2,

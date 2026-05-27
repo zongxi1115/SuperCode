@@ -8,12 +8,12 @@ from .schema import AgentState
 
 
 @dataclass(slots=True)
-class BrainDecision:
-    """brain 在当前步骤做出的决策。
+class ModelStep:
+    """One model response normalized into the next agent step.
 
-    `action` 目前只支持两种：
-    1. `tool`：调用某个工具
-    2. `final`：直接产出最终结果
+    A step is either:
+    - a request to call one or more tools
+    - a final text response for the user
     """
 
     action: str
@@ -29,9 +29,7 @@ class BrainDecision:
         thought: str,
         tool_name: str,
         tool_arguments: dict[str, Any] | None = None,
-    ) -> "BrainDecision":
-        """创建一个“调用工具”的决策。"""
-
+    ) -> "ModelStep":
         return cls(
             action="tool",
             thought=thought,
@@ -44,9 +42,7 @@ class BrainDecision:
         cls,
         thought: str,
         tool_calls: list[dict[str, Any]],
-    ) -> "BrainDecision":
-        """创建一个“批量调用工具”的决策。"""
-
+    ) -> "ModelStep":
         if not tool_calls:
             raise ValueError("tool_calls 不能为空。")
 
@@ -60,14 +56,14 @@ class BrainDecision:
         )
 
     @classmethod
-    def finish(cls, thought: str, final_answer: str) -> "BrainDecision":
-        """创建一个“结束并返回答案”的决策。"""
-
+    def finish(cls, thought: str, final_answer: str) -> "ModelStep":
         return cls(action="final", thought=thought, final_answer=final_answer)
 
-    def normalized_tool_calls(self) -> list[dict[str, Any]]:
-        """把单工具和批量工具两种协议统一成列表。"""
+    @property
+    def text(self) -> str:
+        return self.final_answer or ""
 
+    def normalized_tool_calls(self) -> list[dict[str, Any]]:
         if self.tool_calls:
             return self.tool_calls
         if self.tool_name is None:
@@ -81,8 +77,8 @@ class BrainDecision:
 
 
 @dataclass(slots=True)
-class BrainStreamingUpdate:
-    """记录 brain 在流式生成决策时的增量状态。"""
+class ModelStreamUpdate:
+    """Streaming state emitted while the model is building a step."""
 
     raw_output: str
     action: str | None = None
@@ -94,22 +90,28 @@ class BrainStreamingUpdate:
     streamed_tool_input: str | None = None
 
 
-class AgentBrain(ABC):
-    """智能体决策接口。
+class ModelAdapter(ABC):
+    """Adapter between the agent runtime and a model provider.
 
-    你可以把它理解成“轻量版大脑”：
-    给它当前状态和可用工具描述，它决定下一步做什么。
-    后面若需要接入真实大模型，只要实现同样接口即可。
+    The runtime owns the agent loop. The adapter only turns state and tool
+    schemas into the model's next normalized step.
     """
 
     @abstractmethod
-    def decide(
+    def next_step(
         self,
         state: AgentState,
         tool_definitions: dict[str, dict[str, Any]],
-        on_stream: Callable[[BrainStreamingUpdate], None] | None = None,
-    ) -> BrainDecision:
-        """根据当前状态决定下一步动作。"""
+        on_stream: Callable[[ModelStreamUpdate], None] | None = None,
+    ) -> ModelStep:
+        """Return the next model step for the current agent state."""
 
     def latest_usage(self) -> dict[str, int] | None:
         return None
+
+
+__all__ = [
+    "ModelAdapter",
+    "ModelStep",
+    "ModelStreamUpdate",
+]

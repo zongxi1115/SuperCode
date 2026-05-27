@@ -337,6 +337,7 @@ class KanbanCardUpdateRequest(BaseModel):
     columnId: str | None = None
     status: str | None = None
     position: float | None = None
+    aiState: dict[str, Any] | None = None
 
 
 class KanbanCardReorderRequest(BaseModel):

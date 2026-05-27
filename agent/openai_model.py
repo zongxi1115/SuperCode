@@ -4,7 +4,7 @@ import json
 from typing import Any
 from collections.abc import Callable
 
-from .brain import AgentBrain, BrainDecision, BrainStreamingUpdate
+from .model import ModelAdapter, ModelStep, ModelStreamUpdate
 from .llm_client import (
     CompletionResponse,
     CompletionToolCall,
@@ -15,11 +15,11 @@ from .llm_client import (
 from .schema import AgentState, ConversationMessage, StepRecord
 
 
-class OpenAICompatibleBrain(AgentBrain):
-    """基于真实模型接口的 brain。
+class OpenAICompatibleModel(ModelAdapter):
+    """OpenAI-compatible model adapter.
 
-    它通过提示词要求模型输出严格 JSON，再把 JSON 解析成下一步动作。
-    整体结构仍然保持简单，方便你之后替换成更强的规划或工具调用协议。
+    It asks the provider for one model step, then normalizes text/tool calls
+    into the framework's ModelStep shape.
     """
 
     def __init__(self, client: OpenAICompatibleClient) -> None:
@@ -32,12 +32,12 @@ class OpenAICompatibleBrain(AgentBrain):
         "save_plan": ("arguments", "tool_arguments", "object"),
     }
 
-    def decide(
+    def next_step(
         self,
         state: AgentState,
         tool_definitions: dict[str, dict[str, Any]],
-        on_stream: Callable[[BrainStreamingUpdate], None] | None = None,
-    ) -> BrainDecision:
+        on_stream: Callable[[ModelStreamUpdate], None] | None = None,
+    ) -> ModelStep:
         """调用真实模型，决定下一步动作。"""
         native_messages = self._build_messages(state, tool_definitions, response_mode="native_tools")
         native_tools = self._build_native_tool_specs(tool_definitions)
@@ -61,7 +61,7 @@ class OpenAICompatibleBrain(AgentBrain):
                     nonlocal streamed_reasoning
                     streamed_reasoning += delta
                     on_stream(
-                        BrainStreamingUpdate(
+                        ModelStreamUpdate(
                             raw_output=streamed_reasoning,
                             thought=streamed_reasoning,
                         )
@@ -76,7 +76,7 @@ class OpenAICompatibleBrain(AgentBrain):
                         )
                     )
                     on_stream(
-                        BrainStreamingUpdate(
+                        ModelStreamUpdate(
                             raw_output=delta_update.arguments,
                             tool_name=tool_name,
                             streamed_tool_name=tool_name,
@@ -98,14 +98,14 @@ class OpenAICompatibleBrain(AgentBrain):
                     if final_text and final_text != streamed_text_emitted:
                         streamed_text_emitted = final_text
                         on_stream(
-                            BrainStreamingUpdate(
+                            ModelStreamUpdate(
                                 raw_output=final_text,
                                 action="final",
                                 final_answer=final_text,
                             )
                         )
 
-            return self._completion_to_decision(completion)
+            return self._completion_to_step(completion)
         except UnsupportedToolCallingError:
             pass
         except ValueError as exc:
@@ -126,7 +126,7 @@ class OpenAICompatibleBrain(AgentBrain):
                     self._extract_partial_streamable_tool_input(current_output, tool_name)
                 )
                 on_stream(
-                    BrainStreamingUpdate(
+                    ModelStreamUpdate(
                         raw_output=current_output,
                         action=self._extract_partial_string_field(current_output, "action"),
                         thought=self._extract_partial_string_field(current_output, "thought"),
@@ -140,7 +140,7 @@ class OpenAICompatibleBrain(AgentBrain):
 
             raw_output = self.client.chat_stream_messages(messages, on_delta=handle_delta)
         payload = self._parse_json_output(raw_output)
-        return self._to_decision(payload)
+        return self._to_step(payload)
 
     def latest_usage(self) -> dict[str, int] | None:
         return self.client.last_usage
@@ -375,7 +375,7 @@ class OpenAICompatibleBrain(AgentBrain):
             if not isinstance(payload, dict):
                 continue
 
-            if self._looks_like_decision_payload(payload):
+            if self._looks_like_step_payload(payload):
                 return payload
             if fallback_payload is None:
                 fallback_payload = payload
@@ -385,7 +385,7 @@ class OpenAICompatibleBrain(AgentBrain):
 
         raise ValueError(f"模型返回 JSON 解析失败: {raw_output}")
 
-    def _looks_like_decision_payload(self, payload: dict[str, object]) -> bool:
+    def _looks_like_step_payload(self, payload: dict[str, object]) -> bool:
         """判断一个对象是否像 agent 决策 JSON。"""
 
         action = str(payload.get("action", "")).strip().lower()
@@ -695,7 +695,7 @@ class OpenAICompatibleBrain(AgentBrain):
             return self._recover_save_plan_arguments(arguments_text)
         return None
 
-    def _completion_to_decision(self, completion: CompletionResponse) -> BrainDecision:
+    def _completion_to_step(self, completion: CompletionResponse) -> ModelStep:
         if completion.tool_calls:
             normalized_calls: list[dict[str, Any]] = []
             for tool_call in completion.tool_calls:
@@ -708,11 +708,11 @@ class OpenAICompatibleBrain(AgentBrain):
                         ),
                     }
                 )
-            return BrainDecision.call_tools(thought=completion.reasoning_text, tool_calls=normalized_calls)
+            return ModelStep.call_tools(thought=completion.reasoning_text, tool_calls=normalized_calls)
 
         final_text = completion.text.strip()
         if final_text:
-            return BrainDecision.finish(thought=completion.reasoning_text, final_answer=final_text)
+            return ModelStep.finish(thought=completion.reasoning_text, final_answer=final_text)
 
         raise ValueError("模型接口既没有返回 tool_calls，也没有返回可用文本内容。")
 
@@ -951,8 +951,8 @@ class OpenAICompatibleBrain(AgentBrain):
         parsed, _ = self._parse_relaxed_json_object(text, start)
         return parsed
 
-    def _to_decision(self, payload: dict[str, object]) -> BrainDecision:
-        """把 JSON 结构转换成框架里的决策对象。"""
+    def _to_step(self, payload: dict[str, object]) -> ModelStep:
+        """把 JSON 结构转换成框架里的模型步骤。"""
 
         action = str(payload.get("action", "")).strip().lower()
         thought = str(payload.get("thought", "")).strip()
@@ -985,7 +985,7 @@ class OpenAICompatibleBrain(AgentBrain):
                             "tool_arguments": tool_arguments,
                         }
                     )
-                return BrainDecision.call_tools(thought=thought, tool_calls=normalized_calls)
+                return ModelStep.call_tools(thought=thought, tool_calls=normalized_calls)
 
             tool_name = str(payload.get("tool_name") or payload.get("tool") or "").strip()
             tool_arguments = payload.get("tool_arguments", payload.get("args", {}))
@@ -993,7 +993,7 @@ class OpenAICompatibleBrain(AgentBrain):
                 raise ValueError("模型决定调用工具，但没有返回 tool_name。")
             if not isinstance(tool_arguments, dict):
                 raise ValueError("模型返回的 tool_arguments 不是对象。")
-            return BrainDecision.call_tool(
+            return ModelStep.call_tool(
                 thought=thought,
                 tool_name=tool_name,
                 tool_arguments=tool_arguments,
@@ -1003,7 +1003,7 @@ class OpenAICompatibleBrain(AgentBrain):
             final_answer = str(payload.get("final_answer", "")).strip()
             if not final_answer:
                 raise ValueError("模型决定结束，但没有返回 final_answer。")
-            return BrainDecision.finish(thought=thought, final_answer=final_answer)
+            return ModelStep.finish(thought=thought, final_answer=final_answer)
 
         raise ValueError(
             "模型返回了不支持的 action，且无法从 tool_name/tool_calls/final_answer 推断动作。"

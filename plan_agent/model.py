@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from coding_agent.brain import CodingPromptBrain
+from coding_agent.model import CodingPromptModel
 
 
-class PlanPromptBrain(CodingPromptBrain):
-    """基于计划提示词的专用 brain。"""
+class PlanPromptModel(CodingPromptModel):
+    """Model adapter with planning-specific prompts and context."""
 
     def _build_system_prompt(
         self,
@@ -96,3 +96,4 @@ class PlanPromptBrain(CodingPromptBrain):
 
     def _default_prompt_path(self) -> Path:
         return Path(__file__).resolve().parent / "prompts" / "plan.md"
+

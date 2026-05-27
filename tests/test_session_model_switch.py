@@ -38,7 +38,7 @@ class SwitchSessionModelTests(unittest.IsolatedAsyncioTestCase):
             patch.object(api_main, "resolve_model_option", return_value={"envFile": "ui::provider-1::gpt-test"}),
             patch.object(api_main, "build_agent_config", return_value=(dummy_config, "ui::provider-1::gpt-test")),
             patch.object(api_main, "OpenAICompatibleClient", return_value=object()),
-            patch.object(api_main, "CodingPromptBrain", return_value=object()),
+            patch.object(api_main, "CodingPromptModel", return_value=object()),
         ):
             await api_main.switch_session_model(
                 self.session.session_id,

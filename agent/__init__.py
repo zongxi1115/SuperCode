@@ -1,20 +1,15 @@
 """通用智能体框架。
 
-这个包只保留与“智能体运行机制”相关的通用抽象：
-
-1. `CodingAgent` 负责驱动执行循环
-2. `AgentBrain` 负责决策下一步动作
-3. `BaseTool` 和 `ToolContext` 只定义工具抽象接口
-
-具体场景下的提示词、工具集合、领域规则，
-应由上层业务包自行提供，例如 `coding_agent`。
+推荐从 `Agent` 进入：它代表“同一个智能体”。
+内部再由 model adapter、runtime、tool executor 分别负责模型调用、
+执行循环和工具调度。
 """
 
-from .agent import CodingAgent
-from .brain import AgentBrain, BrainDecision, BrainStreamingUpdate
 from .config import AgentLLMConfig
-from .llm_brain import OpenAICompatibleBrain
+from .core import Agent
+from .openai_model import OpenAICompatibleModel
 from .llm_client import OpenAICompatibleClient
+from .model import ModelAdapter, ModelStep, ModelStreamUpdate
 from .schema import (
     AgentEvent,
     AgentResponse,
@@ -25,24 +20,27 @@ from .schema import (
     ToolResult,
 )
 from .session import ChatSession, ConversationTurn
+from .tooling import ToolExecutor, ToolRegistry
 from .tools import BaseTool, ToolContext
 
 __all__ = [
-    "AgentBrain",
+    "Agent",
     "AgentEvent",
     "AgentLLMConfig",
     "AgentResponse",
     "AgentState",
     "BaseTool",
-    "BrainDecision",
-    "BrainStreamingUpdate",
     "ChatSession",
-    "CodingAgent",
     "ConversationMessage",
     "ConversationTurn",
-    "OpenAICompatibleBrain",
+    "ModelAdapter",
+    "ModelStep",
+    "ModelStreamUpdate",
     "OpenAICompatibleClient",
+    "OpenAICompatibleModel",
     "StepRecord",
+    "ToolExecutor",
+    "ToolRegistry",
     "ToolContext",
     "ToolCall",
     "ToolResult",

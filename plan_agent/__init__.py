@@ -1,6 +1,6 @@
 """计划智能体场景包。"""
 
-from .brain import PlanPromptBrain
+from .model import PlanPromptModel
 from .tools import (
     AskPlanQuestionsTool,
     CreateTaskTool,
@@ -17,7 +17,7 @@ __all__ = [
     "CreateTaskTool",
     "FetchUrlContentTool",
     "GetTaskStatusTool",
-    "PlanPromptBrain",
+    "PlanPromptModel",
     "ReadCurrentPlanTool",
     "SavePlanTool",
     "SearchWebTool",

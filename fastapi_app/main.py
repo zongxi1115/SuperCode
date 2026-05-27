@@ -31,9 +31,9 @@ try:
 except ImportError:  # pragma: no cover - optional dependency
     PtyProcess = None
 
-from deploy_agent import DeployConnectionManager, DeployPromptBrain, build_deploy_tools
-from agent import AgentEvent, ChatSession, CodingAgent, OpenAICompatibleClient
-from coding_agent import CodingPromptBrain, InteractiveCommandSession, build_coding_tools
+from deploy_agent import DeployConnectionManager, DeployPromptModel, build_deploy_tools
+from agent import Agent, AgentEvent, ChatSession, OpenAICompatibleClient
+from coding_agent import CodingPromptModel, InteractiveCommandSession, build_coding_tools
 from coding_agent.tools import (
     DEFAULT_IGNORED_DIR_NAMES,
     delete_file_in_workspace,
@@ -41,7 +41,7 @@ from coding_agent.tools import (
     execute_git_tag,
     init_git_repo,
 )
-from plan_agent import PlanPromptBrain, build_plan_tools
+from plan_agent import PlanPromptModel, build_plan_tools
 from fastapi_app.agent_router import (
     decide_agent_route_with_model,
     normalize_route_state,
@@ -1525,7 +1525,7 @@ def rebuild_chat_session_for_agent_type(session: UISession, agent_type: str) -> 
         session.model = model_name
         session.max_context_tokens = infer_model_context_limit(session.model)
         seed_chat_session_history(session.chat_session, session.history_messages, session.history_tools)
-        if isinstance(session.chat_session.agent, CodingAgent):
+        if isinstance(session.chat_session.agent, Agent):
             attach_agent_runtime_metadata(
                 session.chat_session.agent,
                 session_id=session.session_id,
@@ -1639,7 +1639,7 @@ def hydrate_session_from_state(state: PersistedSessionState) -> UISession:
     )
     if session.chat_session is not None:
         seed_chat_session_history(session.chat_session, state.history_messages, state.history_tools)
-    if session.chat_session is not None and isinstance(session.chat_session.agent, CodingAgent):
+    if session.chat_session is not None and isinstance(session.chat_session.agent, Agent):
         attach_agent_runtime_metadata(
             session.chat_session.agent,
             session_id=session.session_id,
@@ -1737,6 +1737,7 @@ async def update_kanban_card(
     request: KanbanCardUpdateRequest,
 ) -> JSONResponse:
     workspace = normalize_workspace_identifier(workspace_id)
+    provided_fields = set(getattr(request, "model_fields_set", set()))
     card = _kanban_store.update_card(
         workspace,
         card_id,
@@ -1748,6 +1749,7 @@ async def update_kanban_card(
         column_id=request.columnId,
         status=request.status,
         position=request.position,
+        ai_state=request.aiState if "aiState" in provided_fields else ...,
     )
     board = _kanban_store.get_board(workspace, str(card["boardId"]))
     return JSONResponse({"card": card, "board": board})
@@ -1854,13 +1856,13 @@ async def switch_session_model(session_id: str, request: SwitchModelRequest) -> 
 
     client = OpenAICompatibleClient(config)
     if session.agent_type == "deploy":
-        brain = DeployPromptBrain(client, workspace=session.workspace)
+        model = DeployPromptModel(client, workspace=session.workspace)
         tools = build_deploy_tools()
     else:
-        brain = CodingPromptBrain(client, workspace=session.workspace)
+        model = CodingPromptModel(client, workspace=session.workspace)
         tools = build_coding_tools()
-    agent = CodingAgent(
-        brain=brain,
+    agent = Agent(
+        model=model,
         tools=tools,
         workspace=resolve_workspace_path(session.workspace),
         tool_context_metadata={
@@ -1872,7 +1874,7 @@ async def switch_session_model(session_id: str, request: SwitchModelRequest) -> 
 
     session.chat_session = ChatSession(agent=agent)
     seed_chat_session_history(session.chat_session, session.history_messages, session.history_tools)
-    if isinstance(session.chat_session.agent, CodingAgent):
+    if isinstance(session.chat_session.agent, Agent):
         attach_agent_runtime_metadata(
             session.chat_session.agent,
             session_id=session.session_id,
@@ -1969,7 +1971,7 @@ async def create_session(request: CreateSessionRequest) -> JSONResponse:
         selected_file_path=pick_default_file(workspace),
         open_files=build_default_open_files(workspace),
     )
-    if session.chat_session is not None and isinstance(session.chat_session.agent, CodingAgent):
+    if session.chat_session is not None and isinstance(session.chat_session.agent, Agent):
         attach_agent_runtime_metadata(
             session.chat_session.agent,
             session_id=session.session_id,
@@ -3631,7 +3633,7 @@ def normalize_agent_type(agent_type: str | None) -> str:
 
 
 def attach_agent_runtime_metadata(
-    agent: CodingAgent,
+    agent: Agent,
     session_id: str,
     interactive_command_session: InteractiveCommandSession | None,
     cancel_event: threading.Event | None = None,
@@ -3664,16 +3666,16 @@ def build_chat_session(
         client = OpenAICompatibleClient(config)
         resolved_workspace = resolve_workspace_path(workspace)
         if agent_type == "deploy":
-            brain = DeployPromptBrain(client, workspace=workspace)
+            model = DeployPromptModel(client, workspace=workspace)
             tools = build_deploy_tools()
         elif agent_type == "plan":
-            brain = PlanPromptBrain(client, workspace=workspace)
+            model = PlanPromptModel(client, workspace=workspace)
             tools = build_plan_tools()
         else:
-            brain = CodingPromptBrain(client, workspace=workspace)
+            model = CodingPromptModel(client, workspace=workspace)
             tools = build_coding_tools()
-        agent = CodingAgent(
-            brain=brain,
+        agent = Agent(
+            model=model,
             tools=tools,
             workspace=resolved_workspace,
             tool_context_metadata={
@@ -4608,7 +4610,7 @@ def _rebuild_chat_session_for_existing_history(
     )
     if session.chat_session is not None:
         seed_chat_session_history(session.chat_session, session.history_messages, session.history_tools)
-    if session.chat_session is not None and isinstance(session.chat_session.agent, CodingAgent):
+    if session.chat_session is not None and isinstance(session.chat_session.agent, Agent):
         attach_agent_runtime_metadata(
             session.chat_session.agent,
             session_id=session.session_id,

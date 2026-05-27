@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import type {
   KanbanBoard as KanbanBoardType,
+  KanbanAiState,
   KanbanCard,
   KanbanColumn as KanbanColumnType,
   CardStatus,
@@ -18,7 +19,7 @@ import { cn } from '@/lib/utils';
 type KanbanBoardProps = {
   workspace: string;
   fileTree?: FileTreeNode[];
-  onSendCardToAi?: (card: KanbanCard) => void;
+  onSendCardToAi?: (card: KanbanCard) => Promise<KanbanAiState | void> | KanbanAiState | void;
 };
 
 type BoardPayload = {
@@ -105,6 +106,16 @@ export function KanbanBoard({ workspace, fileTree = [], onSendCardToAi }: Kanban
   }, [loadBoard]);
 
   useEffect(() => {
+    if (!board?.cards.some((card) => card.aiState?.status === 'running' || card.aiState?.status === 'queued')) {
+      return;
+    }
+    const intervalId = window.setInterval(() => {
+      void loadBoard();
+    }, 2500);
+    return () => window.clearInterval(intervalId);
+  }, [board?.cards, loadBoard]);
+
+  useEffect(() => {
     const handleDragEnd = () => {
       document.querySelectorAll('[draggable]').forEach((el) => {
         (el as HTMLElement).style.opacity = '1';
@@ -182,6 +193,16 @@ export function KanbanBoard({ workspace, fileTree = [], onSendCardToAi }: Kanban
     setSelectedCard(card);
     setIsDrawerOpen(true);
   };
+
+  const applyCardUpdateLocally = useCallback((cardId: string, updater: (card: KanbanCard) => KanbanCard) => {
+    setBoard((currentBoard) => {
+      if (!currentBoard) return currentBoard;
+      const nextCards = currentBoard.cards.map((card) => card.id === cardId ? updater(card) : card);
+      const nextBoard = { ...currentBoard, cards: nextCards };
+      refreshSelectedCard(nextBoard, cardId);
+      return nextBoard;
+    });
+  }, [refreshSelectedCard]);
 
   const handleTrashDragOver = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
@@ -421,9 +442,18 @@ export function KanbanBoard({ workspace, fileTree = [], onSendCardToAi }: Kanban
         onClose={() => setIsDrawerOpen(false)}
         onSave={(card) => void handleSaveCard(card)}
         onDelete={(cardId) => void handleDeleteCard(cardId)}
-        onSendToAi={(card) => {
+        onSendToAi={async (card) => {
           setIsDrawerOpen(false);
-          onSendCardToAi?.(card);
+          const nextAiState = await onSendCardToAi?.(card);
+          if (nextAiState) {
+            applyCardUpdateLocally(card.id, (currentCard) => ({
+              ...currentCard,
+              aiState: nextAiState,
+              updatedAt: new Date().toISOString(),
+            }));
+          } else {
+            void loadBoard();
+          }
         }}
       />
     </div>

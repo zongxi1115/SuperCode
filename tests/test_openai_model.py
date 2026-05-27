@@ -1,16 +1,16 @@
 import unittest
 
 from agent.llm_client import CompletionResponse, CompletionToolCall, UnsupportedToolCallingError
-from agent.llm_brain import OpenAICompatibleBrain
+from agent.openai_model import OpenAICompatibleModel
 from agent.schema import AgentState
 
 
 class ParseJsonOutputTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.brain = OpenAICompatibleBrain(client=object())
+        self.model = OpenAICompatibleModel(client=object())
 
     def test_parse_single_json_object(self) -> None:
-        payload = self.brain._parse_json_output(
+        payload = self.model._parse_json_output(
             '{"action":"final","thought":"done","final_answer":"ok"}'
         )
 
@@ -20,21 +20,21 @@ class ParseJsonOutputTests(unittest.TestCase):
     def test_parse_first_json_object_from_mixed_output(self) -> None:
         raw_output = """{"action":"tool","thought":"先写文件","tool_name":"write_file","tool_arguments":{"filename":"sudoku.py","content":"print(1)"}}\n</think>\n\n{"action":"final","thought":"结束","final_answer":"done"}"""
 
-        payload = self.brain._parse_json_output(raw_output)
+        payload = self.model._parse_json_output(raw_output)
 
         self.assertEqual(payload["action"], "tool")
         self.assertEqual(payload["tool_name"], "write_file")
 
-    def test_parse_skips_non_decision_dicts(self) -> None:
+    def test_parse_skips_non_step_dicts(self) -> None:
         raw_output = """分析过程里先出现了一个普通对象 {"filename":"demo.py","content":"print(1)"}，真正的决策在后面 {"action":"final","thought":"结束","final_answer":"ok"}"""
 
-        payload = self.brain._parse_json_output(raw_output)
+        payload = self.model._parse_json_output(raw_output)
 
         self.assertEqual(payload["action"], "final")
         self.assertEqual(payload["final_answer"], "ok")
 
-    def test_to_decision_can_infer_tool_action(self) -> None:
-        decision = self.brain._to_decision(
+    def test_to_step_can_infer_tool_action(self) -> None:
+        step = self.model._to_step(
             {
                 "thought": "直接调用工具",
                 "tool_name": "read_file",
@@ -42,31 +42,31 @@ class ParseJsonOutputTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(decision.action, "tool")
-        self.assertEqual(decision.tool_name, "read_file")
+        self.assertEqual(step.action, "tool")
+        self.assertEqual(step.tool_name, "read_file")
 
-    def test_to_decision_can_infer_final_action(self) -> None:
-        decision = self.brain._to_decision(
+    def test_to_step_can_infer_final_action(self) -> None:
+        step = self.model._to_step(
             {
                 "thought": "直接结束",
                 "final_answer": "done",
             }
         )
 
-        self.assertEqual(decision.action, "final")
-        self.assertEqual(decision.final_answer, "done")
+        self.assertEqual(step.action, "final")
+        self.assertEqual(step.final_answer, "done")
 
-    def test_to_decision_accepts_tool_and_args_aliases(self) -> None:
-        decision = self.brain._to_decision(
+    def test_to_step_accepts_tool_and_args_aliases(self) -> None:
+        step = self.model._to_step(
             {
                 "tool": "read_file",
                 "args": {"filename": "README.md"},
             }
         )
 
-        self.assertEqual(decision.action, "tool")
-        self.assertEqual(decision.tool_name, "read_file")
-        self.assertEqual(decision.tool_arguments, {"filename": "README.md"})
+        self.assertEqual(step.action, "tool")
+        self.assertEqual(step.tool_name, "read_file")
+        self.assertEqual(step.tool_arguments, {"filename": "README.md"})
 
     def test_extracts_partial_write_file_content_for_realtime_tool_input(self) -> None:
         raw_output = (
@@ -74,7 +74,7 @@ class ParseJsonOutputTests(unittest.TestCase):
             '"tool_arguments":{"filename":"demo.ts","content":"export const a = 1'
         )
 
-        argument_name, streamed_input = self.brain._extract_partial_streamable_tool_input(
+        argument_name, streamed_input = self.model._extract_partial_streamable_tool_input(
             raw_output,
             "write_file",
         )
@@ -87,7 +87,7 @@ class ParseJsonOutputTests(unittest.TestCase):
             '{"action":"tool","tool_name":"replace_file",'
             '"tool_arguments":{"filename":"demo.ts","old_content":"before'
         )
-        argument_name, streamed_input = self.brain._extract_partial_streamable_tool_input(
+        argument_name, streamed_input = self.model._extract_partial_streamable_tool_input(
             old_only,
             "replace_file",
         )
@@ -99,7 +99,7 @@ class ParseJsonOutputTests(unittest.TestCase):
             old_only
             + '","new_content":"after'
         )
-        argument_name, streamed_input = self.brain._extract_partial_streamable_tool_input(
+        argument_name, streamed_input = self.model._extract_partial_streamable_tool_input(
             with_new_content,
             "replace_file",
         )
@@ -113,7 +113,7 @@ class ParseJsonOutputTests(unittest.TestCase):
             '"tool_arguments":{"filename":"src/a.ts","start_line":1,"end_line":1,"new_content":"const after = 1;'
         )
 
-        argument_name, streamed_input = self.brain._extract_partial_streamable_tool_input(
+        argument_name, streamed_input = self.model._extract_partial_streamable_tool_input(
             raw_output,
             "apply_patch",
         )
@@ -130,7 +130,7 @@ class ParseJsonOutputTests(unittest.TestCase):
             '"markdown":"# 在线 OJ'
         )
 
-        argument_name, streamed_input = self.brain._extract_partial_streamable_tool_input(
+        argument_name, streamed_input = self.model._extract_partial_streamable_tool_input(
             raw_output,
             "save_plan",
         )
@@ -140,7 +140,7 @@ class ParseJsonOutputTests(unittest.TestCase):
         self.assertIn('"markdown":"# 在线 OJ', streamed_input or "")
 
     def test_parse_tool_arguments_text_recovers_invalid_save_plan_json(self) -> None:
-        parsed = self.brain._parse_tool_arguments_text(
+        parsed = self.model._parse_tool_arguments_text(
             (
                 '{"title":"SuperDocs AI Coding Agent —— 从零搭建计划",'
                 '"summary":"基于 Python + Anthropic Claude API",'
@@ -175,7 +175,7 @@ class ParseJsonOutputTests(unittest.TestCase):
             ]
         )
 
-        parsed = self.brain._parse_tool_arguments_text(arguments, "write_file")
+        parsed = self.model._parse_tool_arguments_text(arguments, "write_file")
 
         self.assertEqual(parsed["filename"], "index.html")
         self.assertEqual(parsed["content"], expected)
@@ -201,7 +201,7 @@ class ParseJsonOutputTests(unittest.TestCase):
             ]
         )
 
-        payload = self.brain._parse_json_output(raw_output)
+        payload = self.model._parse_json_output(raw_output)
 
         self.assertEqual(payload["action"], "tool")
         self.assertEqual(payload["tool_name"], "write_file")
@@ -211,7 +211,7 @@ class ParseJsonOutputTests(unittest.TestCase):
     def test_parse_tool_arguments_text_decodes_escaped_newlines_in_tsx_content(self) -> None:
         arguments = '''{"filename":"AdminPage.tsx","content":"import { useState, useEffect } from 'react'\\nimport './AdminPage.css'\\n\\nfunction AdminPage() {\\n  return (\\n    <div className=\\"admin-page\\" data-label="管理页面">\\n      <input placeholder="标题" />\\n    </div>\\n  )\\n}"}'''
 
-        parsed = self.brain._parse_tool_arguments_text(arguments, "write_file")
+        parsed = self.model._parse_tool_arguments_text(arguments, "write_file")
 
         self.assertEqual(parsed["filename"], "AdminPage.tsx")
         self.assertEqual(
@@ -228,8 +228,8 @@ function AdminPage() {
 }""",
         )
 
-    def test_completion_to_decision_uses_native_tool_calls(self) -> None:
-        decision = self.brain._completion_to_decision(
+    def test_completion_to_step_uses_native_tool_calls(self) -> None:
+        step = self.model._completion_to_step(
             CompletionResponse(
                 reasoning_text="Need to inspect the file first.",
                 tool_calls=[
@@ -242,10 +242,10 @@ function AdminPage() {
             )
         )
 
-        self.assertEqual(decision.action, "tool")
-        self.assertEqual(decision.thought, "Need to inspect the file first.")
+        self.assertEqual(step.action, "tool")
+        self.assertEqual(step.thought, "Need to inspect the file first.")
         self.assertEqual(
-            decision.normalized_tool_calls(),
+            step.normalized_tool_calls(),
             [{"tool_name": "read_file", "tool_arguments": {"filename": "README.md"}}],
         )
 
@@ -332,11 +332,11 @@ class _NativeStreamingToolClient:
         )
 
 
-class DecideModeTests(unittest.TestCase):
-    def test_decide_prefers_native_tool_calling(self) -> None:
-        brain = OpenAICompatibleBrain(client=_NativeClient())
+class NextStepModeTests(unittest.TestCase):
+    def test_next_step_prefers_native_tool_calling(self) -> None:
+        model = OpenAICompatibleModel(client=_NativeClient())
 
-        decision = brain.decide(
+        step = model.next_step(
             state=AgentState(task="task", current_input="readme"),
             tool_definitions={
                 "read_file": {
@@ -350,59 +350,59 @@ class DecideModeTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(decision.action, "tool")
-        self.assertEqual(decision.tool_name, "read_file")
+        self.assertEqual(step.action, "tool")
+        self.assertEqual(step.tool_name, "read_file")
 
-    def test_decide_falls_back_to_legacy_json_when_tools_unsupported(self) -> None:
-        brain = OpenAICompatibleBrain(client=_LegacyFallbackClient())
+    def test_next_step_falls_back_to_legacy_json_when_tools_unsupported(self) -> None:
+        model = OpenAICompatibleModel(client=_LegacyFallbackClient())
 
-        decision = brain.decide(
+        step = model.next_step(
             state=AgentState(task="task", current_input="readme"),
             tool_definitions={"read_file": {"description": "读取文件", "parameters_schema": None}},
         )
 
-        self.assertEqual(decision.action, "tool")
-        self.assertEqual(decision.tool_name, "read_file")
+        self.assertEqual(step.action, "tool")
+        self.assertEqual(step.tool_name, "read_file")
 
-    def test_decide_falls_back_to_legacy_json_when_native_response_is_empty(self) -> None:
-        brain = OpenAICompatibleBrain(client=_EmptyNativeThenLegacyClient())
+    def test_next_step_falls_back_to_legacy_json_when_native_response_is_empty(self) -> None:
+        model = OpenAICompatibleModel(client=_EmptyNativeThenLegacyClient())
 
-        decision = brain.decide(
+        step = model.next_step(
             state=AgentState(task="task", current_input="hello"),
             tool_definitions={"read_file": {"description": "读取文件", "parameters_schema": None}},
         )
 
-        self.assertEqual(decision.action, "final")
-        self.assertEqual(decision.final_answer, "fallback ok")
+        self.assertEqual(step.action, "final")
+        self.assertEqual(step.final_answer, "fallback ok")
 
     def test_native_streaming_callback_does_not_crash(self) -> None:
-        brain = OpenAICompatibleBrain(client=_NativeStreamingClient())
+        model = OpenAICompatibleModel(client=_NativeStreamingClient())
         updates = []
 
-        decision = brain.decide(
+        step = model.next_step(
             state=AgentState(task="task", current_input="readme"),
             tool_definitions={"read_file": {"description": "读取文件", "parameters_schema": None}},
             on_stream=updates.append,
         )
 
-        self.assertEqual(decision.action, "final")
-        self.assertEqual(decision.final_answer, "first second")
-        self.assertEqual(decision.thought, "Need to inspect")
+        self.assertEqual(step.action, "final")
+        self.assertEqual(step.final_answer, "first second")
+        self.assertEqual(step.thought, "Need to inspect")
         self.assertTrue(any(update.final_answer for update in updates))
         self.assertTrue(any(update.thought for update in updates))
 
     def test_native_streaming_tool_calls_do_not_emit_final_text_updates(self) -> None:
-        brain = OpenAICompatibleBrain(client=_NativeStreamingToolClient())
+        model = OpenAICompatibleModel(client=_NativeStreamingToolClient())
         updates = []
 
-        decision = brain.decide(
+        step = model.next_step(
             state=AgentState(task="task", current_input="patch app"),
             tool_definitions={"apply_patch": {"description": "修改文件", "parameters_schema": None}},
             on_stream=updates.append,
         )
 
-        self.assertEqual(decision.action, "tool")
-        self.assertEqual(decision.tool_name, "apply_patch")
+        self.assertEqual(step.action, "tool")
+        self.assertEqual(step.tool_name, "apply_patch")
         self.assertFalse(any(update.final_answer for update in updates))
         self.assertTrue(any(update.streamed_tool_name == "apply_patch" for update in updates))
 

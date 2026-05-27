@@ -8,7 +8,7 @@ import { TerminalPanel } from '@/components/app/terminal-panel';
 import { SettingsDialog } from '@/components/app/settings-dialog';
 import { WorkspacePicker } from '@/components/app/workspace-picker';
 import { KanbanBoard } from '@/components/kanban/kanban-board';
-import type { KanbanCard } from '@/lib/kanban-types';
+import type { KanbanAiState, KanbanCard } from '@/lib/kanban-types';
 import type {
   AgentMode,
   AppSettings,
@@ -178,6 +178,104 @@ function formatKanbanCardTaskPrompt(card: KanbanCard) {
   );
 
   return lines.join('\n');
+}
+
+function formatKanbanAiPhaseLabel(phase?: string) {
+  switch (phase) {
+    case 'planning':
+      return 'AI 正在规划任务';
+    case 'researching':
+      return 'AI 正在阅读代码和上下文';
+    case 'clarifying':
+      return 'AI 正在梳理实现方向';
+    case 'awaiting_user_input':
+      return 'AI 等待补充信息';
+    case 'executing':
+      return 'AI 正在执行任务';
+    case 'verifying':
+      return 'AI 正在验证结果';
+    case 'completed':
+      return 'AI 任务已完成';
+    case 'failed':
+      return 'AI 任务执行失败';
+    default:
+      return 'AI 正在处理中';
+  }
+}
+
+function buildKanbanAiState(options: {
+  sessionId: string;
+  startedAt: string;
+  phase?: string;
+  planSteps?: PlanStep[];
+  status?: KanbanAiState['status'];
+  result?: string | null;
+  error?: string | null;
+  finishedAt?: string | null;
+}) {
+  const planSteps = options.planSteps ?? [];
+  const activeStep = planSteps.find((step) => step.status === 'running')
+    ?? planSteps.find((step) => step.status === 'blocked')
+    ?? null;
+  const completed = planSteps.filter((step) => step.status === 'completed').length;
+  const total = planSteps.length;
+  const status = options.status
+    ?? (options.error ? 'error' : options.finishedAt ? 'completed' : 'running');
+
+  return {
+    status,
+    sessionId: options.sessionId,
+    startedAt: options.startedAt,
+    finishedAt: options.finishedAt ?? null,
+    lastMessage: options.error || options.result || formatKanbanAiPhaseLabel(options.phase),
+    activeStepTitle: activeStep?.title ?? null,
+    result: options.result ?? null,
+    error: options.error ?? null,
+    planSteps,
+    progress: total > 0 ? { completed, total } : null,
+  } satisfies KanbanAiState;
+}
+
+function buildDefaultKanbanPlanSteps(): PlanStep[] {
+  return [
+    { id: 'card-step-1', title: '理解需求', description: 'AI 已接收卡片描述，正在梳理目标和约束。', status: 'running' },
+    { id: 'card-step-2', title: '分析代码', description: '准备查看相关文件、上下文与现有实现。', status: 'pending' },
+    { id: 'card-step-3', title: '实施修改', description: '准备落地代码、配置或文档改动。', status: 'pending' },
+    { id: 'card-step-4', title: '整理结果', description: '准备汇总结果、验证情况与后续说明。', status: 'pending' },
+  ];
+}
+
+function advanceKanbanPlanSteps(currentSteps: PlanStep[], toolName: string): PlanStep[] {
+  const steps = (currentSteps.length > 0 ? currentSteps : buildDefaultKanbanPlanSteps()).map((step) => ({ ...step }));
+  const normalizedToolName = toolName.trim().toLowerCase();
+  const targetStepIndex =
+    ['read_file', 'list_file', 'grep_file'].includes(normalizedToolName)
+      ? 1
+      : ['write_file', 'replace_file', 'apply_patch', 'delete_file'].includes(normalizedToolName)
+        ? 2
+        : ['execute', 'excecute', 'terminal_input', 'terminal_wait'].includes(normalizedToolName)
+          ? 3
+          : 0;
+
+  steps.forEach((step, index) => {
+    if (index < targetStepIndex) {
+      step.status = 'completed';
+    } else if (index === targetStepIndex) {
+      step.status = 'running';
+    } else if (step.status !== 'completed') {
+      step.status = 'pending';
+    }
+  });
+
+  if (targetStepIndex === 1) {
+    steps[1].description = 'AI 正在读取项目结构、文件内容和引用关系。';
+  } else if (targetStepIndex === 2) {
+    steps[2].description = 'AI 正在把修改写回工作区。';
+  } else if (targetStepIndex === 3) {
+    steps[3].description = 'AI 正在执行命令、检查结果并整理输出。';
+  }
+
+  return steps;
 }
 
 function isAgentMode(value: unknown): value is AgentMode {
@@ -684,6 +782,28 @@ export default function App() {
       setIsHistoryLoading(false);
     }
   }, []);
+
+  const persistKanbanCardAiState = useCallback(
+    async (cardId: string, aiState: KanbanAiState | null) => {
+      if (!selectedWorkspace || !cardId) return;
+      try {
+        const response = await fetch(
+          `http://localhost:8000/api/workspaces/${encodeURIComponent(selectedWorkspace)}/kanban/cards/${cardId}`,
+          {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ aiState }),
+          },
+        );
+        if (!response.ok) {
+          throw new Error(await readApiError(response, '更新卡片 AI 状态失败'));
+        }
+      } catch (error) {
+        console.error(error);
+      }
+    },
+    [selectedWorkspace],
+  );
 
   const createSessionWithWorkspace = useCallback(async (
     workspace: string,
@@ -1280,6 +1400,12 @@ export default function App() {
     initialAssistantId,
     userVisibleMessage,
     clearComposer,
+    onSessionStateChange,
+    onPlanStepsChange,
+    onAssistantTextChange,
+    onToolCallStart,
+    onStreamComplete,
+    onStreamError,
   }: {
     url: string;
     body: Record<string, unknown>;
@@ -1287,6 +1413,12 @@ export default function App() {
     initialAssistantId?: string | null;
     userVisibleMessage?: string | null;
     clearComposer?: boolean;
+    onSessionStateChange?: (payload: Partial<SessionContextPayload>) => void;
+    onPlanStepsChange?: (steps: PlanStep[]) => void;
+    onAssistantTextChange?: (text: string) => void;
+    onToolCallStart?: (toolName: string) => void;
+    onStreamComplete?: () => void;
+    onStreamError?: (message: string) => void;
   }) => {
     if (!streamSessionId || isLoading) return;
 
@@ -1319,6 +1451,8 @@ export default function App() {
       let currentAssistantId = initialAssistantId ?? '';
       const toolNamesById = new Map<string, string>();
       const toolInputBuffersById = new Map<string, string>();
+      const assistantTextById = new Map<string, string>();
+      let hadStreamError = false;
       const isVisibleStreamSession = () => currentSessionIdRef.current === streamSessionId;
 
       const pendingUpdates = new Map<string, ((message: ChatMessage) => ChatMessage)[]>();
@@ -1548,9 +1682,13 @@ export default function App() {
 
           if (data.type === 'start') {
             currentAssistantId = data.messageId || currentAssistantId || Math.random().toString();
+            assistantTextById.set(currentAssistantId, assistantTextById.get(currentAssistantId) ?? '');
             updateAssistantMessage(currentAssistantId, (message) => message, true);
           } else if (data.type === 'text-delta') {
             currentAssistantId = currentAssistantId || Math.random().toString();
+            const nextText = `${assistantTextById.get(currentAssistantId) ?? ''}${data.delta ?? ''}`;
+            assistantTextById.set(currentAssistantId, nextText);
+            onAssistantTextChange?.(nextText);
             updateAssistantMessage(currentAssistantId, (message) => ({
               ...message,
               content: `${message.content}${data.delta ?? ''}`,
@@ -1574,6 +1712,7 @@ export default function App() {
               streamedInput: undefined,
               state: 'running' as const
             };
+            onToolCallStart?.(toolCallRecord.name);
             toolNamesById.set(toolCallRecord.id, toolCallRecord.name);
             if (toolCallRecord.name === 'save_plan') {
               showStreamingPlanDraft(normalizePlanDraft(toolCallRecord.arguments));
@@ -1602,6 +1741,7 @@ export default function App() {
             const toolCallId = String(data.toolCallId ?? '');
             if (!assistantId || !toolCallId) return;
             const toolName = String(data.toolName ?? toolNamesById.get(toolCallId) ?? 'tool');
+            onToolCallStart?.(toolName);
             toolNamesById.set(toolCallId, toolName);
             toolInputBuffersById.set(toolCallId, '');
             if (toolName === 'save_plan') {
@@ -1704,6 +1844,7 @@ export default function App() {
           } else if (data.type === 'data-plan-steps') {
             const steps = data.data?.steps;
             if (Array.isArray(steps)) {
+              onPlanStepsChange?.(steps as PlanStep[]);
               setSessionContext((prev) =>
                 prev
                   ? {
@@ -1719,6 +1860,7 @@ export default function App() {
               typeof data.data === 'object' &&
               !Array.isArray(data.data)
             ) ? data.data as Partial<SessionContextPayload> : {};
+            onSessionStateChange?.(payload);
             setSessionContext((prev) =>
               prev
                 ? {
@@ -1785,6 +1927,13 @@ export default function App() {
             }), true);
           } else if (data.type === 'error') {
             currentAssistantId = currentAssistantId || Math.random().toString();
+            hadStreamError = true;
+            const nextText = `${assistantTextById.get(currentAssistantId) ?? ''}${data.errorText ?? ''}`;
+            assistantTextById.set(currentAssistantId, nextText);
+            onAssistantTextChange?.(nextText);
+            if (data.errorText) {
+              onStreamError?.(String(data.errorText));
+            }
             updateAssistantMessage(currentAssistantId, (message) => ({
               ...message,
               content: `${message.content}${data.errorText ?? ''}`,
@@ -1792,9 +1941,13 @@ export default function App() {
             }), true);
           } else if (data.type === 'assistant_started') {
             currentAssistantId = data.payload.id || currentAssistantId || Math.random().toString();
+            assistantTextById.set(currentAssistantId, assistantTextById.get(currentAssistantId) ?? '');
             updateAssistantMessage(currentAssistantId, (message) => message, true);
           } else if (data.type === 'assistant_delta') {
             currentAssistantId = data.payload.id || currentAssistantId || Math.random().toString();
+            const nextText = `${assistantTextById.get(currentAssistantId) ?? ''}${data.payload.delta ?? ''}`;
+            assistantTextById.set(currentAssistantId, nextText);
+            onAssistantTextChange?.(nextText);
             updateAssistantMessage(currentAssistantId, (message) => ({
               ...message,
               content: `${message.content}${data.payload.delta ?? ''}`,
@@ -1802,6 +1955,8 @@ export default function App() {
             }), false);
           } else if (data.type === 'assistant_reset') {
             currentAssistantId = data.payload.id || currentAssistantId || Math.random().toString();
+            assistantTextById.set(currentAssistantId, '');
+            onAssistantTextChange?.('');
             updateAssistantMessage(currentAssistantId, (message) => ({
               ...message,
               content: '',
@@ -1837,6 +1992,7 @@ export default function App() {
             if (!assistantId) return;
             currentAssistantId = assistantId;
             const toolCallRecord = { ...data.payload, state: 'running' as const };
+            onToolCallStart?.(String(data.payload.name ?? 'tool'));
             if (data.payload.name === 'save_plan') {
               showStreamingPlanDraft(normalizePlanDraft(data.payload.arguments));
             }
@@ -1912,11 +2068,15 @@ export default function App() {
         await processEvent(buffer);
       }
       flushImmediately();
+      if (!hadStreamError) {
+        onStreamComplete?.();
+      }
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') {
         return;
       }
       console.error(e);
+      onStreamError?.(e instanceof Error ? e.message : 'AI 执行失败');
     } finally {
       if (activeRequestRef.current === abortController) {
         activeRequestRef.current = null;
@@ -1990,10 +2150,32 @@ export default function App() {
       if (!sessionId || isLoading) return;
 
       const message = formatKanbanCardTaskPrompt(card);
-      setActivePlugin(null);
       setSelectedAgentMode('coding');
+      const startedAt = new Date().toISOString();
+      let latestPhase = 'planning';
+      let latestSteps: PlanStep[] = buildDefaultKanbanPlanSteps();
+      let latestAssistantText = '';
+      let lastPersistedState = '';
 
-      await streamAssistantResponse({
+      const persistState = async (state: KanbanAiState) => {
+        const serialized = JSON.stringify(state);
+        if (serialized === lastPersistedState) {
+          return;
+        }
+        lastPersistedState = serialized;
+        await persistKanbanCardAiState(card.id, state);
+      };
+
+      const initialState = buildKanbanAiState({
+        sessionId,
+        startedAt,
+        phase: latestPhase,
+        planSteps: latestSteps,
+        status: 'running',
+      });
+      await persistState(initialState);
+
+      void streamAssistantResponse({
         url: 'http://localhost:8000/api/chat/stream',
         body: {
           session_id: sessionId,
@@ -2003,9 +2185,69 @@ export default function App() {
         streamSessionId: sessionId,
         userVisibleMessage: message,
         clearComposer: true,
+        onSessionStateChange: (payload) => {
+          latestPhase = payload.phase ?? latestPhase;
+          void persistState(buildKanbanAiState({
+            sessionId,
+            startedAt,
+            phase: latestPhase,
+            planSteps: latestSteps,
+            status: payload.phase === 'failed' ? 'error' : 'running',
+            result: latestAssistantText || null,
+          }));
+        },
+        onPlanStepsChange: (steps) => {
+          latestSteps = steps;
+          void persistState(buildKanbanAiState({
+            sessionId,
+            startedAt,
+            phase: latestPhase,
+            planSteps: latestSteps,
+            status: 'running',
+            result: latestAssistantText || null,
+          }));
+        },
+        onAssistantTextChange: (text) => {
+          latestAssistantText = text;
+        },
+        onToolCallStart: (toolName) => {
+          latestSteps = advanceKanbanPlanSteps(latestSteps, toolName);
+          void persistState(buildKanbanAiState({
+            sessionId,
+            startedAt,
+            phase: latestPhase,
+            planSteps: latestSteps,
+            status: 'running',
+            result: latestAssistantText || null,
+          }));
+        },
+        onStreamComplete: () => {
+          void persistState(buildKanbanAiState({
+            sessionId,
+            startedAt,
+            phase: 'completed',
+            planSteps: latestSteps,
+            status: 'completed',
+            result: latestAssistantText || null,
+            finishedAt: new Date().toISOString(),
+          }));
+        },
+        onStreamError: (errorMessage) => {
+          void persistState(buildKanbanAiState({
+            sessionId,
+            startedAt,
+            phase: 'failed',
+            planSteps: latestSteps,
+            status: 'error',
+            error: errorMessage,
+            result: latestAssistantText || null,
+            finishedAt: new Date().toISOString(),
+          }));
+        },
       });
+      return initialState;
     },
-    [isLoading, sessionId, streamAssistantResponse],
+    [isLoading, persistKanbanCardAiState, sessionId, streamAssistantResponse],
   );
 
   const resolveDeleteConfirmation = useCallback(
@@ -2570,7 +2812,7 @@ export default function App() {
           <KanbanBoard
             workspace={selectedWorkspace}
             fileTree={fileTree}
-            onSendCardToAi={(card) => void handleSendKanbanCardToAi(card)}
+            onSendCardToAi={handleSendKanbanCardToAi}
           />
         </div>
       ) : (

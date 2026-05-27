@@ -8,7 +8,7 @@ from agent import ChatSession, StepRecord, ToolCall, ToolResult
 from agent.tools import ToolContext
 from fastapi_app import main as api_main
 from fastapi_app.api_models import PlanDraftUpdateRequest, PlanSubmitRequest, ToolInputSubmitRequest
-from plan_agent.brain import PlanPromptBrain
+from plan_agent.model import PlanPromptModel
 from plan_agent.tools import AskPlanQuestionsTool, ReadCurrentPlanTool, SavePlanTool, SearchWebTool
 
 
@@ -269,8 +269,8 @@ class PlanAgentEndpointsTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(tool_result.output.get("requires_user_input", False))
         self.assertEqual(tool_result.output["answers"][1]["text"], "SuperCode")
 
-        brain = PlanPromptBrain(client=object())
-        native_messages = brain._build_current_turn_native_messages(self.session.chat_session.state)
+        model = PlanPromptModel(client=object())
+        native_messages = model._build_current_turn_native_messages(self.session.chat_session.state)
         self.assertEqual(native_messages[-1]["role"], "tool")
         self.assertEqual(native_messages[-1]["tool_call_id"], "tool-plan-1")
         self.assertIn("SuperCode", native_messages[-1]["content"])

@@ -1,6 +1,6 @@
 import unittest
 
-from agent import BrainDecision, ChatSession, CodingAgent
+from agent import Agent, ChatSession, ModelStep
 from agent.schema import (
     AgentResponse,
     AgentState,
@@ -10,7 +10,7 @@ from agent.schema import (
     ToolResult,
 )
 from agent.tools import BaseTool
-from coding_agent.brain import CodingPromptBrain
+from coding_agent.model import CodingPromptModel
 from fastapi_app.session_history import seed_chat_session_history
 
 
@@ -22,9 +22,9 @@ class _NoopTool(BaseTool):
         return "已创建文件: demo.py"
 
 
-class _OneShotBrain:
-    def decide(self, state, tool_definitions, on_stream=None):  # noqa: ANN001
-        return BrainDecision.finish(thought="完成", final_answer="done")
+class _OneShotModel:
+    def next_step(self, state, tool_definitions, on_stream=None):  # noqa: ANN001
+        return ModelStep.finish(thought="完成", final_answer="done")
 
 
 class _ToolResponseAgent:
@@ -71,7 +71,7 @@ class AgentContextRecordTests(unittest.TestCase):
         self.assertEqual(session.state.data["planning_records"][0]["thought"], "创建文件")
 
     def test_seed_history_restores_tool_records_from_call_history(self) -> None:
-        agent = CodingAgent(brain=_OneShotBrain(), tools=[_NoopTool()])
+        agent = Agent(model=_OneShotModel(), tools=[_NoopTool()])
         session = ChatSession(agent=agent)
 
         seed_chat_session_history(
@@ -114,8 +114,8 @@ class AgentContextRecordTests(unittest.TestCase):
         self.assertEqual(session.state.data["tool_records"][0]["output"], "已创建文件: demo.py")
         self.assertIn("创建 demo.py", session.state.data["planning_records"][0]["thought"])
 
-    def test_coding_brain_places_tool_records_before_latest_user_message(self) -> None:
-        brain = CodingPromptBrain(client=object())
+    def test_coding_model_places_tool_records_before_latest_user_message(self) -> None:
+        model = CodingPromptModel(client=object())
         state = AgentState(task="task", current_input="继续")
         state.conversation_messages = [
             ConversationMessage(role="user", content="创建 demo.py"),
@@ -143,7 +143,7 @@ class AgentContextRecordTests(unittest.TestCase):
             }
         ]
 
-        messages = brain._build_messages(
+        messages = model._build_messages(
             state,
             tool_definitions={"write_file": {"description": "创建文件", "parameters_schema": None}},
             response_mode="native_tools",
@@ -161,8 +161,8 @@ class AgentContextRecordTests(unittest.TestCase):
         self.assertIn("[内部规划记录]", planning_record_message)
         self.assertIn("方案已经确定", planning_record_message)
 
-    def test_coding_brain_includes_runtime_state_context_when_present(self) -> None:
-        brain = CodingPromptBrain(client=object())
+    def test_coding_model_includes_runtime_state_context_when_present(self) -> None:
+        model = CodingPromptModel(client=object())
         state = AgentState(task="task", current_input="继续")
         state.conversation_messages = [
             ConversationMessage(role="user", content="检查部署"),
@@ -178,7 +178,7 @@ class AgentContextRecordTests(unittest.TestCase):
             },
         }
 
-        messages = brain._build_messages(
+        messages = model._build_messages(
             state,
             tool_definitions={},
             response_mode="native_tools",
@@ -190,8 +190,8 @@ class AgentContextRecordTests(unittest.TestCase):
         self.assertIn("\"phase\": \"connected\"", runtime_state_message)
         self.assertIn("deploy-1", runtime_state_message)
 
-    def test_coding_brain_includes_active_skills_context_before_latest_user_message(self) -> None:
-        brain = CodingPromptBrain(client=object())
+    def test_coding_model_includes_active_skills_context_before_latest_user_message(self) -> None:
+        model = CodingPromptModel(client=object())
         state = AgentState(task="task", current_input="继续完成聊天框改造")
         state.conversation_messages = [
             ConversationMessage(role="user", content="改造聊天框"),
@@ -209,7 +209,7 @@ class AgentContextRecordTests(unittest.TestCase):
             }
         ]
 
-        messages = brain._build_messages(
+        messages = model._build_messages(
             state,
             tool_definitions={},
             response_mode="native_tools",
@@ -221,8 +221,8 @@ class AgentContextRecordTests(unittest.TestCase):
         self.assertIn("frontend-design", skill_context_message)
         self.assertIn("responsive UI behavior", skill_context_message)
 
-    def test_coding_brain_includes_available_skill_catalog_for_autonomous_discovery(self) -> None:
-        brain = CodingPromptBrain(client=object())
+    def test_coding_model_includes_available_skill_catalog_for_autonomous_discovery(self) -> None:
+        model = CodingPromptModel(client=object())
         state = AgentState(task="task", current_input="继续改造聊天框")
         state.conversation_messages = [
             ConversationMessage(role="user", content="改造聊天框"),
@@ -244,7 +244,7 @@ class AgentContextRecordTests(unittest.TestCase):
             },
         ]
 
-        messages = brain._build_messages(
+        messages = model._build_messages(
             state,
             tool_definitions={},
             response_mode="native_tools",

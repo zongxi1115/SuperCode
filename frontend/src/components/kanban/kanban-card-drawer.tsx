@@ -1,15 +1,16 @@
 import React, { useEffect, useState } from 'react';
-import type { KanbanCard, CardStatus, Priority } from '@/lib/kanban-types';
+import type { KanbanAiState, KanbanCard, CardStatus, Priority } from '@/lib/kanban-types';
 import { CARD_STATUS_LABELS, PRIORITY_LABELS } from '@/lib/kanban-types';
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from '@/components/ui/sheet';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Label } from '@/components/ui/label';
-import { Maximize2, Minimize2, Sparkles, Trash2 } from 'lucide-react';
+import { CheckCircle2, LoaderCircle, Maximize2, Minimize2, Sparkles, TriangleAlert, Trash2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { FileTreeNode } from '@/lib/app-types';
 import { KanbanDescriptionEditor } from './kanban-description-editor';
+import { Badge } from '@/components/ui/badge';
 
 interface KanbanCardDrawerProps {
   card: KanbanCard | null;
@@ -19,7 +20,7 @@ interface KanbanCardDrawerProps {
   onClose: () => void;
   onSave: (card: KanbanCard) => void;
   onDelete: (cardId: string) => void;
-  onSendToAi?: (card: KanbanCard) => void;
+  onSendToAi?: (card: KanbanCard) => Promise<void> | void;
 }
 
 export function KanbanCardDrawer({
@@ -66,7 +67,7 @@ function KanbanCardDrawerContent({
   onClose: () => void;
   onSave: (card: KanbanCard) => void;
   onDelete: (cardId: string) => void;
-  onSendToAi?: (card: KanbanCard) => void;
+  onSendToAi?: (card: KanbanCard) => Promise<void> | void;
 }) {
   const [editedCard, setEditedCard] = useState<KanbanCard>(() => ({ ...card }));
   const [isExpanded, setIsExpanded] = useState(false);
@@ -88,11 +89,39 @@ function KanbanCardDrawerContent({
   };
 
   const handleSendToAi = () => {
-    onSendToAi?.({
+    void onSendToAi?.({
       ...editedCard,
       updatedAt: new Date().toISOString(),
     });
   };
+
+  const getAiStatusMeta = (aiState?: KanbanAiState | null) => {
+    switch (aiState?.status) {
+      case 'completed':
+        return {
+          label: '已完成',
+          icon: <CheckCircle2 className="h-3.5 w-3.5" />,
+          className: 'border-emerald-500/20 bg-emerald-500/10 text-emerald-600',
+        };
+      case 'error':
+        return {
+          label: '失败',
+          icon: <TriangleAlert className="h-3.5 w-3.5" />,
+          className: 'border-destructive/20 bg-destructive/10 text-destructive',
+        };
+      case 'queued':
+      case 'running':
+        return {
+          label: aiState.status === 'queued' ? '排队中' : '进行中',
+          icon: <LoaderCircle className="h-3.5 w-3.5 animate-spin" />,
+          className: 'border-amber-500/20 bg-amber-500/10 text-amber-600',
+        };
+      default:
+        return null;
+    }
+  };
+
+  const aiStatusMeta = getAiStatusMeta(editedCard.aiState);
 
   return (
     <Sheet
@@ -142,6 +171,65 @@ function KanbanCardDrawerContent({
               onChange={(e) => setEditedCard({ ...editedCard, title: e.target.value })}
             />
           </div>
+
+          {editedCard.aiState ? (
+            <div className="rounded-lg border bg-muted/30 p-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-sm font-medium">AI 任务状态</div>
+                {aiStatusMeta ? (
+                  <Badge variant="outline" className={cn('gap-1 border px-2 py-0.5 text-[11px]', aiStatusMeta.className)}>
+                    {aiStatusMeta.icon}
+                    {aiStatusMeta.label}
+                  </Badge>
+                ) : null}
+              </div>
+              {editedCard.aiState.progress ? (
+                <div className="mt-2 text-xs text-muted-foreground">
+                  进度 {editedCard.aiState.progress.completed}/{editedCard.aiState.progress.total}
+                </div>
+              ) : null}
+              {editedCard.aiState.activeStepTitle ? (
+                <div className="mt-1 text-sm text-foreground/90">
+                  当前步骤：{editedCard.aiState.activeStepTitle}
+                </div>
+              ) : null}
+              {editedCard.aiState.lastMessage ? (
+                <div className="mt-1 text-xs leading-5 text-muted-foreground">
+                  {editedCard.aiState.lastMessage}
+                </div>
+              ) : null}
+              {editedCard.aiState.planSteps && editedCard.aiState.planSteps.length > 0 ? (
+                <div className="mt-3 space-y-2">
+                  {editedCard.aiState.planSteps.map((step) => (
+                    <div key={step.id} className="flex items-start gap-2 text-xs">
+                      <div className={cn(
+                        'mt-0.5 h-2.5 w-2.5 rounded-full',
+                        step.status === 'completed' && 'bg-emerald-500',
+                        step.status === 'running' && 'bg-amber-500',
+                        step.status === 'error' && 'bg-destructive',
+                        step.status === 'blocked' && 'bg-orange-500',
+                        step.status === 'pending' && 'bg-muted-foreground/30',
+                      )} />
+                      <div className="min-w-0">
+                        <div className="font-medium text-foreground/90">{step.title}</div>
+                        <div className="text-muted-foreground">{step.description}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+              {editedCard.aiState.result ? (
+                <div className="mt-3 rounded-md border bg-background/80 p-2 text-xs leading-5 text-foreground/80">
+                  {editedCard.aiState.result}
+                </div>
+              ) : null}
+              {editedCard.aiState.error ? (
+                <div className="mt-3 rounded-md border border-destructive/20 bg-destructive/5 p-2 text-xs leading-5 text-destructive">
+                  {editedCard.aiState.error}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
           
           <div className={cn("grid gap-2", isExpanded && "min-h-0 flex-1")}>
             <Label htmlFor="description">描述</Label>

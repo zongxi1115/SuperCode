@@ -21,10 +21,10 @@
 
 ## English Introduction
 
-**SuperCode** is a local-first, developer-centric agentic codebase workspace. It decouples the core agent runtime loop from specialized domain brains, allowing orchestrating multi-agents (Planning, Coding, Deployment) to interact directly with your workspace. Featuring a beautiful modern dashboard (React 19 + Tailwind v4 + Monaco Editor), real-time SSE stream of thought, parallel read-only tools, and a directory-scoped Skill system, SuperCode brings autonomous developer capabilities directly to your desktop.
+**SuperCode** is a local-first, developer-centric agentic codebase workspace. It decouples the core agent runtime loop from specialized prompt models, allowing orchestrated agent modes (Planning, Coding, Deployment) to interact directly with your workspace. Featuring a beautiful modern dashboard (React 19 + Tailwind v4 + Monaco Editor), real-time SSE stream of thought, parallel read-only tools, and a directory-scoped Skill system, SuperCode brings autonomous developer capabilities directly to your desktop.
 
 ### Key Highlights
-- 🧠 **Modular Multi-Agent Runtime**: Standardized executor loop supporting collaborative Brain models: `CodingAgent` (editing & tools), `PlanAgent` (planning & checklists), and `DeployAgent` (testing & packaging).
+- 🧠 **Modular Multi-Agent Runtime**: Standardized executor loop with a single `Agent` facade and specialized prompt models: `CodingPromptModel` (editing & tools), `PlanPromptModel` (planning & checklists), and `DeployPromptModel` (testing & packaging).
 - 💬 **Interactive Visual Chat**: Real-time visualization of agent thoughts, tool calls, and results using SSE (Server-Sent Events) stream-of-thought architecture.
 - ⚡ **Parallel Tool Executor**: Smart scheduler executes safe, read-only tools (like search, glob, read) in parallel using thread pools to slash execution latency.
 - 🔌 **@Skill Mention Menu**: Project-scoped or global `.md` files containing instructions that the AI can dynamically load and auto-activate to handle specialized tasks.
@@ -34,10 +34,10 @@
 
 ## 中文介绍
 
-**SuperCode** 是一个面向开发者的本地优先、高拓展性智能体开发与工作空间。项目将核心的 Agent 执环（Execution Loop）与特定场景大脑（LLM Brains）解耦，支持**规划**、**编码**、**部署**多智能体高效协同。配合精美的 React 19 + Tailwind v4 + Monaco Editor 开发者看板、SSE 实时思考流式传输、多线程只读工具并行化调度，以及独创的 `@` 技能激活系统，SuperCode 为您打造开箱即用的本地 AI 软件工程师。
+**SuperCode** 是一个面向开发者的本地优先、高拓展性智能体开发与工作空间。项目将核心的 Agent 执环（Execution Loop）与特定场景提示词模型（Prompt Models）解耦，支持**规划**、**编码**、**部署**多智能体高效协同。配合精美的 React 19 + Tailwind v4 + Monaco Editor 开发者看板、SSE 实时思考流式传输、多线程只读工具并行化调度，以及独创的 `@` 技能激活系统，SuperCode 为您打造开箱即用的本地 AI 软件工程师。
 
 ### 核心亮点
-- 🧠 **模块化多智能体架构**：标准化执行器基座，解耦 `agent` 与特定场景实现，包含 `CodingAgent` (编码专家)、`PlanAgent` (规划专家) 及 `DeployAgent` (部署验证专家)。
+- 🧠 **模块化多智能体架构**：标准化执行器基座，使用统一 `Agent` 门面和特定场景模型，包含 `CodingPromptModel` (编码专家)、`PlanPromptModel` (规划专家) 及 `DeployPromptModel` (部署验证专家)。
 - 💬 **可视化交互看板**：前端采用 React 19 + Tailwind v4 + Monaco Editor，完美还原智能体**实时思考 (Thoughts)**、**工具调用 (Tool Calls)** 以及**终端输出 (Terminal Outputs)** 的运行轨迹。
 - ⚡ **只读工具并行化**：内置智能工具调度器，支持非阻塞只读工具（如多文件搜索、文件精读）在线程池中并行执行，显著降低模型响应延迟。
 - 🔌 **@Skill 提及系统**：支持在工作区目录下编写 Markdown 格式的 `SKILL.md` 规则。在提问中输入 `@` 即可手动指定激活特定技能，或由 AI 自动扫描激活对应规则。
@@ -53,9 +53,9 @@ SuperCode combines a decoupled backend routing design with a reactive state-driv
 graph TD
     User([开发者 User / Frontend UI]) <-->|HTTP / SSE Event Stream| FastAPI[FastAPI Back-end Server]
     FastAPI <-->|Session Store| History[(Session History DB)]
-    FastAPI <-->|Stream Run Turn / Trigger Events| Agent[Coding / Plan / Deploy Agent]
-    Agent <-->|Decide / Streaming Thoughts| Brain[LLM Brain Engine]
-    Brain <-->|API Calls| LLM[OpenAI Compatible API / DeepSeek / GPT]
+    FastAPI <-->|Stream Run Turn / Trigger Events| Agent[Unified Agent Runtime]
+    Agent <-->|Next Step / Streaming Thoughts| Model[Prompt Model Adapter]
+    Model <-->|API Calls| LLM[OpenAI Compatible API / DeepSeek / GPT]
     Agent <-->|Execute Tools| Tools[Modular Tool Set]
     Tools <-->|File Ops & Shell Command Execution| Workspace[Local Workspace & Shell Runtime]
     Tools <-->|Load Context & Guidance| Skills[Built-in / Local Workspace Skills]
@@ -66,7 +66,7 @@ graph TD
 ## ✨ Features Breakdown / 功能特性
 
 ### 1. Unified Agent Engine / 统一的智能体引擎
-The `agent/` folder acts as an abstract runner, handling chat history retention, tool parameters validation, streaming state updates, and error boundary handling. `coding_agent/`, `plan_agent/`, and `deploy_agent/` implement custom prompt brains and concrete file/terminal operation tools, making the entire framework highly pluggable.
+The `agent/` folder acts as an abstract runner, handling chat history retention, tool parameter validation, streaming state updates, and error boundary handling. `coding_agent/`, `plan_agent/`, and `deploy_agent/` implement custom prompt models and concrete file/terminal operation tools, making the entire framework highly pluggable.
 
 ### 2. Live SSE Streams & Parallelization / 实时思考流与并行执行
 - **Streaming Output**: Through Server-Sent Events, developers can see exactly what the model is thinking, what tools are being populated, and tool response payloads concurrently.
@@ -159,25 +159,25 @@ You can type continuous queries such as:
 
 ## 🛠️ Developer SDK Integration / 开发者集成接口
 
-You can programmatically spin up the `CodingAgent` and stream its event-driven outputs:
+You can programmatically spin up an `Agent` and stream its event-driven outputs:
 
 ```python
 from agent import (
+    Agent,
     AgentLLMConfig,
     ChatSession,
-    CodingAgent,
     OpenAICompatibleClient,
     AgentEvent
 )
-from coding_agent import CodingPromptBrain, build_coding_tools
+from coding_agent import CodingPromptModel, build_coding_tools
 
 # 1. Load config and instantiate LLM Client
 config = AgentLLMConfig.from_env(".env")
 client = OpenAICompatibleClient(config)
 
-# 2. Build Agent with core Brain and workspace bindings
-agent = CodingAgent(
-    brain=CodingPromptBrain(client),
+# 2. Build Agent with a model adapter, tools, and workspace bindings
+agent = Agent(
+    model=CodingPromptModel(client),
     tools=build_coding_tools(),
     workspace="examples/demo_workspace",
 )
@@ -200,7 +200,7 @@ print("Final Output:", response.final_output)
 
 ## 🔧 Tools Reference / 工具箱接口规范
 
-`CodingAgent` interacts with the operating system through the following structured tools:
+The coding prompt model interacts with the operating system through the following structured tools:
 
 | Tool Name / 工具名称 | Key Arguments / 主要参数 | Description / 作用说明 |
 | :--- | :--- | :--- |
@@ -223,7 +223,7 @@ print("Final Output:", response.final_output)
 ```text
 SuperCode/
 ├── agent/              # Core Agentic Framework (Abstract Interface + Run Loop)
-├── coding_agent/       # Brain, prompts and toolsets optimized for programming
+├── coding_agent/       # Prompt models and toolsets optimized for programming
 ├── plan_agent/         # Agent specializing in long-term task decomposition
 ├── deploy_agent/       # Agent managing code deployment and checks
 ├── fastapi_app/        # FastAPI Back-end (SSE pushes, Terminal runtime, Files API)

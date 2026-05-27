@@ -1,5 +1,29 @@
 export type Priority = 'none' | 'low' | 'medium' | 'high' | 'urgent';
 export type CardStatus = 'Backlog' | 'Todo' | 'In Progress' | 'Done';
+export type KanbanAiTaskStatus = 'queued' | 'running' | 'completed' | 'error';
+
+export interface KanbanAiStep {
+  id: string;
+  title: string;
+  description: string;
+  status: 'pending' | 'running' | 'blocked' | 'completed' | 'error';
+}
+
+export interface KanbanAiState {
+  status: KanbanAiTaskStatus;
+  sessionId?: string | null;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  lastMessage?: string | null;
+  activeStepTitle?: string | null;
+  result?: string | null;
+  error?: string | null;
+  planSteps?: KanbanAiStep[];
+  progress?: {
+    completed: number;
+    total: number;
+  } | null;
+}
 
 export const PRIORITY_LABELS: Record<Priority, string> = {
   none: '无',
@@ -27,6 +51,7 @@ export interface KanbanCard {
   labels: string[];
   assignee?: string;
   position: number;
+  aiState?: KanbanAiState | null;
   createdAt: string;
   updatedAt: string;
 }

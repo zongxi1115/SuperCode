@@ -4,7 +4,7 @@ import json
 import platform
 from pathlib import Path
 
-from agent.llm_brain import OpenAICompatibleBrain
+from agent.openai_model import OpenAICompatibleModel
 from agent.llm_client import OpenAICompatibleClient
 from agent.schema import AgentState, StepRecord, ToolResult
 
@@ -19,8 +19,8 @@ MAX_ACTIVE_SKILL_CONTENT_CHARS = 8_000
 MAX_AVAILABLE_SKILL_DESCRIPTION_CHARS = 280
 
 
-class CodingPromptBrain(OpenAICompatibleBrain):
-    """基于编码提示词的专用 brain。"""
+class CodingPromptModel(OpenAICompatibleModel):
+    """Model adapter with coding-specific prompts and context."""
 
     def __init__(
         self,
@@ -550,8 +550,11 @@ class CodingPromptBrain(OpenAICompatibleBrain):
         return Path(__file__).resolve().parent / "prompts" / "coding.md"
 
 
-class CodeExplorationPromptBrain(CodingPromptBrain):
-    """只读代码探索子智能体 brain。"""
+class CodeExplorationPromptModel(CodingPromptModel):
+    """Read-only code exploration model adapter."""
 
     def _default_prompt_path(self) -> Path:
         return Path(__file__).resolve().parent / "prompts" / "code_exploration.md"
+
+
+# Compatibility aliases. New code should prefer *Model names.

@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from coding_agent.brain import CodingPromptBrain
+from coding_agent.model import CodingPromptModel
 
 
-class DeployPromptBrain(CodingPromptBrain):
-    """基于部署提示词的专用 brain。"""
+class DeployPromptModel(CodingPromptModel):
+    """Model adapter with deployment-specific prompts and context."""
 
     def _build_system_prompt(
         self,
@@ -111,3 +111,4 @@ class DeployPromptBrain(CodingPromptBrain):
 
     def _default_prompt_path(self) -> Path:
         return Path(__file__).resolve().parent / "prompts" / "deploy.md"
+

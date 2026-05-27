@@ -8,13 +8,13 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from agent import (
+    Agent,
     AgentEvent,
     AgentLLMConfig,
     ChatSession,
-    CodingAgent,
     OpenAICompatibleClient,
 )
-from coding_agent import CodingPromptBrain, build_coding_tools
+from coding_agent import CodingPromptModel, build_coding_tools
 
 
 def render_live_event(event: AgentEvent) -> None:
@@ -78,8 +78,8 @@ def main() -> None:
         return
 
     client = OpenAICompatibleClient(config)
-    agent = CodingAgent(
-        brain=CodingPromptBrain(client),
+    agent = Agent(
+        model=CodingPromptModel(client),
         tools=build_coding_tools(),
         workspace=workspace,
     )

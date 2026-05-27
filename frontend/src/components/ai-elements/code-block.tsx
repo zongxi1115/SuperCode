@@ -494,7 +494,7 @@ export const CodeBlockContent = ({
       mo.disconnect();
       el.removeEventListener("scroll", onScroll);
     };
-  }, [isStreaming, safeCode]);
+  }, [isStreaming]);
 
   const badgeState: "loading" | "arrow" | null = isStreaming
     ? isScrolledUp ? "arrow" : "loading"
