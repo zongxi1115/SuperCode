@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import type { KanbanCard, CardStatus, Priority } from '@/lib/kanban-types';
 import { CARD_STATUS_LABELS, PRIORITY_LABELS } from '@/lib/kanban-types';
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from '@/components/ui/sheet';
@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Label } from '@/components/ui/label';
-import { Maximize2, Minimize2, Sparkles } from 'lucide-react';
+import { Maximize2, Minimize2, Sparkles, Trash2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { FileTreeNode } from '@/lib/app-types';
 import { KanbanDescriptionEditor } from './kanban-description-editor';
@@ -18,6 +18,7 @@ interface KanbanCardDrawerProps {
   fileTree?: FileTreeNode[];
   onClose: () => void;
   onSave: (card: KanbanCard) => void;
+  onDelete: (cardId: string) => void;
   onSendToAi?: (card: KanbanCard) => void;
 }
 
@@ -28,6 +29,7 @@ export function KanbanCardDrawer({
   fileTree = [],
   onClose,
   onSave,
+  onDelete,
   onSendToAi,
 }: KanbanCardDrawerProps) {
   if (!card) return null;
@@ -41,6 +43,7 @@ export function KanbanCardDrawer({
       fileTree={fileTree}
       onClose={onClose}
       onSave={onSave}
+      onDelete={onDelete}
       onSendToAi={onSendToAi}
     />
   );
@@ -53,6 +56,7 @@ function KanbanCardDrawerContent({
   fileTree,
   onClose,
   onSave,
+  onDelete,
   onSendToAi,
 }: {
   card: KanbanCard;
@@ -61,10 +65,15 @@ function KanbanCardDrawerContent({
   fileTree: FileTreeNode[];
   onClose: () => void;
   onSave: (card: KanbanCard) => void;
+  onDelete: (cardId: string) => void;
   onSendToAi?: (card: KanbanCard) => void;
 }) {
   const [editedCard, setEditedCard] = useState<KanbanCard>(() => ({ ...card }));
   const [isExpanded, setIsExpanded] = useState(false);
+
+  useEffect(() => {
+    setEditedCard({ ...card });
+  }, [card]);
 
   const handleClose = () => {
     setIsExpanded(false);
@@ -184,28 +193,32 @@ function KanbanCardDrawerContent({
             </Select>
           </div>
 
-          <div className="grid gap-2">
-            <Label htmlFor="assignee">负责人</Label>
-            <Input 
-              id="assignee" 
-              value={editedCard.assignee || ''} 
-              onChange={(e) => setEditedCard({ ...editedCard, assignee: e.target.value })}
-              placeholder="例如：Alice"
-            />
-          </div>
+
         </div>
 
         <div className="mt-auto flex items-center justify-between gap-2 pt-4 border-t">
-          <Button
-            type="button"
-            variant="secondary"
-            className="gap-1.5"
-            onClick={handleSendToAi}
-            disabled={!onSendToAi || isSaving}
-          >
-            <Sparkles className="h-3.5 w-3.5" />
-            交给 AI
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              variant="secondary"
+              className="gap-1.5"
+              onClick={handleSendToAi}
+              disabled={!onSendToAi || isSaving}
+            >
+              <Sparkles className="h-3.5 w-3.5" />
+              交给 AI
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              className="gap-1.5 text-destructive hover:text-destructive"
+              onClick={() => onDelete(card.id)}
+              disabled={isSaving}
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              删除
+            </Button>
+          </div>
           <div className="flex items-center gap-2">
             <Button variant="outline" onClick={handleClose}>取消</Button>
             <Button onClick={handleSave} disabled={isSaving}>{isSaving ? '保存中...' : '保存更改'}</Button>

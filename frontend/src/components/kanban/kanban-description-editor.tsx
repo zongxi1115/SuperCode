@@ -516,7 +516,7 @@ export function KanbanDescriptionEditor({
   return (
     <div
       className={cn(
-        "kanban-description-editor flex min-h-0 flex-col overflow-hidden rounded-[1.35rem] border border-violet-400/80 bg-background shadow-[0_0_0_4px_rgba(139,92,246,0.13),0_16px_34px_rgba(15,23,42,0.08)] transition-colors focus-within:border-violet-500",
+        "kanban-description-editor flex min-h-0 flex-col overflow-hidden rounded-lg border border-violet-400/80 bg-background shadow-sm transition-colors focus-within:border-violet-500",
         className,
       )}
     >
@@ -665,10 +665,9 @@ export function KanbanDescriptionEditor({
         ) : null}
         </div>
 
-        <div className="pointer-events-none absolute bottom-4 right-6 flex items-center gap-2 text-[11px] font-bold uppercase tracking-[0.08em] text-muted-foreground">
-          <span className="h-2 w-2 rounded-full bg-emerald-500" />
+        <div className="pointer-events-none absolute bottom-3 right-4 flex items-center gap-1.5 text-[11px] text-muted-foreground/60">
+          <span className="h-1.5 w-1.5 rounded-full bg-emerald-500/70" />
           <span>{characterCount}</span>
-          <span>chars</span>
         </div>
       </div>
 

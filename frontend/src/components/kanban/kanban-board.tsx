@@ -11,8 +11,9 @@ import { KanbanColumn } from './kanban-column';
 import { KanbanCardDrawer } from './kanban-card-drawer';
 import { ScrollArea, ScrollBar } from '@/components/ui/scroll-area';
 import { Button } from '@/components/ui/button';
-import { Filter, LayoutDashboard, Plus, RefreshCw } from 'lucide-react';
+import { Filter, LayoutDashboard, Plus, RefreshCw, Search, Trash2 } from 'lucide-react';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { cn } from '@/lib/utils';
 
 type KanbanBoardProps = {
   workspace: string;
@@ -45,9 +46,11 @@ async function readApiError(response: Response, fallback: string) {
 export function KanbanBoard({ workspace, fileTree = [], onSendCardToAi }: KanbanBoardProps) {
   const [board, setBoard] = useState<KanbanBoardType | null>(null);
   const [draggedCardId, setDraggedCardId] = useState<string | null>(null);
+  const [isTrashDragOver, setIsTrashDragOver] = useState(false);
   const [selectedCard, setSelectedCard] = useState<KanbanCard | null>(null);
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [priorityFilter, setPriorityFilter] = useState<Priority | 'all'>('all');
+  const [searchQuery, setSearchQuery] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -180,6 +183,26 @@ export function KanbanBoard({ workspace, fileTree = [], onSendCardToAi }: Kanban
     setIsDrawerOpen(true);
   };
 
+  const handleTrashDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    setIsTrashDragOver(true);
+  };
+
+  const handleTrashDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setIsTrashDragOver(false);
+  };
+
+  const handleTrashDrop = async (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setIsTrashDragOver(false);
+    if (!draggedCardId || !board) return;
+    const cardId = draggedCardId;
+    setDraggedCardId(null);
+    void handleDeleteCard(cardId);
+  };
+
   const handleSaveCard = async (updatedCard: KanbanCard) => {
     if (!board) return;
 
@@ -207,6 +230,29 @@ export function KanbanBoard({ workspace, fileTree = [], onSendCardToAi }: Kanban
     } catch (error) {
       console.error(error);
       setErrorMessage(error instanceof Error ? error.message : '保存卡片失败');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleDeleteCard = async (cardId: string) => {
+    if (!board) return;
+
+    setIsSaving(true);
+    setErrorMessage(null);
+    try {
+      const response = await fetch(workspaceKanbanUrl(workspace, `/cards/${cardId}`), {
+        method: 'DELETE',
+      });
+      if (!response.ok) {
+        throw new Error(await readApiError(response, '删除卡片失败'));
+      }
+      setBoard({ ...board, cards: board.cards.filter((card) => card.id !== cardId) });
+      setIsDrawerOpen(false);
+      setSelectedCard(null);
+    } catch (error) {
+      console.error(error);
+      setErrorMessage(error instanceof Error ? error.message : '删除卡片失败');
     } finally {
       setIsSaving(false);
     }
@@ -249,8 +295,19 @@ export function KanbanBoard({ workspace, fileTree = [], onSendCardToAi }: Kanban
   };
 
   const filteredCards = useMemo(
-    () => board?.cards.filter((card) => (priorityFilter === 'all' ? true : card.priority === priorityFilter)) ?? [],
-    [board?.cards, priorityFilter],
+    () =>
+      board?.cards.filter((card) => {
+        if (priorityFilter !== 'all' && card.priority !== priorityFilter) return false;
+        if (searchQuery.trim()) {
+          const q = searchQuery.trim().toLowerCase();
+          return (
+            card.title.toLowerCase().includes(q) ||
+            card.description.toLowerCase().includes(q)
+          );
+        }
+        return true;
+      }) ?? [],
+    [board?.cards, priorityFilter, searchQuery],
   );
 
   if (isLoading && !board) {
@@ -276,11 +333,35 @@ export function KanbanBoard({ workspace, fileTree = [], onSendCardToAi }: Kanban
       <div className="flex h-14 shrink-0 items-center justify-between border-b px-4">
         <div className="flex items-center gap-2 font-semibold">
           <LayoutDashboard className="h-5 w-5 text-primary" />
-          <span>{board.name}</span>
+          <span>{workspace}</span>
         </div>
 
         <div className="flex items-center gap-4">
           {errorMessage ? <div className="text-xs text-destructive">{errorMessage}</div> : null}
+          <div
+            className={cn(
+              "flex h-8 items-center gap-1.5 rounded-lg border-2 border-dashed px-3 text-xs transition-colors",
+              isTrashDragOver
+                ? "border-destructive/60 bg-destructive/10 text-destructive"
+                : "border-muted-foreground/20 text-muted-foreground/40 hover:border-muted-foreground/40 hover:text-muted-foreground/60",
+            )}
+            onDragOver={handleTrashDragOver}
+            onDragLeave={handleTrashDragLeave}
+            onDrop={handleTrashDrop}
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            <span>回收站</span>
+          </div>
+          <div className="relative">
+            <Search className="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="搜索卡片..."
+              className="h-8 w-44 rounded-lg border border-input bg-background pl-7 pr-3 text-xs outline-none transition-colors placeholder:text-muted-foreground focus:border-primary"
+            />
+          </div>
           <div className="flex items-center gap-2">
             <Filter className="h-4 w-4 text-muted-foreground" />
             <Select
@@ -339,6 +420,7 @@ export function KanbanBoard({ workspace, fileTree = [], onSendCardToAi }: Kanban
         fileTree={fileTree}
         onClose={() => setIsDrawerOpen(false)}
         onSave={(card) => void handleSaveCard(card)}
+        onDelete={(cardId) => void handleDeleteCard(cardId)}
         onSendToAi={(card) => {
           setIsDrawerOpen(false);
           onSendCardToAi?.(card);
