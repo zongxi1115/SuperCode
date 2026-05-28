@@ -503,6 +503,7 @@ export default function App() {
   const refreshTerminalState = useCallback(
     async (options?: {
       targetSessionId?: string;
+      includeOutput?: boolean;
       includeFileTree?: boolean;
       includeProcesses?: boolean;
       silent?: boolean;
@@ -517,6 +518,7 @@ export default function App() {
 
       try {
         const query = new URLSearchParams();
+        query.set('include_output', options?.includeOutput ? 'true' : 'false');
         if (options?.includeFileTree) {
           query.set('include_file_tree', 'true');
         }
@@ -869,6 +871,8 @@ export default function App() {
   useEffect(() => {
     if (!sessionId || !hasTerminalBeenOpened || !isTerminalOpen) return;
 
+    const shouldKeepPolling = isLoading || managedProcesses.length > 0;
+
     const pollTerminalState = () =>
       refreshTerminalState({
         targetSessionId: sessionId,
@@ -877,9 +881,12 @@ export default function App() {
       });
 
     void pollTerminalState();
-    const intervalId = setInterval(pollTerminalState, 1000);
+    if (!shouldKeepPolling) {
+      return;
+    }
+    const intervalId = setInterval(pollTerminalState, 2500);
     return () => clearInterval(intervalId);
-  }, [hasTerminalBeenOpened, isTerminalOpen, refreshTerminalState, sessionId]);
+  }, [hasTerminalBeenOpened, isLoading, isTerminalOpen, managedProcesses.length, refreshTerminalState, sessionId]);
 
   const createSession = async () => {
     const workspace = customWorkspace.trim() || selectedWorkspace;
@@ -1779,9 +1786,7 @@ export default function App() {
               appendCodeChanges([payload]);
             }
           } else if (data.type === 'data-terminal-output') {
-            if (typeof data.data?.output === 'string' && isVisibleStreamSession()) {
-              refreshFileTreeAfterTerminalActivity(streamSessionId);
-            }
+            // Terminal text is already streamed through the dedicated terminal socket.
           } else if (data.type === 'data-preview-url') {
             if (typeof data.data?.url === 'string' && isVisibleStreamSession()) {
               setWebPreviewUrl(data.data.url);

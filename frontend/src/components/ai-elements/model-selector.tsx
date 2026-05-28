@@ -108,6 +108,28 @@ export const ModelSelectorSeparator = (props: ModelSelectorSeparatorProps) => (
   <CommandSeparator {...props} />
 );
 
+export function inferProviderFromModelName(modelName: string): string {
+  const lower = modelName.toLowerCase();
+  if (lower.includes("claude") || lower.includes("anthropic")) return "anthropic";
+  if (lower.includes("gpt") || lower.includes("o1") || lower.includes("o3") || lower.includes("o4") || lower.includes("chatgpt")) return "openai";
+  if (lower.includes("deepseek")) return "deepseek";
+  if (lower.includes("gemini") || lower.includes("gemma")) return "google";
+  if (lower.includes("qwen") || lower.includes("dashscope") || lower.includes("alibaba")) return "alibaba-cn";
+  if (lower.includes("llama")) return "llama";
+  if (lower.includes("mistral") || lower.includes("codestral") || lower.includes("pixtral")) return "mistral";
+  if (lower.includes("grok") || lower.includes("xai")) return "xai";
+  if (lower.includes("groq")) return "groq";
+  if (lower.includes("perplexity") || lower.includes("sonar")) return "perplexity";
+  if (lower.includes("cerebras")) return "cerebras";
+  if (lower.includes("together")) return "togetherai";
+  if (lower.includes("fireworks")) return "fireworks-ai";
+  if (lower.includes("moonshot") || lower.includes("kimi")) return "moonshotai";
+  if (lower.includes("zhipu") || lower.includes("glm")) return "zhipuai";
+  if (lower.includes("nvidia")) return "nvidia";
+  if (lower.includes("huggingface")) return "huggingface";
+  return "";
+}
+
 export type ModelSelectorLogoProps = Omit<
   ComponentProps<"img">,
   "src" | "alt"
@@ -171,22 +193,29 @@ export type ModelSelectorLogoProps = Omit<
     | "cerebras"
     // oxlint-disable-next-line typescript-eslint(ban-types) -- intentional pattern for autocomplete-friendly string union
     | (string & {});
+  model?: string;
 };
 
 export const ModelSelectorLogo = ({
   provider,
+  model,
   className,
   ...props
-}: ModelSelectorLogoProps) => (
-  <img
-    {...props}
-    alt={`${provider} logo`}
-    className={cn("size-3 dark:invert", className)}
-    height={12}
-    src={`https://models.dev/logos/${provider}.svg`}
-    width={12}
-  />
-);
+}: ModelSelectorLogoProps) => {
+  const effectiveProvider = (provider === "openrouter" && model)
+    ? inferProviderFromModelName(model) || provider
+    : provider;
+  return (
+    <img
+      {...props}
+      alt={`${effectiveProvider} logo`}
+      className={cn("size-3 dark:invert", className)}
+      height={12}
+      src={`https://models.dev/logos/${effectiveProvider}.svg`}
+      width={12}
+    />
+  );
+};
 
 export type ModelSelectorLogoGroupProps = ComponentProps<"div">;
 

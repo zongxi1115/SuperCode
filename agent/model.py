@@ -22,6 +22,7 @@ class ModelStep:
     tool_arguments: dict[str, Any] = field(default_factory=dict)
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     final_answer: str | None = None
+    provider_response_items: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
     def call_tool(

@@ -73,6 +73,7 @@ def _normalize_provider_payload(raw: dict[str, Any]) -> dict[str, Any]:
         "apiKey": str(raw.get("apiKey", "")).strip(),
         "models": normalize_model_names(raw.get("models")),
         "provider": str(raw.get("provider", "")).strip() or infer_provider_from_url(base_url),
+        "apiMode": normalize_api_mode(raw.get("apiMode")),
     }
 
 
@@ -104,42 +105,8 @@ def save_ui_model_providers(root: Path, providers: list[dict[str, Any]]) -> list
 
 
 def scan_env_model_sources(root: Path) -> list[dict[str, Any]]:
-    results: list[dict[str, Any]] = []
-
-    for env_path in sorted(root.glob(".env*")):
-        if not env_path.is_file():
-            continue
-        try:
-            text = env_path.read_text(encoding="utf-8")
-        except OSError:
-            continue
-
-        model_match = re.search(r"^SC_AGENT_MODEL\s*=\s*(.+)$", text, re.MULTILINE)
-        base_url_match = re.search(r"^SC_AGENT_BASE_URL\s*=\s*(.+)$", text, re.MULTILINE)
-        if not model_match:
-            continue
-
-        model_name = model_match.group(1).strip().strip("'\"")
-        if not model_name:
-            continue
-
-        base_url = base_url_match.group(1).strip().strip("'\"") if base_url_match else ""
-        config_ref = f"env::{env_path.name}"
-        results.append(
-            {
-                "id": config_ref,
-                "name": model_name,
-                "model": model_name,
-                "provider": infer_provider_from_url(base_url),
-                "envFile": config_ref,
-                "label": f"{model_name}" if env_path.name == ".env" else f"{model_name} ({env_path.name})",
-                "sourceType": "env",
-                "sourceLabel": env_path.name,
-                "readOnly": True,
-            }
-        )
-
-    return results
+    # `.env` 不再参与模型发现，避免旧配置干扰 UI 供应商顺序与默认选择。
+    return []
 
 
 def build_ui_model_sources(root: Path) -> list[dict[str, Any]]:
@@ -153,6 +120,7 @@ def build_ui_model_sources(root: Path) -> list[dict[str, Any]]:
                     "name": model_name,
                     "model": model_name,
                     "provider": provider["provider"],
+                    "apiMode": provider["apiMode"],
                     "envFile": config_ref,
                     "label": f"{model_name} ({provider['name']})",
                     "sourceType": "ui",
@@ -165,6 +133,11 @@ def build_ui_model_sources(root: Path) -> list[dict[str, Any]]:
 
 def list_model_options(root: Path) -> list[dict[str, Any]]:
     return [*scan_env_model_sources(root), *build_ui_model_sources(root)]
+
+
+def get_default_model_option(root: Path) -> dict[str, Any] | None:
+    models = list_model_options(root)
+    return models[0] if models else None
 
 
 def resolve_model_option(
@@ -199,7 +172,10 @@ def resolve_model_option(
             raise ValueError("未找到对应的模型配置")
         return target
 
-    raise ValueError("必须提供 model。")
+    default_model = models[0] if models else None
+    if default_model is not None:
+        return default_model
+    raise ValueError("未配置可用模型，请先在设置里添加至少一个供应商模型。")
 
 
 def build_agent_config(root: Path, model_ref: str | None = None) -> tuple[AgentLLMConfig, str]:
@@ -208,7 +184,10 @@ def build_agent_config(root: Path, model_ref: str | None = None) -> tuple[AgentL
         normalized_ref = f"env::{normalized_ref}"
 
     if normalized_ref is None:
-        return AgentLLMConfig.from_env(root / ".env"), "env::.env"
+        default_model = get_default_model_option(root)
+        if default_model is None:
+            raise ValueError("未配置可用模型，请先在设置里添加至少一个供应商模型。")
+        return build_agent_config(root, str(default_model["envFile"]))
 
     if normalized_ref.startswith("env::"):
         env_name = normalized_ref.split("::", 1)[1]
@@ -228,6 +207,7 @@ def build_agent_config(root: Path, model_ref: str | None = None) -> tuple[AgentL
                     "SC_AGENT_API_KEY": provider["apiKey"],
                     "SC_AGENT_BASE_URL": provider["baseUrl"],
                     "SC_AGENT_MODEL": model_name,
+                    "SC_AGENT_API_MODE": provider["apiMode"],
                 }
             ),
             normalized_ref,
@@ -280,3 +260,10 @@ def discover_provider_models(provider_payload: dict[str, Any]) -> list[str]:
     if not normalized:
         raise ValueError("接口返回为空，未发现可用模型")
     return normalized
+
+
+def normalize_api_mode(value: object) -> str:
+    normalized = str(value or "").strip().lower().replace("-", "_")
+    if normalized in {"responses", "response"}:
+        return "responses"
+    return "chat_completions"

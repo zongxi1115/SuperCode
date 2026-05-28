@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 import fnmatch
 import json
 import re
@@ -18,12 +19,16 @@ from urllib.request import Request, urlopen
 
 from agent.core import Agent
 from agent.llm_client import OpenAICompatibleClient
+from agent.rolling_text_buffer import RollingTextBuffer
 from agent.schema import AgentResponse, AgentState, StepRecord, ToolCall
 from agent.tools import BaseTool, ToolContext
 from coding_agent.model import CodeExplorationPromptModel
 
 INTERACTIVE_INPUT_PROMPT_IDLE_SECONDS = 0.2
 INTERACTIVE_POLL_SECONDS = 0.05
+INTERACTIVE_COMMAND_MAX_OUTPUT_CHARS = 300_000
+INTERACTIVE_STREAM_READ_CHUNK_SIZE = 4096
+INTERACTIVE_PROMPT_TAIL_CHARS = 4096
 DEFAULT_IGNORED_DIR_NAMES = {
     ".git",
     ".next",
@@ -371,8 +376,10 @@ class InteractiveCommand:
     terminal_id: str
     command: str
     process: subprocess.Popen[str]
-    output: str = ""
-    reported_length: int = 0
+    output_buffer: RollingTextBuffer = field(
+        default_factory=lambda: RollingTextBuffer(INTERACTIVE_COMMAND_MAX_OUTPUT_CHARS)
+    )
+    reported_offset: int = 0
     last_output_at: float = field(default_factory=time.monotonic)
     lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     stdout_thread: threading.Thread | None = field(default=None, init=False, repr=False)
@@ -396,8 +403,25 @@ class InteractiveCommand:
         if stream is None:
             return
         try:
+            buffered_stream = getattr(stream, "buffer", None)
+            if buffered_stream is not None and hasattr(buffered_stream, "read1"):
+                decoder = codecs.getincrementaldecoder(
+                    getattr(stream, "encoding", "utf-8")
+                )(getattr(stream, "errors", "replace"))
+                while True:
+                    chunk = buffered_stream.read1(INTERACTIVE_STREAM_READ_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    text = decoder.decode(chunk)
+                    if text:
+                        self.append_output(text)
+                tail = decoder.decode(b"", final=True)
+                if tail:
+                    self.append_output(tail)
+                return
+
             while True:
-                chunk = stream.read(1)
+                chunk = stream.read(INTERACTIVE_STREAM_READ_CHUNK_SIZE)
                 if chunk == "":
                     break
                 self.append_output(chunk)
@@ -406,7 +430,7 @@ class InteractiveCommand:
 
     def append_output(self, text: str) -> None:
         with self.lock:
-            self.output += text
+            self.output_buffer.append(text)
             self.last_output_at = time.monotonic()
 
     def mark_activity(self) -> None:
@@ -415,17 +439,23 @@ class InteractiveCommand:
 
     def snapshot_output(self) -> str:
         with self.lock:
-            return self.output
+            return self.output_buffer.get_text()
 
-    def snapshot_progress(self) -> tuple[str, int]:
+    def snapshot_progress(self) -> tuple[str, int, int]:
         with self.lock:
-            return self.output, self.reported_length
+            return (
+                self.output_buffer.get_text(),
+                self.reported_offset,
+                self.output_buffer.end_offset,
+            )
 
     def consume_delta(self) -> tuple[str, str]:
         with self.lock:
-            full_output = self.output
-            delta = full_output[self.reported_length :]
-            self.reported_length = len(full_output)
+            full_output = self.output_buffer.get_text()
+            start_offset = self.output_buffer.start_offset
+            effective_reported_offset = max(self.reported_offset, start_offset)
+            delta = full_output[effective_reported_offset - start_offset :]
+            self.reported_offset = self.output_buffer.end_offset
         return delta, full_output
 
     def idle_for(self) -> float:
@@ -694,7 +724,7 @@ class InteractiveCommandSession:
         return_on_existing_prompt: bool = False,
     ) -> dict[str, object]:
         deadline = time.monotonic() + timeout
-        _, start_reported_length = active_command.snapshot_progress()
+        _, start_reported_offset, _ = active_command.snapshot_progress()
 
         while True:
             if not active_command.is_alive():
@@ -715,8 +745,8 @@ class InteractiveCommandSession:
                 active_command.close_streams()
                 return result
 
-            full_output, _ = active_command.snapshot_progress()
-            saw_new_output = len(full_output) > start_reported_length
+            full_output, _, current_end_offset = active_command.snapshot_progress()
+            saw_new_output = current_end_offset > start_reported_offset
             prompt_text = self._extract_prompt_text(full_output)
             if prompt_text is not None and (
                 saw_new_output or return_on_existing_prompt
@@ -942,7 +972,12 @@ class InteractiveCommandSession:
         }
 
     def _extract_prompt_text(self, full_output: str) -> str | None:
-        lines = [line.strip() for line in full_output.splitlines() if line.strip()]
+        tail_output = (
+            full_output[-INTERACTIVE_PROMPT_TAIL_CHARS:]
+            if len(full_output) > INTERACTIVE_PROMPT_TAIL_CHARS
+            else full_output
+        )
+        lines = [line.strip() for line in tail_output.splitlines() if line.strip()]
         if not lines:
             return None
 

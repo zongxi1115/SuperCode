@@ -144,7 +144,29 @@ Once booted, navigate to `http://localhost:8888`.
 - Chat with the code assistant. Type `@` in the text area to trigger the dropdown for active markdown skills.
 - Observe model thought logs, terminal standard outputs, and file diff replacements live.
 
-### 2. Lightweight CLI Mode
+### 2. Auto-inject Element Selection Bridge for Vite Dev Apps
+For localhost Vite apps opened in the built-in browser preview, add the SuperCode bridge plugin to the target app once. The target dev server will inject the element-selection bridge into `index.html` automatically, so cross-origin element selection does not need to navigate the iframe through a proxy.
+
+```ts
+// vite.config.ts in the target app
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+import superCodeSelectBridge from '../SuperCode/scripts/supercode-vite-select-bridge-plugin.mjs';
+
+export default defineConfig({
+  plugins: [react(), superCodeSelectBridge()],
+});
+```
+
+If the SuperCode backend is not running on `http://localhost:3001`, pass a custom bridge URL:
+
+```ts
+superCodeSelectBridge({
+  bridgeUrl: 'http://localhost:3001/api/preview/select-bridge.js',
+});
+```
+
+### 3. Lightweight CLI Mode
 If you prefer running the agent inside your command terminal:
 ```powershell
 conda activate base

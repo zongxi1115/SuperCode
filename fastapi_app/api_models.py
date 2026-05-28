@@ -168,6 +168,7 @@ class UIModelProviderPayload(BaseModel):
     apiKey: str
     models: list[str] = Field(default_factory=list)
     provider: str | None = None
+    apiMode: Literal["chat_completions", "responses"] | None = None
 
 
 class ModelConfigPayload(BaseModel):

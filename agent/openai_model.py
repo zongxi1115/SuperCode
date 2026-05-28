@@ -708,11 +708,23 @@ class OpenAICompatibleModel(ModelAdapter):
                         ),
                     }
                 )
-            return ModelStep.call_tools(thought=completion.reasoning_text, tool_calls=normalized_calls)
+            return ModelStep(
+                action="tool",
+                thought=completion.reasoning_text,
+                tool_name=str(normalized_calls[0].get("tool_name", "")).strip() or None,
+                tool_arguments=normalized_calls[0].get("tool_arguments", {}) or {},
+                tool_calls=normalized_calls,
+                provider_response_items=completion.response_items,
+            )
 
         final_text = completion.text.strip()
         if final_text:
-            return ModelStep.finish(thought=completion.reasoning_text, final_answer=final_text)
+            return ModelStep(
+                action="final",
+                thought=completion.reasoning_text,
+                final_answer=final_text,
+                provider_response_items=completion.response_items,
+            )
 
         raise ValueError("模型接口既没有返回 tool_calls，也没有返回可用文本内容。")
 

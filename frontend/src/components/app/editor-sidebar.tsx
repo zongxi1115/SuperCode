@@ -443,7 +443,7 @@ export function EditorSidebar({
       if (!bridgeUnavailableNoticeShownRef.current) {
         pushConsoleLog(
           'warn',
-          '需要在目标 dev 页面引入 <script src="http://localhost:3001/api/preview/select-bridge.js" defer></script> 后才能跨域选择元素。'
+          '需要在目标 Vite dev 项目接入 scripts/supercode-vite-select-bridge-plugin.mjs，或手动引入 select-bridge.js 后才能跨域选择元素。'
         );
         bridgeUnavailableNoticeShownRef.current = true;
       }

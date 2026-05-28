@@ -10,9 +10,6 @@ from .tooling import ToolExecutor, ToolRegistry
 from .tools import BaseTool, ToolContext
 
 
-DEFAULT_MAX_STEPS = 40
-
-
 class Agent:
     """Main public agent facade.
 
@@ -32,7 +29,7 @@ class Agent:
     ) -> None:
         self.model = model
         self.workspace = Path(workspace).resolve()
-        self.max_steps = max(1, max_steps or DEFAULT_MAX_STEPS)
+        self.max_steps = max(1, max_steps) if max_steps is not None else None
         self.tool_context_metadata = tool_context_metadata or {}
         self.tool_registry = ToolRegistry(tools or [])
         self.tool_executor = ToolExecutor(self.tool_registry)
@@ -110,5 +107,4 @@ class Agent:
     def _is_cancelled(self, context: ToolContext) -> bool:
         return self.tool_executor.is_cancelled(context)
 
-
-__all__ = ["Agent", "DEFAULT_MAX_STEPS"]
+__all__ = ["Agent"]

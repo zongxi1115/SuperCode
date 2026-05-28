@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 
 @dataclass(slots=True)
@@ -16,6 +17,7 @@ class AgentLLMConfig:
     api_key: str
     base_url: str
     model: str
+    api_mode: Literal["chat_completions", "responses"] = "chat_completions"
     reasoning_effort: str | None = None
     timeout: int = 60
     max_retries: int = 2
@@ -35,6 +37,9 @@ class AgentLLMConfig:
         api_key = env_values.get("SC_AGENT_API_KEY", os.getenv("SC_AGENT_API_KEY", "")).strip()
         base_url = env_values.get("SC_AGENT_BASE_URL", os.getenv("SC_AGENT_BASE_URL", "")).strip()
         model = env_values.get("SC_AGENT_MODEL", os.getenv("SC_AGENT_MODEL", "")).strip()
+        api_mode = _normalize_api_mode(
+            env_values.get("SC_AGENT_API_MODE", os.getenv("SC_AGENT_API_MODE", "")).strip()
+        )
         reasoning_effort = env_values.get(
             "SC_AGENT_REASONING_EFFORT",
             os.getenv("SC_AGENT_REASONING_EFFORT", ""),
@@ -74,6 +79,7 @@ class AgentLLMConfig:
             api_key=api_key,
             base_url=base_url.rstrip("/"),
             model=model,
+            api_mode=api_mode,
             reasoning_effort=reasoning_effort or None,
             timeout=timeout,
             max_retries=max(0, max_retries),
@@ -136,3 +142,10 @@ def _strip_env_value(value: str) -> str:
 
 def _parse_bool(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _normalize_api_mode(value: str) -> Literal["chat_completions", "responses"]:
+    normalized = value.strip().lower().replace("-", "_")
+    if normalized in {"responses", "response"}:
+        return "responses"
+    return "chat_completions"

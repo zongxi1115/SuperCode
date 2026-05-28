@@ -364,6 +364,7 @@ export type UIModelProvider = {
   apiKey: string;
   models: string[];
   provider?: string | null;
+  apiMode?: 'chat_completions' | 'responses' | null;
 };
 
 export type ModelConfigPayload = {

@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import codecs
 import re
 import subprocess
 import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from agent.rolling_text_buffer import RollingTextBuffer
 from fastapi_app.api_models import TerminalSnapshotResponse
 
 MAX_TERMINAL_OUTPUT_CHARS = 300_000
+TERMINAL_CWD_TAIL_CHARS = 4096
+PIPE_READ_CHUNK_SIZE = 4096
 
 
 TERMINAL_INTERRUPT_KEYS = {
@@ -60,7 +64,6 @@ def _normalize_terminal_key(value: object) -> str:
 class TerminalRuntimeBase:
     workspace: str
     shell: str = "powershell"
-    output: str = ""
     revision: int = 0
     backend: str = field(default="subprocess", init=False)
     current_directory: str = field(default="", init=False)
@@ -75,6 +78,12 @@ class TerminalRuntimeBase:
         init=False,
         repr=False,
     )
+    output_buffer: RollingTextBuffer = field(
+        default_factory=lambda: RollingTextBuffer(MAX_TERMINAL_OUTPUT_CHARS),
+        init=False,
+        repr=False,
+    )
+    recent_output_tail: str = field(default="", init=False, repr=False)
     stdout_thread: threading.Thread | None = field(default=None, init=False, repr=False)
     stderr_thread: threading.Thread | None = field(default=None, init=False, repr=False)
     prompt_pattern: re.Pattern[str] = field(
@@ -185,9 +194,28 @@ class TerminalRuntimeBase:
             self.append_output("\n[terminal reader stopped unexpectedly]\n")
 
     def _pump_pipe_stream(self, stream: Any) -> None:
+        if stream is None:
+            return
         try:
+            buffered_stream = getattr(stream, "buffer", None)
+            if buffered_stream is not None and hasattr(buffered_stream, "read1"):
+                decoder = codecs.getincrementaldecoder(
+                    getattr(stream, "encoding", "utf-8")
+                )(getattr(stream, "errors", "replace"))
+                while True:
+                    chunk = buffered_stream.read1(PIPE_READ_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    text = decoder.decode(chunk)
+                    if text:
+                        self.append_output(text)
+                tail = decoder.decode(b"", final=True)
+                if tail:
+                    self.append_output(tail)
+                return
+
             while True:
-                chunk = stream.readline()
+                chunk = stream.read(PIPE_READ_CHUNK_SIZE)
                 if chunk == "":
                     break
                 self.append_output(chunk)
@@ -198,11 +226,11 @@ class TerminalRuntimeBase:
         if text == "":
             return
         with self.lock:
-            next_output = self.output + text
-            if len(next_output) > MAX_TERMINAL_OUTPUT_CHARS:
-                next_output = next_output[-MAX_TERMINAL_OUTPUT_CHARS:]
-            self.output = next_output
-            inferred_cwd = self._infer_current_directory(self.output[-4096:])
+            self.output_buffer.append(text)
+            self.recent_output_tail = (
+                f"{self.recent_output_tail}{text}"
+            )[-TERMINAL_CWD_TAIL_CHARS:]
+            inferred_cwd = self._infer_current_directory(self.recent_output_tail)
             if inferred_cwd:
                 self.current_directory = inferred_cwd
             self.revision += 1
@@ -303,11 +331,23 @@ class TerminalRuntimeBase:
                 return False
         return False
 
-    def snapshot(self, session_id: str) -> TerminalSnapshotResponse:
+    def snapshot(
+        self,
+        session_id: str,
+        *,
+        include_output: bool = True,
+        output_tail_chars: int | None = None,
+    ) -> TerminalSnapshotResponse:
         with self.lock:
+            if not include_output:
+                output = ""
+            elif output_tail_chars is not None:
+                output = self.output_buffer.tail(output_tail_chars)
+            else:
+                output = self.output_buffer.get_text()
             return TerminalSnapshotResponse(
                 sessionId=session_id,
-                output=self.output,
+                output=output,
                 revision=self.revision,
                 isAlive=self.is_alive(),
                 shell=self.shell,
@@ -325,7 +365,8 @@ class TerminalRuntimeBase:
 
     def clear(self) -> None:
         with self.lock:
-            self.output = ""
+            self.output_buffer.clear()
+            self.recent_output_tail = ""
             self.revision += 1
 
     def close(self) -> None:

@@ -60,6 +60,7 @@ class StepRecord:
     tool_calls: list[ToolCall] = field(default_factory=list)
     tool_results: list[ToolResult] = field(default_factory=list)
     final_answer: str | None = None
+    provider_response_items: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True)

@@ -453,37 +453,50 @@ class CodingPromptModel(OpenAICompatibleModel):
 
         messages: list[dict[str, object]] = []
         for step in current_turn_steps:
+            raw_response_items = [
+                json.loads(json.dumps(item, ensure_ascii=False))
+                for item in step.provider_response_items
+                if isinstance(item, dict)
+            ]
             tool_calls = step.tool_calls or ([step.tool_call] if step.tool_call is not None else [])
-            if not tool_calls:
+            if not tool_calls and not raw_response_items:
                 continue
 
-            assistant_tool_calls = []
-            for position, tool_call in enumerate(tool_calls, start=1):
-                if tool_call is None:
-                    continue
-                tool_call_id = tool_call.id or f"step-{step.index}-tool-{position}-{tool_call.name}"
-                assistant_tool_calls.append(
+            if raw_response_items:
+                messages.append(
                     {
-                        "id": tool_call_id,
-                        "type": "function",
-                        "function": {
-                            "name": tool_call.name,
-                            "arguments": json.dumps(tool_call.arguments, ensure_ascii=False),
-                        },
+                        "role": "assistant",
+                        "response_output_items": raw_response_items,
                     }
                 )
+            else:
+                assistant_tool_calls = []
+                for position, tool_call in enumerate(tool_calls, start=1):
+                    if tool_call is None:
+                        continue
+                    tool_call_id = tool_call.id or f"step-{step.index}-tool-{position}-{tool_call.name}"
+                    assistant_tool_calls.append(
+                        {
+                            "id": tool_call_id,
+                            "type": "function",
+                            "function": {
+                                "name": tool_call.name,
+                                "arguments": json.dumps(tool_call.arguments, ensure_ascii=False),
+                            },
+                        }
+                    )
 
-            if not assistant_tool_calls:
-                continue
+                if not assistant_tool_calls:
+                    continue
 
-            assistant_message: dict[str, object] = {
-                "role": "assistant",
-                "tool_calls": assistant_tool_calls,
-            }
-            reasoning_content = " ".join(step.thought.split()).strip()
-            if reasoning_content:
-                assistant_message["reasoning_content"] = reasoning_content
-            messages.append(assistant_message)
+                assistant_message: dict[str, object] = {
+                    "role": "assistant",
+                    "tool_calls": assistant_tool_calls,
+                }
+                reasoning_content = " ".join(step.thought.split()).strip()
+                if reasoning_content:
+                    assistant_message["reasoning_content"] = reasoning_content
+                messages.append(assistant_message)
 
             tool_results = step.tool_results or ([step.tool_result] if step.tool_result is not None else [])
             results_by_id = {

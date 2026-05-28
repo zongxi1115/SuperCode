@@ -34,6 +34,7 @@ class ModelConfigStoreTests(unittest.TestCase):
                     "baseUrl": "https://openrouter.ai/api/v1",
                     "apiKey": "router-key",
                     "models": ["openai/gpt-4.1-mini"],
+                    "apiMode": "chat_completions",
                 }
             ],
         )
@@ -42,6 +43,7 @@ class ModelConfigStoreTests(unittest.TestCase):
         all_models = list_model_options(root)
 
         self.assertEqual(env_sources[0]["envFile"], "env::.env")
+        self.assertEqual(env_sources[0]["apiMode"], "chat_completions")
         self.assertEqual(len(all_models), 2)
         self.assertTrue(any(item["id"] == "ui::provider-a::openai/gpt-4.1-mini" for item in all_models))
 
@@ -56,6 +58,7 @@ class ModelConfigStoreTests(unittest.TestCase):
                     "baseUrl": "https://openrouter.ai/api/v1",
                     "apiKey": "router-key",
                     "models": ["openai/gpt-4.1-mini"],
+                    "apiMode": "responses",
                 }
             ],
         )
@@ -65,6 +68,7 @@ class ModelConfigStoreTests(unittest.TestCase):
         self.assertIsInstance(config, AgentLLMConfig)
         self.assertEqual(config.model, "openai/gpt-4.1-mini")
         self.assertEqual(config.base_url, "https://openrouter.ai/api/v1")
+        self.assertEqual(config.api_mode, "responses")
         self.assertEqual(model_ref, "ui::provider-a::openai/gpt-4.1-mini")
 
     def test_resolve_model_reference_id_prefers_env_file_for_duplicate_names(self) -> None:
@@ -89,6 +93,7 @@ class ModelConfigStoreTests(unittest.TestCase):
                     "baseUrl": "https://lzhan.example/v1",
                     "apiKey": "lzhan-key",
                     "models": ["deepseek-v4-pro"],
+                    "apiMode": "chat_completions",
                 }
             ],
         )

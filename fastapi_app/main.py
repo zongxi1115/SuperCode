@@ -523,13 +523,18 @@ class UISession:
 
     def terminal_snapshot(
         self,
+        include_output: bool = False,
         include_file_tree: bool = False,
         include_processes: bool = False,
     ) -> TerminalSnapshotResponse:
         if self.terminal_runtime is None:
             raise RuntimeError("terminal 不存在")
-        snapshot = self.terminal_runtime.snapshot(self.session_id)
-        self.terminal_output = snapshot.output
+        snapshot = self.terminal_runtime.snapshot(
+            self.session_id,
+            include_output=include_output,
+        )
+        if include_output:
+            self.terminal_output = snapshot.output
         return TerminalSnapshotResponse(
             sessionId=snapshot.sessionId,
             output=snapshot.output,
@@ -692,6 +697,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+TERMINAL_WS_INITIAL_REPLAY_MAX_CHARS = 64_000
+TERMINAL_WS_OUTPUT_CHUNK_CHARS = 8_192
 
 
 @app.get("/scalar", include_in_schema=False)
@@ -3562,6 +3570,7 @@ async def restore_session_endpoint(
 @app.get("/api/sessions/{session_id}/terminal")
 async def get_session_terminal(
     session_id: str,
+    include_output: bool = Query(False),
     include_file_tree: bool = Query(False),
     include_processes: bool = Query(False),
 ) -> JSONResponse:
@@ -3569,6 +3578,7 @@ async def get_session_terminal(
     if session.terminal_runtime is None:
         raise HTTPException(status_code=404, detail="terminal 不存在")
     snapshot = session.terminal_snapshot(
+        include_output=include_output,
         include_file_tree=include_file_tree,
         include_processes=include_processes,
     )
@@ -3653,8 +3663,10 @@ async def session_terminal_websocket(
             await websocket.send_json(message)
 
     async def send_terminal_status() -> None:
-        snapshot = session.terminal_runtime.snapshot(session_id)
-        session.terminal_output = snapshot.output
+        snapshot = session.terminal_runtime.snapshot(
+            session_id,
+            include_output=False,
+        )
         await send_terminal_message(
             {
                 "type": "status",
@@ -3666,10 +3678,26 @@ async def session_terminal_websocket(
         )
 
     async def send_runtime_output() -> None:
-        snapshot = session.terminal_runtime.snapshot(session_id)
-        if snapshot.output:
-            await send_terminal_message({"type": "output", "data": snapshot.output})
+        snapshot = session.terminal_runtime.snapshot(
+            session_id,
+            include_output=True,
+            output_tail_chars=TERMINAL_WS_INITIAL_REPLAY_MAX_CHARS,
+        )
         await send_terminal_status()
+        if snapshot.output:
+            for start in range(0, len(snapshot.output), TERMINAL_WS_OUTPUT_CHUNK_CHARS):
+                await send_terminal_message(
+                    {
+                        "type": "output",
+                        "data": snapshot.output[
+                            start : start + TERMINAL_WS_OUTPUT_CHUNK_CHARS
+                        ],
+                    }
+                )
+        session.terminal_output = session.terminal_runtime.snapshot(
+            session_id,
+            include_output=True,
+        ).output
 
         while True:
             chunk = await output_queue.get()

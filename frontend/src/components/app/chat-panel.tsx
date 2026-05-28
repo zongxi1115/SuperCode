@@ -4603,6 +4603,7 @@ export function ChatPanel({
                       >
                         <ModelSelectorLogo
                           provider={selectedModel?.provider ?? "openrouter"}
+                          model={selectedModel?.name}
                         />
                         <ModelSelectorName>
                           {selectedModel?.label ??
@@ -4625,7 +4626,7 @@ export function ChatPanel({
                               }}
                               className="gap-2"
                             >
-                              <ModelSelectorLogo provider={m.provider} />
+                              <ModelSelectorLogo provider={m.provider} model={m.name} />
                               <ModelSelectorName>
                                 {m.label ?? m.name}
                               </ModelSelectorName>

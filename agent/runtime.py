@@ -21,7 +21,7 @@ class AgentRuntime:
         tool_registry: ToolRegistry,
         tool_executor: ToolExecutor,
         workspace: Path,
-        max_steps: int,
+        max_steps: int | None,
         tool_context_metadata: dict[str, object],
     ) -> None:
         self.model = model
@@ -56,7 +56,7 @@ class AgentRuntime:
             turn_index,
             continue_existing_turn=continue_existing_turn,
         )
-        while index <= self.max_steps:
+        while self.max_steps is None or index <= self.max_steps:
             if self._is_cancelled(context):
                 return self._build_cancelled_response(
                     state=state,
@@ -95,6 +95,7 @@ class AgentRuntime:
                     index=index,
                     thought=step.thought,
                     final_answer=step.final_answer,
+                    provider_response_items=step.provider_response_items,
                 )
                 steps.append(step_record)
                 history_steps.append(step_record)
@@ -142,6 +143,7 @@ class AgentRuntime:
                 tool_result=tool_results[0] if len(tool_results) == 1 else None,
                 tool_calls=tool_calls,
                 tool_results=tool_results,
+                provider_response_items=step.provider_response_items,
             )
             steps.append(step_record)
             history_steps.append(step_record)

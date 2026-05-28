@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -11,6 +11,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Separator } from '@/components/ui/separator';
 import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -69,6 +70,7 @@ function toEditableProvider(provider?: UIModelProvider): EditableProvider {
     apiKey: provider?.apiKey ?? '',
     models: provider?.models ?? [],
     provider: provider?.provider ?? null,
+    apiMode: provider?.apiMode ?? 'chat_completions',
     modelsText: (provider?.models ?? []).join('\n'),
   };
 }
@@ -95,12 +97,7 @@ export function SettingsDialog({
   const [error, setError] = useState<string | null>(null);
   const [visibleKeys, setVisibleKeys] = useState<Set<string>>(new Set());
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
-  const providersScrollRef = useRef<HTMLDivElement>(null);
-
-  const availableCount = useMemo(
-    () => draftProviders.reduce((acc, p) => acc + p.models.length, 0),
-    [draftProviders],
-  );
+  const [selectedProviderIndex, setSelectedProviderIndex] = useState(0);
 
   const toggleKeyVisibility = (key: string) => {
     setVisibleKeys((prev) => {
@@ -125,20 +122,23 @@ export function SettingsDialog({
   };
 
   const handleAddProvider = useCallback(() => {
-    setDraftProviders((prev) => [...prev, toEditableProvider()]);
-    setActiveTab('providers');
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        providersScrollRef.current?.scrollTo({
-          top: providersScrollRef.current.scrollHeight,
-          behavior: 'smooth',
-        });
-      });
+    setDraftProviders((prev) => {
+      const next = [...prev, toEditableProvider()];
+      setSelectedProviderIndex(next.length - 1);
+      return next;
     });
+    setActiveTab('providers');
   }, []);
 
   const handleDeleteProvider = (index: number) => {
     setDraftProviders((prev) => prev.filter((_, i) => i !== index));
+    setSelectedProviderIndex((prev) => {
+      const nextCount = draftProviders.length - 1;
+      if (nextCount === 0) return 0;
+      if (prev >= nextCount) return nextCount - 1;
+      if (prev > index) return prev - 1;
+      return prev;
+    });
     setDeleteConfirmId(null);
   };
 
@@ -154,6 +154,7 @@ export function SettingsDialog({
         apiKey: provider.apiKey,
         models: provider.models,
         provider: provider.provider ?? null,
+        apiMode: provider.apiMode ?? 'chat_completions',
       });
       updateProvider(index, { models, modelsText: models.join('\n') });
       setFeedback(`已拉取 ${models.length} 个模型`);
@@ -177,6 +178,7 @@ export function SettingsDialog({
           apiKey: p.apiKey.trim(),
           models: normalizeModels(p.modelsText),
           provider: p.provider ?? null,
+          apiMode: p.apiMode ?? 'chat_completions',
         })),
       );
       await onSaveSettings(draftSettings);
@@ -194,7 +196,7 @@ export function SettingsDialog({
         showCloseButton={false}
         className="flex max-h-[90vh] flex-col gap-0 overflow-hidden p-0 sm:max-w-[720px]"
       >
-        <DialogHeader className="shrink-0 px-6 pt-6 pb-4">
+          <DialogHeader className="shrink-0 px-6 pt-6 pb-4">
           <div className="flex items-center gap-3">
             <div className="flex size-9 items-center justify-center rounded-lg bg-primary/10">
               <Settings2 className="size-4.5 text-primary" />
@@ -204,10 +206,6 @@ export function SettingsDialog({
               <DialogDescription className="mt-0.5 text-sm">
                 管理供应商、模型来源与安全选项
               </DialogDescription>
-            </div>
-            <div className="shrink-0 text-right">
-              <div className="text-2xl font-semibold tabular-nums">{availableCount}</div>
-              <div className="text-xs text-muted-foreground">可用模型</div>
             </div>
           </div>
         </DialogHeader>
@@ -236,148 +234,195 @@ export function SettingsDialog({
             </TabsList>
           </div>
 
-          <TabsContent ref={providersScrollRef} value="providers" className="mt-0 min-h-0 flex-1 overflow-y-auto px-6 py-4">
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <p className="text-sm text-muted-foreground">
-                  按 OpenAI 兼容接口处理，支持手填或从 /models 拉取
-                </p>
-                <Button variant="outline" size="sm" className="gap-1.5" onClick={handleAddProvider}>
-                  <Plus className="size-3.5" />
-                  添加供应商
-                </Button>
-              </div>
-
-              {draftProviders.map((provider, index) => {
-                const key = provider.id ?? `draft-${index}`;
-                const isRefreshing = refreshingId === key;
-                const isKeyVisible = visibleKeys.has(key);
-                const isConfirmingDelete = deleteConfirmId === key;
-
-                return (
-                  <div key={key} className="group rounded-lg border bg-card">
-                    <div className="flex items-center justify-between px-3 py-2">
-                      <div className="flex items-center gap-2">
-                        <Globe className="size-3.5 text-muted-foreground" />
-                        <span className="text-xs font-medium">
-                          {provider.name || `供应商 ${index + 1}`}
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-1.5">
-                        <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
+          <TabsContent value="providers" className="mt-0 min-h-0 flex-1 overflow-hidden px-6 py-4">
+            <div className="flex h-full gap-0 -mx-6 px-6">
+              <div className="flex w-36 shrink-0 flex-col border-r pr-0">
+                <div className="flex items-center justify-between pb-2">
+                  <span className="text-xs font-medium text-muted-foreground">供应商列表</span>
+                  <Button variant="ghost" size="icon-xs" className="size-5" onClick={handleAddProvider} title="添加供应商">
+                    <Plus className="size-3" />
+                  </Button>
+                </div>
+                <div className="flex-1 overflow-y-auto">
+                  {draftProviders.map((provider, index) => {
+                    const key = provider.id ?? `draft-${index}`;
+                    const isSelected = selectedProviderIndex === index;
+                    return (
+                      <button
+                        key={key}
+                        onClick={() => setSelectedProviderIndex(index)}
+                        className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors ${
+                          isSelected
+                            ? 'bg-primary/10 font-medium text-primary'
+                            : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+                        }`}
+                      >
+                        <Globe className="size-3 shrink-0" />
+                        <span className="truncate">{provider.name || `供应商 ${index + 1}`}</span>
+                        <Badge variant="secondary" className="ml-auto shrink-0 px-1 py-0 text-[10px]">
                           {provider.models.length}
                         </Badge>
-                        <Button
-                          variant="ghost"
-                          size="icon-xs"
-                          className="size-6 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100"
-                          onClick={() => void handleDiscoverModels(provider, index)}
-                          disabled={isRefreshing}
-                          title="拉取模型"
-                        >
-                          <RefreshCcw className={`size-3 ${isRefreshing ? 'animate-spin' : ''}`} />
-                        </Button>
-                        {isConfirmingDelete ? (
-                          <div className="flex items-center gap-1">
-                            <Button
-                              variant="destructive"
-                              size="sm"
-                              className="h-5 gap-1 px-1.5 text-[10px]"
-                              onClick={() => handleDeleteProvider(index)}
-                            >
-                              确认
-                            </Button>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="flex min-w-0 flex-1 flex-col overflow-y-auto pl-4">
+                {draftProviders.length === 0 ? (
+                  <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+                    暂无供应商，点击左侧 + 添加
+                  </div>
+                ) : (
+                  (() => {
+                    const index = Math.min(selectedProviderIndex, draftProviders.length - 1);
+                    const provider = draftProviders[index];
+                    const key = provider.id ?? `draft-${index}`;
+                    const isRefreshing = refreshingId === key;
+                    const isKeyVisible = visibleKeys.has(key);
+                    const isConfirmingDelete = deleteConfirmId === key;
+
+                    return (
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between">
+                          <p className="text-sm text-muted-foreground">
+                            <code className="text-[11px]">Base URL</code> 只填公共前缀，后端会按模式自动补路径
+                          </p>
+                          <div className="flex items-center gap-1.5">
                             <Button
                               variant="outline"
                               size="sm"
-                              className="h-5 gap-1 px-1.5 text-[10px]"
-                              onClick={() => setDeleteConfirmId(null)}
+                              className="gap-1.5 h-7 text-xs"
+                              onClick={() => void handleDiscoverModels(provider, index)}
+                              disabled={isRefreshing}
                             >
-                              取消
+                              <RefreshCcw className={`size-3 ${isRefreshing ? 'animate-spin' : ''}`} />
+                              拉取模型
+                            </Button>
+                            {isConfirmingDelete ? (
+                              <div className="flex items-center gap-1">
+                                <Button
+                                  variant="destructive"
+                                  size="sm"
+                                  className="h-7 gap-1 px-2 text-xs"
+                                  onClick={() => handleDeleteProvider(index)}
+                                >
+                                  确认
+                                </Button>
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  className="h-7 gap-1 px-2 text-xs"
+                                  onClick={() => setDeleteConfirmId(null)}
+                                >
+                                  取消
+                                </Button>
+                              </div>
+                            ) : (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-7 gap-1 text-xs text-muted-foreground"
+                                onClick={() => setDeleteConfirmId(key)}
+                              >
+                                <Trash2 className="size-3" />
+                                删除
+                              </Button>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-3">
+                          <div className="space-y-1">
+                            <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+                              <Server className="size-2.5" />
+                              名称
+                            </label>
+                            <Input
+                              value={provider.name}
+                              onChange={(e) => updateProvider(index, { name: e.target.value })}
+                              placeholder="OpenRouter 主账号"
+                              className="h-7 text-xs"
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+                              <Globe className="size-2.5" />
+                              Base URL
+                            </label>
+                            <Input
+                              value={provider.baseUrl}
+                              onChange={(e) => updateProvider(index, { baseUrl: e.target.value })}
+                              placeholder="https://api.openai.com/v1"
+                              className="h-7 text-xs"
+                            />
+                          </div>
+                        </div>
+
+                        <div className="space-y-1">
+                          <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+                            <Server className="size-2.5" />
+                            接口模式
+                          </label>
+                          <Select
+                            value={provider.apiMode ?? 'chat_completions'}
+                            onValueChange={(value) =>
+                              updateProvider(index, {
+                                apiMode: value as 'chat_completions' | 'responses',
+                              })
+                            }
+                          >
+                            <SelectTrigger className="h-7 w-full text-xs">
+                              <SelectValue placeholder="选择接口模式" />
+                            </SelectTrigger>
+                            <SelectContent align="start">
+                              <SelectItem value="chat_completions">OpenAI 兼容 /chat/completions</SelectItem>
+                              <SelectItem value="responses">OpenAI /responses</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+
+                        <div className="space-y-1">
+                          <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+                            <Key className="size-2.5" />
+                            API Key
+                          </label>
+                          <div className="relative">
+                            <Input
+                              type={isKeyVisible ? 'text' : 'password'}
+                              value={provider.apiKey}
+                              onChange={(e) => updateProvider(index, { apiKey: e.target.value })}
+                              placeholder="sk-..."
+                              className="h-7 pr-8 text-xs"
+                            />
+                            <Button
+                              variant="ghost"
+                              size="icon-xs"
+                              className="absolute top-1/2 right-1 -translate-y-1/2 size-5"
+                              onClick={() => toggleKeyVisibility(key)}
+                            >
+                              {isKeyVisible ? <EyeOff className="size-3" /> : <Eye className="size-3" />}
                             </Button>
                           </div>
-                        ) : (
-                          <Button
-                            variant="ghost"
-                            size="icon-xs"
-                            className="size-6 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100"
-                            onClick={() => setDeleteConfirmId(key)}
-                            title="删除此供应商"
-                          >
-                            <Trash2 className="size-3" />
-                          </Button>
-                        )}
-                      </div>
-                    </div>
+                        </div>
 
-                    <div className="space-y-2 px-3 pb-3">
-                      <div className="grid grid-cols-2 gap-2">
                         <div className="space-y-1">
-                          <label className="flex items-center gap-1 text-[10px] font-medium text-muted-foreground">
-                            <Server className="size-2.5" />
-                            名称
+                          <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+                            <List className="size-2.5" />
+                            模型
                           </label>
-                          <Input
-                            value={provider.name}
-                            onChange={(e) => updateProvider(index, { name: e.target.value })}
-                            placeholder="OpenRouter 主账号"
-                            className="h-7 text-xs"
-                          />
-                        </div>
-                        <div className="space-y-1">
-                          <label className="flex items-center gap-1 text-[10px] font-medium text-muted-foreground">
-                            <Globe className="size-2.5" />
-                            Base URL
-                          </label>
-                          <Input
-                            value={provider.baseUrl}
-                            onChange={(e) => updateProvider(index, { baseUrl: e.target.value })}
-                            placeholder="https://openrouter.ai/api/v1"
-                            className="h-7 text-xs"
+                          <Textarea
+                            value={provider.modelsText}
+                            onChange={(e) => updateProvider(index, { modelsText: e.target.value })}
+                            className="min-h-[56px] font-mono text-[11px] leading-snug"
+                            placeholder={'每行一个或逗号分隔\nopenai/gpt-4.1\nanthropic/claude-sonnet-4'}
                           />
                         </div>
                       </div>
-
-                      <div className="space-y-1">
-                        <label className="flex items-center gap-1 text-[10px] font-medium text-muted-foreground">
-                          <Key className="size-2.5" />
-                          API Key
-                        </label>
-                        <div className="relative">
-                          <Input
-                            type={isKeyVisible ? 'text' : 'password'}
-                            value={provider.apiKey}
-                            onChange={(e) => updateProvider(index, { apiKey: e.target.value })}
-                            placeholder="sk-..."
-                            className="h-7 pr-8 text-xs"
-                          />
-                          <Button
-                            variant="ghost"
-                            size="icon-xs"
-                            className="absolute top-1/2 right-1 -translate-y-1/2 size-5"
-                            onClick={() => toggleKeyVisibility(key)}
-                          >
-                            {isKeyVisible ? <EyeOff className="size-3" /> : <Eye className="size-3" />}
-                          </Button>
-                        </div>
-                      </div>
-
-                      <div className="space-y-1">
-                        <label className="flex items-center gap-1 text-[10px] font-medium text-muted-foreground">
-                          <List className="size-2.5" />
-                          模型
-                        </label>
-                        <Textarea
-                          value={provider.modelsText}
-                          onChange={(e) => updateProvider(index, { modelsText: e.target.value })}
-                          className="min-h-[56px] font-mono text-[11px] leading-snug"
-                          placeholder={'每行一个或逗号分隔\nopenai/gpt-4.1\nanthropic/claude-sonnet-4'}
-                        />
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
+                    );
+                  })()
+                )}
+              </div>
             </div>
           </TabsContent>
 
@@ -386,13 +431,13 @@ export function SettingsDialog({
               <div className="flex items-start gap-3 rounded-lg border border-dashed bg-muted/30 p-4">
                 <Lock className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
                 <div className="text-sm text-muted-foreground">
-                  .env* 配置为只读，系统会继续读取用于兼容旧流程
+                  .env* 模型检测已禁用，当前仅使用这里配置的供应商模型
                 </div>
               </div>
 
               {envConfigs.length === 0 ? (
                 <div className="py-8 text-center text-sm text-muted-foreground">
-                  未检测到 .env 配置来源
+                  当前未启用 .env 模型来源
                 </div>
               ) : (
                 <div className="grid grid-cols-2 gap-3">
