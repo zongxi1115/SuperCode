@@ -1,265 +1,277 @@
-# SuperCode 🚀
-
 <div align="center">
 
-**Next-Generation Local Agentic Workspace & Multi-Agent Coding Copilot**
+# SuperCode
 
-*一个下一代本地智能体工作空间与多智能体协作编码助手*
+**Your Local AI Software Engineer**
 
-[![Python Version](https://img.shields.io/badge/Python-3.10+-blue?logo=python&logoColor=white)](https://www.python.org/)
-[![React Version](https://img.shields.io/badge/React-19-61dafb?logo=react&logoColor=white)](https://react.dev/)
-[![FastAPI Version](https://img.shields.io/badge/FastAPI-0.100+-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![Tailwind CSS](https://img.shields.io/badge/Tailwind--v4-38bdf8?logo=tailwindcss&logoColor=white)](https://tailwindcss.com/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![PRs Welcome](https://img.shields.io/badge/PRs-Welcome-brightgreen.svg)](https://github.com/zongxi1115/SuperCode/pulls)
+A local-first, multi-agent coding workspace that brings autonomous development capabilities to your desktop.
 
-[English](#english-introduction) | [中文说明](#中文介绍)
+[![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![TailwindCSS](https://img.shields.io/badge/Tailwind_v4-38BDF8?logo=tailwindcss&logoColor=white)](https://tailwindcss.com/)
+[![Vite](https://img.shields.io/badge/Vite-8-646CFF?logo=vite&logoColor=white)](https://vitejs.dev/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
+[English](#features) | [中文](#核心特性)
 
 </div>
 
 ---
 
-## English Introduction
+<!-- TODO: 添加一张主截图，展示完整工作界面（聊天面板 + 代码编辑器 + 终端）
+     建议文件名: docs/images/hero.png
+     尺寸建议: 1280x720 或更高 -->
 
-**SuperCode** is a local-first, developer-centric agentic codebase workspace. It decouples the core agent runtime loop from specialized prompt models, allowing orchestrated agent modes (Planning, Coding, Deployment) to interact directly with your workspace. Featuring a beautiful modern dashboard (React 19 + Tailwind v4 + Monaco Editor), real-time SSE stream of thought, parallel read-only tools, and a directory-scoped Skill system, SuperCode brings autonomous developer capabilities directly to your desktop.
+## Features
 
-### Key Highlights
-- 🧠 **Modular Multi-Agent Runtime**: Standardized executor loop with a single `Agent` facade and specialized prompt models: `CodingPromptModel` (editing & tools), `PlanPromptModel` (planning & checklists), and `DeployPromptModel` (testing & packaging).
-- 💬 **Interactive Visual Chat**: Real-time visualization of agent thoughts, tool calls, and results using SSE (Server-Sent Events) stream-of-thought architecture.
-- ⚡ **Parallel Tool Executor**: Smart scheduler executes safe, read-only tools (like search, glob, read) in parallel using thread pools to slash execution latency.
-- 🔌 **@Skill Mention Menu**: Project-scoped or global `.md` files containing instructions that the AI can dynamically load and auto-activate to handle specialized tasks.
-- 🖥️ **Interactive Terminal Wait**: Built-in runtime to wait for shell outputs, command completions, or pause for user confirmation inputs safely.
+**Three specialized agents** — Plan, Code, Deploy — orchestrated through a unified runtime. Each agent is a pluggable prompt model with its own toolset, sharing a common execution loop.
 
----
+| | |
+|---|---|
+| Multi-Agent Runtime | Decoupled agent engine with `CodingAgent`, `PlanAgent`, `DeployAgent` — each with specialized tools and prompts |
+| Live Thinking Stream | SSE-powered real-time visualization of chain-of-thought, tool calls, and terminal outputs |
+| Parallel Tool Execution | Read-only tools (search, glob, read) run concurrently via thread pool — faster responses |
+| @Skill System | Type `@` to inject project-scoped markdown rules, or let the AI auto-activate them |
+| Monaco Editor | Full code editor with file tree, diff view, and git integration |
+| Real Terminal | xterm.js + PTY backend for real shell interaction with wait/confirm safety |
+| Kanban Board | Built-in task tracking with drag-and-drop, rich text descriptions |
+| Plan Builder | Interactive Q&A planning with rich text plan editor before coding |
+| OpenAI-Compatible | Works with any OpenAI-format API — GPT, DeepSeek, Qwen, local models |
 
-## 中文介绍
+<!-- TODO: 添加功能截图网格，每个特性配一张小图
+     建议文件名: docs/images/features/ 目录下
+     需要: chat-panel.png, terminal.png, editor.png, kanban.png, skills.png, plan.png -->
 
-**SuperCode** 是一个面向开发者的本地优先、高拓展性智能体开发与工作空间。项目将核心的 Agent 执环（Execution Loop）与特定场景提示词模型（Prompt Models）解耦，支持**规划**、**编码**、**部署**多智能体高效协同。配合精美的 React 19 + Tailwind v4 + Monaco Editor 开发者看板、SSE 实时思考流式传输、多线程只读工具并行化调度，以及独创的 `@` 技能激活系统，SuperCode 为您打造开箱即用的本地 AI 软件工程师。
+## Core Architecture
 
-### 核心亮点
-- 🧠 **模块化多智能体架构**：标准化执行器基座，使用统一 `Agent` 门面和特定场景模型，包含 `CodingPromptModel` (编码专家)、`PlanPromptModel` (规划专家) 及 `DeployPromptModel` (部署验证专家)。
-- 💬 **可视化交互看板**：前端采用 React 19 + Tailwind v4 + Monaco Editor，完美还原智能体**实时思考 (Thoughts)**、**工具调用 (Tool Calls)** 以及**终端输出 (Terminal Outputs)** 的运行轨迹。
-- ⚡ **只读工具并行化**：内置智能工具调度器，支持非阻塞只读工具（如多文件搜索、文件精读）在线程池中并行执行，显著降低模型响应延迟。
-- 🔌 **@Skill 提及系统**：支持在工作区目录下编写 Markdown 格式的 `SKILL.md` 规则。在提问中输入 `@` 即可手动指定激活特定技能，或由 AI 自动扫描激活对应规则。
-- 🖥️ **交互式终端等待与确认**：集成了命令运行超时控制、退出状态捕获及交互式等待，在执行高危命令或需要输入时暂停并等待用户反馈。
-
----
-
-## 🏛️ System Architecture / 系统架构
-
-SuperCode combines a decoupled backend routing design with a reactive state-driven frontend:
-
-```mermaid
-graph TD
-    User([开发者 User / Frontend UI]) <-->|HTTP / SSE Event Stream| FastAPI[FastAPI Back-end Server]
-    FastAPI <-->|Session Store| History[(Session History DB)]
-    FastAPI <-->|Stream Run Turn / Trigger Events| Agent[Unified Agent Runtime]
-    Agent <-->|Next Step / Streaming Thoughts| Model[Prompt Model Adapter]
-    Model <-->|API Calls| LLM[OpenAI Compatible API / DeepSeek / GPT]
-    Agent <-->|Execute Tools| Tools[Modular Tool Set]
-    Tools <-->|File Ops & Shell Command Execution| Workspace[Local Workspace & Shell Runtime]
-    Tools <-->|Load Context & Guidance| Skills[Built-in / Local Workspace Skills]
+```
+┌──────────────────────────────────────────────────┐
+│                   Web Dashboard                   │
+│     React 19 · Tailwind v4 · Monaco · xterm.js   │
+└────────────────────┬─────────────────────────────┘
+                     │ HTTP / SSE
+┌────────────────────▼─────────────────────────────┐
+│                  FastAPI Server                    │
+│           Session Store · Skills Registry          │
+└──────┬──────────┬──────────┬──────────────────────┘
+       │          │          │
+  ┌────▼───┐ ┌───▼────┐ ┌──▼─────┐
+  │ Plan   │ │ Coding │ │ Deploy │   Pluggable
+  │ Agent  │ │ Agent  │ │ Agent  │   Prompt Models
+  └────┬───┘ └───┬────┘ └──┬─────┘
+       │         │         │
+  ┌────▼─────────▼─────────▼─────┐
+  │      Unified Agent Engine     │   Shared Runtime
+  │   Tool Registry · Executor    │
+  └──────────┬───────────────────┘
+             │
+  ┌──────────▼───────────────────┐
+  │   OpenAI-Compatible Client    │   Any LLM Provider
+  └──────────────────────────────┘
 ```
 
----
+## Quick Start
 
-## ✨ Features Breakdown / 功能特性
+### Prerequisites
 
-### 1. Unified Agent Engine / 统一的智能体引擎
-The `agent/` folder acts as an abstract runner, handling chat history retention, tool parameter validation, streaming state updates, and error boundary handling. `coding_agent/`, `plan_agent/`, and `deploy_agent/` implement custom prompt models and concrete file/terminal operation tools, making the entire framework highly pluggable.
+- Python >= 3.10
+- Node.js >= 18 (with pnpm)
 
-### 2. Live SSE Streams & Parallelization / 实时思考流与并行执行
-- **Streaming Output**: Through Server-Sent Events, developers can see exactly what the model is thinking, what tools are being populated, and tool response payloads concurrently.
-- **Parallel Read Tools**: Tools that have `supports_parallel = True` (e.g. search, reading multiple source files) are batch executed using a `ThreadPoolExecutor`, reducing time-to-first-token.
+### Install & Run
 
-### 3. Folder-Scoped Skills / 灵活的技能定制
-You can inject specific directory contexts or coding rules into SuperCode using markdown skill files:
-- **Local Skills**: Placed at `.agents/skills/<skill-name>/SKILL.md`
-- **Built-in Skills**: Placed at `builtin_skills/<skill-name>/SKILL.md`
-- Markdown files contain frontmatter headers like:
-  ```markdown
-  ---
-  name: api-guidelines
-  description: Coding rules and styling patterns for backend API router endpoints.
-  ---
-  # Guidelines Content
-  ...
-  ```
-- Mentioning `@api-guidelines` in your chat composer tells the agent to extract and inject these rules as active system guidance for the current reasoning steps.
-
----
-
-## 🚀 Quick Start / 快速启动
-
-### Requirements / 环境依赖
-- **Python**: `>= 3.10` (Anaconda recommended)
-- **Node.js**: `>= 18` (PNPM package manager installed)
-
-### 1. Configure Secrets / 配置密钥
-Duplicate the environment template and configure your LLM provider details:
-```powershell
-copy .env.example .env
-```
-Open `.env` and fill in your keys:
-```env
-SC_AGENT_API_KEY=your-api-key
-SC_AGENT_BASE_URL=https://api.openai.com/v1 # Or any compatible endpoint (DeepSeek, etc.)
-SC_AGENT_MODEL=gpt-4o # Or deepseek-coder
-```
-*Note: If no `.env` is supplied, the backend defaults to **Demo Mode** with mock replies to simplify frontend prototyping.*
-
-### 2. Launch / 启动服务
-
-We provide a script to handle tool installation, Python backend setup, and React frontend bootstrap.
-
-#### Option A: Interactive Launcher (Windows Batch)
-Simply double click [start.bat](file:///d:/vibe_projs/SuperCode/start.bat) or execute it from command line:
+**Option 1 — One-click (Windows)**
 ```powershell
 .\start.bat
 ```
-Choose `2` to automatically install all dependencies and spin up both the FastAPI backend and React frontend concurrently.
+Choose `2` to install dependencies and launch both servers.
 
-#### Option B: PowerShell Quick Start
-You can pass direct arguments to the PowerShell bootstrap script:
+**Option 2 — PowerShell script**
 ```powershell
-# Activate your python environment first
 conda activate base
-
-# Installs requirements and starts both servers
 powershell -ExecutionPolicy Bypass -File .\scripts\quick-start.ps1 -StartBackend -StartFrontend
 ```
-Common options:
-- `-InstallOnly`: Install backend and frontend packages without running.
-- `-BackendOnly`: Setup and prepare the FastAPI workspace only.
-- `-FrontendOnly`: Setup and prepare Vite React app only.
-- `-AutoInstallTools`: Checks for Python/Node/PNPM and uses `winget` to install them if missing.
 
----
-
-## 💻 Usage / 使用指南
-
-### 1. Complete Web UI Experience
-Once booted, navigate to `http://localhost:8888`.
-- Explore local workspace file trees.
-- Chat with the code assistant. Type `@` in the text area to trigger the dropdown for active markdown skills.
-- Observe model thought logs, terminal standard outputs, and file diff replacements live.
-
-### 2. Auto-inject Element Selection Bridge for Vite Dev Apps
-For localhost Vite apps opened in the built-in browser preview, add the SuperCode bridge plugin to the target app once. The target dev server will inject the element-selection bridge into `index.html` automatically, so cross-origin element selection does not need to navigate the iframe through a proxy.
-
-```ts
-// vite.config.ts in the target app
-import { defineConfig } from 'vite';
-import react from '@vitejs/plugin-react';
-import superCodeSelectBridge from '../SuperCode/scripts/supercode-vite-select-bridge-plugin.mjs';
-
-export default defineConfig({
-  plugins: [react(), superCodeSelectBridge()],
-});
-```
-
-If the SuperCode backend is not running on `http://localhost:3001`, pass a custom bridge URL:
-
-```ts
-superCodeSelectBridge({
-  bridgeUrl: 'http://localhost:3001/api/preview/select-bridge.js',
-});
-```
-
-### 3. Lightweight CLI Mode
-If you prefer running the agent inside your command terminal:
+**Option 3 — Manual**
 ```powershell
-conda activate base
-python examples/run_demo.py
+# Backend
+pip install -r requirements.txt
+python -m uvicorn fastapi_app.main:app --port 3001
+
+# Frontend
+cd frontend && pnpm install && pnpm dev
 ```
-You can type continuous queries such as:
-- *“帮我看看这个 demo_workspace 是干嘛的”*
-- *“那 main.py 和 helper.py 的关系是什么”*
-- *“顺手给我总结成 3 点”*
 
----
+### Configure
 
-## 🛠️ Developer SDK Integration / 开发者集成接口
+```powershell
+copy .env.example .env
+```
 
-You can programmatically spin up an `Agent` and stream its event-driven outputs:
+```env
+SC_AGENT_API_KEY=your-api-key
+SC_AGENT_BASE_URL=https://api.openai.com/v1
+SC_AGENT_MODEL=gpt-4o
+```
+
+Works with any OpenAI-compatible endpoint — DeepSeek, Qwen, local Ollama, etc. Without `.env`, the backend runs in **Demo Mode** with mock replies.
+
+Open **http://localhost:8888** and start coding.
+
+<!-- TODO: 添加启动后的着陆页截图
+     建议文件名: docs/images/landing.png -->
+
+## SDK
+
+Use the agent engine programmatically:
 
 ```python
-from agent import (
-    Agent,
-    AgentLLMConfig,
-    ChatSession,
-    OpenAICompatibleClient,
-    AgentEvent
-)
+from agent import Agent, AgentLLMConfig, ChatSession, OpenAICompatibleClient
 from coding_agent import CodingPromptModel, build_coding_tools
 
-# 1. Load config and instantiate LLM Client
 config = AgentLLMConfig.from_env(".env")
 client = OpenAICompatibleClient(config)
 
-# 2. Build Agent with a model adapter, tools, and workspace bindings
 agent = Agent(
     model=CodingPromptModel(client),
     tools=build_coding_tools(),
-    workspace="examples/demo_workspace",
+    workspace="path/to/project",
 )
 
-# 3. Create a continuous chat session
 session = ChatSession(agent=agent)
-
-# 4. Optional event listener for thought streaming and tool calls
-def on_event(event: AgentEvent) -> None:
-    print(f"[{event.type.upper()}] {event.message}")
-    if event.thought:
-        print(f"Thought: {event.thought}")
-
-# 5. Query and obtain result
-response = session.ask("Analyze the architecture of the codebase.", on_event=on_event)
-print("Final Output:", response.final_output)
+response = session.ask("Refactor the auth module")
+print(response.final_output)
 ```
 
+<!-- TODO: 添加代码编辑器 + AI对话的协作截图
+     建议文件名: docs/images/collaboration.png -->
+
+## @Skill System
+
+Create markdown skill files to inject domain knowledge:
+
+```markdown
 ---
-
-## 🔧 Tools Reference / 工具箱接口规范
-
-The coding prompt model interacts with the operating system through the following structured tools:
-
-| Tool Name / 工具名称 | Key Arguments / 主要参数 | Description / 作用说明 |
-| :--- | :--- | :--- |
-| `list_file` | `path`, `include_ignored`, `max_depth` | Lists directory contents, skipping standard build/cache folders by default. |
-| `glob_file` | `pattern`, `search_path` | Glob searches filenames matching specific expressions. |
-| `read_file` | `filename`, `offset`, `limit`, `start_line` | Reads file content safely with pagination and trunk alerts to avoid context overflow. |
-| `grep_file` | `regex`, `search_path`, `output_mode` | Ripgrep-like string patterns search within text files. |
-| `write_file` | `filename`, `content` | Writes or creates a brand new file with specified text contents. |
-| `replace_file` | `filename`, `old_content`, `new_content`| Modifies existing files via safe chunk-replacement. |
-| `execute` | `content`, `timeout` | Runs a console shell command synchronously with timeout boundaries. |
-| `terminal_input` | `content`, `timeout` | Feeds inputs to a running interactive terminal application. |
-| `terminal_wait` | `timeout` | Listens to background process buffers, fetching new outputs. |
-
-*Safety Feature: Heavy scan operations automatically exclude standard directories (`node_modules`, `.git`, `dist`, `__pycache__`) unless `include_ignored=true` is requested.*
-
+name: api-guidelines
+description: REST API coding conventions for this project
 ---
+# API Guidelines
+- Use snake_case for endpoints
+- Always validate with Pydantic v2
+...
+```
 
-## 🗂️ Project Structure / 项目结构
+Place at `.agents/skills/<name>/SKILL.md` (local) or `builtin_skills/<name>/SKILL.md` (global).
 
-```text
+Type `@` in the chat to pick a skill, or let the agent auto-discover relevant ones.
+
+Built-in skills include: `code-review`, `frontend-design`, `security-audit`, `systematic-debugging`, `test-driven-development`, and more.
+
+## Tool Reference
+
+| Tool | Description |
+|---|---|
+| `list_file` | List directory contents with depth control |
+| `glob_file` | Glob pattern file search |
+| `read_file` | Read file content with pagination |
+| `grep_file` | Regex search across files |
+| `write_file` | Create or overwrite a file |
+| `replace_file` | Safe chunk-based file editing |
+| `execute` | Run shell command with timeout |
+| `terminal_input` | Send input to running terminal |
+| `terminal_wait` | Wait for terminal output |
+
+Read-only tools run **in parallel** when possible — no waiting for sequential file reads.
+
+## Project Structure
+
+```
 SuperCode/
-├── agent/              # Core Agentic Framework (Abstract Interface + Run Loop)
-├── coding_agent/       # Prompt models and toolsets optimized for programming
-├── plan_agent/         # Agent specializing in long-term task decomposition
-├── deploy_agent/       # Agent managing code deployment and checks
-├── fastapi_app/        # FastAPI Back-end (SSE pushes, Terminal runtime, Files API)
-├── frontend/           # Modern Dashboard React UI (Vite + Tailwind v4 + Monaco)
-├── builtin_skills/     # General out-of-the-box Markdown skills
-├── examples/           # Developer python usage snippets & CLI entrypoints
-├── scripts/            # Build automation scripts (powershell setups)
-├── start.bat           # One-click Windows menu launcher
-├── .env.example        # Environment variables configuration template
-└── README.md           # Repository documentation
+├── agent/              # Core agent framework (runtime loop, events, tool registry)
+├── coding_agent/       # Coding agent — file ops, shell, git tools
+├── plan_agent/         # Planning agent — task decomposition, checklists
+├── deploy_agent/       # Deploy agent — SSH, testing, packaging
+├── fastapi_app/        # Backend server (SSE, terminal PTY, session store)
+├── frontend/           # React dashboard (Vite, Tailwind v4, Monaco)
+├── builtin_skills/     # Pre-packaged markdown skills
+├── examples/          # CLI entrypoint and demo workspace
+├── scripts/            # Bootstrap and build scripts
+└── start.bat           # One-click Windows launcher
 ```
 
 ---
 
-## 📄 License
+## 核心特性
 
-SuperCode is licensed under the [MIT License](LICENSE). Contributions, bug reports, and feature suggestions are highly appreciated!
+**三种专属智能体** — 规划、编码、部署 — 通过统一运行时编排。每个智能体是可插拔的提示模型，拥有独立工具集，共享执行引擎。
+
+| | |
+|---|---|
+| 多智能体架构 | 解耦引擎，`CodingAgent`、`PlanAgent`、`DeployAgent` 各自专精 |
+| 实时思考流 | SSE 驱动，可视化链式推理、工具调用、终端输出 |
+| 只读工具并行 | 搜索、读取等只读工具线程池并行执行，响应更快 |
+| @技能系统 | 输入 `@` 注入项目级 Markdown 规则，或由 AI 自动激活 |
+| Monaco 编辑器 | 代码编辑 + 文件树 + Diff 视图 + Git 集成 |
+| 真实终端 | xterm.js + PTY 后端，支持交互等待与确认安全机制 |
+| 看板管理 | 内置拖拽看板，富文本任务描述 |
+| 计划构建器 | 编码前交互式问答规划，富文本计划编辑器 |
+| OpenAI 兼容 | 支持任何 OpenAI 格式 API — GPT、DeepSeek、Qwen、本地模型 |
+
+<!-- TODO: 同上需要的功能截图 -->
+
+## 快速启动
+
+### 环境要求
+
+- Python >= 3.10
+- Node.js >= 18（需安装 pnpm）
+
+### 启动
+
+**方式一 — 一键启动（Windows）**
+```powershell
+.\start.bat
+```
+选择 `2` 自动安装依赖并启动前后端。
+
+**方式二 — PowerShell 脚本**
+```powershell
+conda activate base
+powershell -ExecutionPolicy Bypass -File .\scripts\quick-start.ps1 -StartBackend -StartFrontend
+```
+
+**方式三 — 手动启动**
+```powershell
+# 后端
+pip install -r requirements.txt
+python -m uvicorn fastapi_app.main:app --port 3001
+
+# 前端
+cd frontend && pnpm install && pnpm dev
+```
+
+### 配置
+
+```powershell
+copy .env.example .env
+```
+
+```env
+SC_AGENT_API_KEY=你的密钥
+SC_AGENT_BASE_URL=https://api.openai.com/v1
+SC_AGENT_MODEL=gpt-4o
+```
+
+兼容任何 OpenAI 格式接口 — DeepSeek、Qwen、本地 Ollama 等。未配置 `.env` 时，后端以 **Demo 模式** 运行模拟回复。
+
+打开 **http://localhost:8888** 开始使用。
+
+---
+
+<div align="center">
+
+**[MIT License](LICENSE)** — Built with ❤️ by the open-source community
+
+Issues and PRs welcome → [GitHub Issues](https://github.com/zongxi1115/SuperCode/issues)
+
+</div>

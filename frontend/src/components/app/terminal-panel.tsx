@@ -7,7 +7,7 @@ import "@xterm/xterm/css/xterm.css";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import type {
-  ManagedProcessPayload,
+  TerminalInfo,
   TerminalSocketClientMessage,
   TerminalSocketServerMessage,
 } from "@/lib/app-types";
@@ -15,42 +15,87 @@ import { AnimatePresence, motion } from "motion/react";
 import {
   ChevronDown,
   Eraser,
+  Plus,
   PlugZap,
   RefreshCw,
   Square,
   Terminal as TerminalIcon,
+  X,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 type TerminalPanelProps = {
   sessionId: string | null;
-  cwd: string;
-  backend: string;
   isOpen: boolean;
-  isStoppingProcesses: boolean;
-  processes: ManagedProcessPayload[];
+  terminalInfos: TerminalInfo[];
+  activeTerminalId: string | null;
+  onActiveTerminalChange: (id: string) => void;
   onRuntimeStatusChange: (status: {
     cwd?: string | null;
     backend?: string;
+    terminalId?: string;
     supportsInterrupt?: boolean;
     supportsResize?: boolean;
   }) => void;
   onToggle: () => void;
-  onRefreshProcesses: () => void;
-  onStopAllProcesses: () => void;
+  onRefreshTerminals: () => void;
+  onCreateTerminal: (cwd?: string) => Promise<string | null>;
+  onCloseTerminal: (terminalId: string) => Promise<void>;
   onTerminateProcess: (terminalId: string) => void;
 };
 
-function buildTerminalWebSocketUrl(sessionId: string) {
+type TerminalInstance = {
+  terminalId: string;
+  kind: "interactive" | "managed-process";
+  xterm: Terminal;
+  fitAddon: FitAddon;
+  socket: WebSocket | null;
+  connectedSessionId: string | null;
+  connectionState: "idle" | "connecting" | "open" | "closed" | "error";
+  errorMessage: string;
+  outputBuffer: string[];
+  outputFrame: number | null;
+  lastResize: { cols: number; rows: number } | null;
+  supportsResize: boolean;
+  cwd: string;
+  backend: string;
+};
+
+const XTERM_THEME = {
+  background: "#111314",
+  foreground: "#d9ded8",
+  cursor: "#f4c95d",
+  cursorAccent: "#111314",
+  selectionBackground: "#4a5d58",
+  black: "#111314",
+  red: "#e06c75",
+  green: "#98c379",
+  yellow: "#e5c07b",
+  blue: "#61afef",
+  magenta: "#c678dd",
+  cyan: "#56b6c2",
+  white: "#d9ded8",
+  brightBlack: "#5b625f",
+  brightRed: "#ff7b86",
+  brightGreen: "#b3df91",
+  brightYellow: "#f3d98b",
+  brightBlue: "#7cc7ff",
+  brightMagenta: "#dfa3f7",
+  brightCyan: "#7bd7e4",
+  brightWhite: "#f2f5f1",
+};
+
+function buildTerminalWebSocketUrl(sessionId: string, terminalId?: string | null) {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//localhost:3001/api/sessions/${sessionId}/terminal/ws`;
+  const base = `${protocol}//localhost:3001/api/sessions/${sessionId}/terminal/ws`;
+  if (terminalId) {
+    return `${base}?terminal_id=${encodeURIComponent(terminalId)}`;
+  }
+  return base;
 }
 
 function safeParseTerminalMessage(data: MessageEvent["data"]): TerminalSocketServerMessage | null {
-  if (typeof data !== "string") {
-    return null;
-  }
-
+  if (typeof data !== "string") return null;
   try {
     const parsed = JSON.parse(data) as TerminalSocketServerMessage;
     return parsed && typeof parsed.type === "string" ? parsed : null;
@@ -59,240 +104,220 @@ function safeParseTerminalMessage(data: MessageEvent["data"]): TerminalSocketSer
   }
 }
 
+function createXtermInstance(): { terminal: Terminal; fitAddon: FitAddon } {
+  const terminal = new Terminal({
+    cursorBlink: true,
+    cursorStyle: "block",
+    fontFamily: '"Cascadia Mono", "JetBrains Mono", Consolas, "Courier New", monospace',
+    fontSize: 12,
+    lineHeight: 1.25,
+    scrollback: 8000,
+    allowTransparency: true,
+    theme: XTERM_THEME,
+  });
+  const fitAddon = new FitAddon();
+  const webLinksAddon = new WebLinksAddon((event, uri) => {
+    event.preventDefault();
+    window.open(uri, "_blank", "noopener,noreferrer");
+  });
+  terminal.loadAddon(fitAddon);
+  terminal.loadAddon(webLinksAddon);
+  return { terminal, fitAddon };
+}
+
 export function TerminalPanel({
   sessionId,
-  cwd,
-  backend,
   isOpen,
-  isStoppingProcesses,
-  processes,
+  terminalInfos,
+  activeTerminalId,
+  onActiveTerminalChange,
   onRuntimeStatusChange,
   onToggle,
-  onRefreshProcesses,
-  onStopAllProcesses,
+  onRefreshTerminals,
+  onCreateTerminal,
+  onCloseTerminal,
   onTerminateProcess,
 }: TerminalPanelProps) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const terminalRef = useRef<Terminal | null>(null);
-  const fitAddonRef = useRef<FitAddon | null>(null);
-  const socketRef = useRef<WebSocket | null>(null);
+  const instancesRef = useRef<Map<string, TerminalInstance>>(new Map());
+  const containerRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const panelContainerRef = useRef<HTMLDivElement>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
-  const reconnectTimerRef = useRef<number | null>(null);
-  const resizeTimerRef = useRef<number | null>(null);
-  const outputFrameRef = useRef<number | null>(null);
-  const outputBufferRef = useRef<string[]>([]);
-  const lastResizeRef = useRef<{ cols: number; rows: number } | null>(null);
-  const supportsResizeRef = useRef(false);
-  const connectedSessionRef = useRef<string | null>(null);
-  const [connectionState, setConnectionState] = useState<"idle" | "connecting" | "open" | "closed" | "error">("idle");
-  const [errorMessage, setErrorMessage] = useState("");
+  const reconnectTimersRef = useRef<Map<string, number>>(new Map());
+  const resizeTimersRef = useRef<Map<string, number>>(new Map());
+  const openedSetRef = useRef<Set<string>>(new Set());
+  const dataDisposablesRef = useRef<Map<string, { dispose(): void }>>(new Map());
+  const keyDisposablesRef = useRef<Map<string, { dispose(): void }>>(new Map());
 
-  const sendSocketMessage = useCallback((message: TerminalSocketClientMessage) => {
-    const socket = socketRef.current;
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
-      return false;
-    }
-    socket.send(JSON.stringify(message));
+  const [, forceUpdate] = useState(0);
+  const triggerRender = useCallback(() => forceUpdate((n) => n + 1), []);
+
+  const getInstance = useCallback((terminalId: string) => {
+    return instancesRef.current.get(terminalId);
+  }, []);
+
+  const sendSocketMessage = useCallback((terminalId: string, message: TerminalSocketClientMessage) => {
+    const inst = getInstance(terminalId);
+    if (!inst?.socket || inst.socket.readyState !== WebSocket.OPEN) return false;
+    inst.socket.send(JSON.stringify(message));
     return true;
-  }, []);
+  }, [getInstance]);
 
-  const flushTerminalOutput = useCallback(() => {
-    outputFrameRef.current = null;
-    const terminal = terminalRef.current;
-    const output = outputBufferRef.current.join("");
-    outputBufferRef.current = [];
-    if (terminal && output) {
-      terminal.write(output);
+  const flushOutput = useCallback((terminalId: string) => {
+    const inst = getInstance(terminalId);
+    if (!inst) return;
+    inst.outputFrame = null;
+    const output = inst.outputBuffer.join("");
+    inst.outputBuffer = [];
+    if (output) inst.xterm.write(output);
+  }, [getInstance]);
+
+  const enqueueOutput = useCallback((terminalId: string, output: string) => {
+    const inst = getInstance(terminalId);
+    if (!inst || !output) return;
+    inst.outputBuffer.push(output);
+    if (inst.outputFrame === null) {
+      inst.outputFrame = window.requestAnimationFrame(() => flushOutput(terminalId));
     }
-  }, []);
+  }, [flushOutput, getInstance]);
 
-  const enqueueTerminalOutput = useCallback((output: string) => {
-    if (!output) {
-      return;
+  const clearQueuedOutput = useCallback((terminalId: string) => {
+    const inst = getInstance(terminalId);
+    if (!inst) return;
+    inst.outputBuffer = [];
+    if (inst.outputFrame !== null) {
+      window.cancelAnimationFrame(inst.outputFrame);
+      inst.outputFrame = null;
     }
-    outputBufferRef.current.push(output);
-    if (outputFrameRef.current === null) {
-      outputFrameRef.current = window.requestAnimationFrame(flushTerminalOutput);
-    }
-  }, [flushTerminalOutput]);
+  }, [getInstance]);
 
-  const clearQueuedTerminalOutput = useCallback(() => {
-    outputBufferRef.current = [];
-    if (outputFrameRef.current !== null) {
-      window.cancelAnimationFrame(outputFrameRef.current);
-      outputFrameRef.current = null;
-    }
-  }, []);
+  const sendResize = useCallback((terminalId: string) => {
+    const inst = getInstance(terminalId);
+    if (!inst) return;
+    if (!inst.supportsResize && inst.backend !== "winpty") return;
+    const nextSize = { cols: inst.xterm.cols, rows: inst.xterm.rows };
+    const lastSize = inst.lastResize;
+    if (lastSize?.cols === nextSize.cols && lastSize.rows === nextSize.rows) return;
+    inst.lastResize = nextSize;
+    sendSocketMessage(terminalId, { type: "resize", ...nextSize });
+  }, [getInstance, sendSocketMessage]);
 
-  const sendTerminalResize = useCallback(() => {
-    const terminal = terminalRef.current;
-    if (!terminal || (!supportsResizeRef.current && backend !== "winpty")) {
-      return;
-    }
+  const fitTerminal = useCallback((terminalId: string) => {
+    const inst = getInstance(terminalId);
+    const container = containerRefs.current.get(terminalId);
+    if (!inst || !container) return;
+    try { inst.fitAddon.fit(); } catch { return; }
+    const timerMap = resizeTimersRef.current;
+    if (timerMap.has(terminalId)) window.clearTimeout(timerMap.get(terminalId)!);
+    timerMap.set(terminalId, window.setTimeout(() => {
+      timerMap.delete(terminalId);
+      sendResize(terminalId);
+    }, 120));
+  }, [getInstance, sendResize]);
 
-    const nextSize = { cols: terminal.cols, rows: terminal.rows };
-    const lastSize = lastResizeRef.current;
-    if (lastSize?.cols === nextSize.cols && lastSize.rows === nextSize.rows) {
-      return;
-    }
+  const connectTerminal = useCallback((terminalId: string) => {
+    const inst = getInstance(terminalId);
+    if (!inst || !sessionId || !isOpen) return;
+    if (inst.socket && inst.socket.readyState <= WebSocket.OPEN && inst.connectedSessionId === sessionId) return;
+    if (inst.socket) { inst.socket.close(); inst.socket = null; }
 
-    lastResizeRef.current = nextSize;
-    sendSocketMessage({ type: "resize", ...nextSize });
-  }, [backend, sendSocketMessage]);
+    inst.connectedSessionId = sessionId;
+    inst.connectionState = "connecting";
+    inst.errorMessage = "";
+    triggerRender();
 
-  const fitTerminal = useCallback(() => {
-    const fitAddon = fitAddonRef.current;
-    const terminal = terminalRef.current;
-    if (!fitAddon || !terminal || !containerRef.current) {
-      return;
-    }
-
-    try {
-      fitAddon.fit();
-    } catch {
-      // xterm can throw during first layout while the panel is still animating.
-      return;
-    }
-
-    if (resizeTimerRef.current !== null) {
-      window.clearTimeout(resizeTimerRef.current);
-    }
-    resizeTimerRef.current = window.setTimeout(() => {
-      resizeTimerRef.current = null;
-      sendTerminalResize();
-    }, 120);
-  }, [sendTerminalResize]);
-
-  const connectTerminal = useCallback(() => {
-    if (!sessionId || !isOpen || !terminalRef.current) {
-      return;
-    }
-
-    if (
-      socketRef.current &&
-      socketRef.current.readyState <= WebSocket.OPEN &&
-      connectedSessionRef.current === sessionId
-    ) {
-      return;
-    }
-
-    if (socketRef.current) {
-      socketRef.current.close();
-      socketRef.current = null;
-    }
-
-    connectedSessionRef.current = sessionId;
-    setConnectionState("connecting");
-    setErrorMessage("");
-
-    const socket = new WebSocket(buildTerminalWebSocketUrl(sessionId));
-    socketRef.current = socket;
+    const wsUrl = buildTerminalWebSocketUrl(sessionId, terminalId);
+    const socket = new WebSocket(wsUrl);
+    inst.socket = socket;
 
     socket.addEventListener("open", () => {
-      setConnectionState("open");
-      fitTerminal();
-      terminalRef.current?.focus();
+      inst.connectionState = "open";
+      triggerRender();
+      fitTerminal(terminalId);
+      if (activeTerminalId === terminalId) inst.xterm.focus();
     });
 
     socket.addEventListener("message", (event) => {
       const message = safeParseTerminalMessage(event.data);
-      if (!message) {
-        return;
-      }
+      if (!message) return;
 
       if (message.type === "output") {
-        enqueueTerminalOutput(message.data);
+        enqueueOutput(terminalId, message.data);
         return;
       }
 
       if (message.type === "status") {
-        supportsResizeRef.current = message.supportsResize === true;
-        onRuntimeStatusChange(message);
+        inst.supportsResize = message.supportsResize === true;
+        if (message.cwd) inst.cwd = message.cwd;
+        if (message.backend) inst.backend = message.backend;
+        onRuntimeStatusChange({ ...message, terminalId });
         if (message.supportsResize === true) {
-          window.requestAnimationFrame(fitTerminal);
+          window.requestAnimationFrame(() => fitTerminal(terminalId));
         }
+        triggerRender();
         return;
       }
 
       if (message.type === "clear") {
-        clearQueuedTerminalOutput();
-        terminalRef.current?.clear();
+        clearQueuedOutput(terminalId);
+        inst.xterm.clear();
         return;
       }
 
       if (message.type === "error") {
-        clearQueuedTerminalOutput();
-        setConnectionState("error");
-        setErrorMessage(message.message);
-        terminalRef.current?.writeln(`\r\n[terminal] ${message.message}`);
+        clearQueuedOutput(terminalId);
+        inst.connectionState = "error";
+        inst.errorMessage = message.message;
+        triggerRender();
+        inst.xterm.writeln(`\r\n[terminal] ${message.message}`);
       }
     });
 
     socket.addEventListener("close", () => {
-      if (socketRef.current === socket) {
-        socketRef.current = null;
-      }
-      setConnectionState((current) => (current === "error" ? current : "closed"));
+      if (inst.socket === socket) inst.socket = null;
+      inst.connectionState = inst.connectionState === "error" ? inst.connectionState : "closed";
+      triggerRender();
     });
 
     socket.addEventListener("error", () => {
-      setConnectionState("error");
-      setErrorMessage("终端连接失败");
+      inst.connectionState = "error";
+      inst.errorMessage = "终端连接失败";
+      triggerRender();
     });
-  }, [clearQueuedTerminalOutput, enqueueTerminalOutput, fitTerminal, isOpen, onRuntimeStatusChange, sessionId]);
+  }, [activeTerminalId, clearQueuedOutput, enqueueOutput, fitTerminal, isOpen, onRuntimeStatusChange, sessionId, triggerRender]);
 
-  useEffect(() => {
-    if (!isOpen) {
-      return;
+  const ensureInstance = useCallback((info: TerminalInfo) => {
+    const existing = getInstance(info.terminalId);
+    if (existing) {
+      if (info.cwd && info.cwd !== existing.cwd) existing.cwd = info.cwd;
+      if (info.backend && info.backend !== existing.backend) existing.backend = info.backend;
+      return existing;
     }
 
-    const terminal = new Terminal({
-      cursorBlink: true,
-      cursorStyle: "block",
-      fontFamily: '"Cascadia Mono", "JetBrains Mono", Consolas, "Courier New", monospace',
-      fontSize: 12,
-      lineHeight: 1.25,
-      scrollback: 8000,
-      allowTransparency: true,
-      theme: {
-        background: "#111314",
-        foreground: "#d9ded8",
-        cursor: "#f4c95d",
-        cursorAccent: "#111314",
-        selectionBackground: "#4a5d58",
-        black: "#111314",
-        red: "#e06c75",
-        green: "#98c379",
-        yellow: "#e5c07b",
-        blue: "#61afef",
-        magenta: "#c678dd",
-        cyan: "#56b6c2",
-        white: "#d9ded8",
-        brightBlack: "#5b625f",
-        brightRed: "#ff7b86",
-        brightGreen: "#b3df91",
-        brightYellow: "#f3d98b",
-        brightBlue: "#7cc7ff",
-        brightMagenta: "#dfa3f7",
-        brightCyan: "#7bd7e4",
-        brightWhite: "#f2f5f1",
-      },
-    });
-    const fitAddon = new FitAddon();
-    const webLinksAddon = new WebLinksAddon((event, uri) => {
-      event.preventDefault();
-      window.open(uri, "_blank", "noopener,noreferrer");
-    });
+    const { terminal, fitAddon } = createXtermInstance();
+    const inst: TerminalInstance = {
+      terminalId: info.terminalId,
+      kind: info.kind,
+      xterm: terminal,
+      fitAddon,
+      socket: null,
+      connectedSessionId: null,
+      connectionState: "idle",
+      errorMessage: "",
+      outputBuffer: [],
+      outputFrame: null,
+      lastResize: null,
+      supportsResize: false,
+      cwd: info.cwd || "",
+      backend: info.backend || "subprocess",
+    };
+    instancesRef.current.set(info.terminalId, inst);
 
-    terminal.loadAddon(fitAddon);
-    terminal.loadAddon(webLinksAddon);
-    terminal.open(containerRef.current!);
-    terminalRef.current = terminal;
-    fitAddonRef.current = fitAddon;
-
-    const dataDisposable = terminal.onData((data) => {
-      sendSocketMessage({ type: "input", data });
-    });
+    if (info.kind === "interactive") {
+      const dataDisposable = terminal.onData((data) => {
+        sendSocketMessage(info.terminalId, { type: "input", data });
+      });
+      dataDisposablesRef.current.set(info.terminalId, dataDisposable);
+    }
 
     const keyDisposable = terminal.onKey(({ domEvent }) => {
       if ((domEvent.ctrlKey || domEvent.metaKey) && domEvent.key.toLowerCase() === "k") {
@@ -300,92 +325,232 @@ export function TerminalPanel({
         terminal.clear();
       }
     });
+    keyDisposablesRef.current.set(info.terminalId, keyDisposable);
 
+    return inst;
+  }, [getInstance, sendSocketMessage]);
+
+  const disposeInstance = useCallback((terminalId: string) => {
+    const inst = instancesRef.current.get(terminalId);
+    if (!inst) return;
+    dataDisposablesRef.current.get(terminalId)?.dispose();
+    dataDisposablesRef.current.delete(terminalId);
+    keyDisposablesRef.current.get(terminalId)?.dispose();
+    keyDisposablesRef.current.delete(terminalId);
+    if (inst.socket) { inst.socket.close(); inst.socket = null; }
+    if (inst.outputFrame !== null) window.cancelAnimationFrame(inst.outputFrame);
+    inst.xterm.dispose();
+    instancesRef.current.delete(terminalId);
+    containerRefs.current.delete(terminalId);
+    openedSetRef.current.delete(terminalId);
+    resizeTimersRef.current.delete(terminalId);
+    const reconnectTimer = reconnectTimersRef.current.get(terminalId);
+    if (reconnectTimer !== undefined) { window.clearTimeout(reconnectTimer); reconnectTimersRef.current.delete(terminalId); }
+  }, []);
+
+  // Sync instances with terminalInfos
+  useEffect(() => {
+    if (!isOpen) return;
+    const currentIds = new Set(terminalInfos.map((t) => t.terminalId));
+    let newProcessId: string | null = null;
+    for (const info of terminalInfos) {
+      const isNew = !instancesRef.current.has(info.terminalId);
+      ensureInstance(info);
+      if (isNew && info.kind === "managed-process") {
+        newProcessId = info.terminalId;
+      }
+    }
+    for (const [id] of instancesRef.current) {
+      if (!currentIds.has(id)) {
+        disposeInstance(id);
+      }
+    }
+    // Auto-switch to new AI process tab
+    if (newProcessId) {
+      onActiveTerminalChange(newProcessId);
+    }
+  }, [terminalInfos, isOpen, ensureInstance, disposeInstance, onActiveTerminalChange]);
+
+  // Auto-select active tab
+  useEffect(() => {
+    if (!isOpen || terminalInfos.length === 0) return;
+    if (activeTerminalId && terminalInfos.some((t) => t.terminalId === activeTerminalId)) return;
+    const defaultTerminal = terminalInfos.find((t) => t.isDefault);
+    onActiveTerminalChange(defaultTerminal?.terminalId ?? terminalInfos[0].terminalId);
+  }, [isOpen, terminalInfos, activeTerminalId, onActiveTerminalChange]);
+
+  // Open xterm in container when active tab changes & re-fit
+  useEffect(() => {
+    if (!isOpen || !activeTerminalId) return;
+    const inst = getInstance(activeTerminalId);
+    if (!inst) return;
+    const activeInfo = terminalInfos.find((terminal) => terminal.terminalId === activeTerminalId);
+    if (!activeInfo) return;
+    const container = containerRefs.current.get(activeTerminalId);
+    if (!container) return;
+
+    if (!openedSetRef.current.has(activeTerminalId)) {
+      inst.xterm.open(container);
+      openedSetRef.current.add(activeTerminalId);
+    }
+
+    // Delay fit + connect until the container is actually visible (raf isn't always enough)
+    const fitRaf = window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        fitTerminal(activeTerminalId);
+        if (activeInfo.kind === "interactive") {
+          inst.xterm.focus();
+        }
+        if (activeInfo.kind === "interactive" && inst.connectionState === "idle") {
+          connectTerminal(activeTerminalId);
+        }
+      });
+    });
+
+    return () => window.cancelAnimationFrame(fitRaf);
+  }, [isOpen, activeTerminalId, terminalInfos, getInstance, fitTerminal, connectTerminal]);
+
+  // Connect all interactive terminals when panel opens
+  useEffect(() => {
+    if (!isOpen || !sessionId) return;
+    for (const info of terminalInfos) {
+      if (info.kind === "interactive" && info.isAlive) {
+        const inst = getInstance(info.terminalId);
+        if (inst && inst.connectionState === "idle") {
+          connectTerminal(info.terminalId);
+        }
+      }
+    }
+  }, [isOpen, sessionId, terminalInfos, getInstance, connectTerminal]);
+
+  // ResizeObserver on the panel container
+  useEffect(() => {
+    if (!isOpen) return;
+    const el = panelContainerRef.current;
+    if (!el) return;
     resizeObserverRef.current = new ResizeObserver(() => {
-      window.requestAnimationFrame(fitTerminal);
+      if (activeTerminalId) fitTerminal(activeTerminalId);
     });
-    resizeObserverRef.current.observe(containerRef.current!);
-
-    window.requestAnimationFrame(() => {
-      fitTerminal();
-      connectTerminal();
-    });
-
-    return () => {
-      dataDisposable.dispose();
-      keyDisposable.dispose();
-      resizeObserverRef.current?.disconnect();
-      resizeObserverRef.current = null;
-      clearQueuedTerminalOutput();
-      terminal.dispose();
-      terminalRef.current = null;
-      fitAddonRef.current = null;
-    };
-  }, [connectTerminal, fitTerminal, isOpen, sendSocketMessage]);
-
-  useEffect(() => {
-    if (!isOpen) {
-      if (socketRef.current) {
-        socketRef.current.close();
-        socketRef.current = null;
-      }
-      return;
-    }
-    connectTerminal();
-  }, [connectTerminal, isOpen]);
-
-  useEffect(() => {
-    if (!isOpen || !sessionId || connectionState !== "closed") {
-      return;
-    }
-    if (reconnectTimerRef.current !== null) {
-      window.clearTimeout(reconnectTimerRef.current);
-    }
-    reconnectTimerRef.current = window.setTimeout(() => {
-      reconnectTimerRef.current = null;
-      connectTerminal();
-    }, 1200);
-
-    return () => {
-      if (reconnectTimerRef.current !== null) {
-        window.clearTimeout(reconnectTimerRef.current);
-        reconnectTimerRef.current = null;
-      }
-    };
-  }, [connectTerminal, connectionState, isOpen, sessionId]);
-
-  useEffect(() => {
+    resizeObserverRef.current.observe(el);
     return () => {
       resizeObserverRef.current?.disconnect();
       resizeObserverRef.current = null;
-      if (resizeTimerRef.current !== null) {
-        window.clearTimeout(resizeTimerRef.current);
+    };
+  }, [isOpen, activeTerminalId, fitTerminal]);
+
+  // Auto-reconnect disconnected terminals
+  useEffect(() => {
+    if (!isOpen || !sessionId) return;
+    const reconnectIds: string[] = [];
+    for (const info of terminalInfos) {
+      if (info.kind !== "interactive" || !info.isAlive) continue;
+      const inst = getInstance(info.terminalId);
+      if (inst && inst.connectionState === "closed") {
+        reconnectIds.push(info.terminalId);
       }
-      clearQueuedTerminalOutput();
-      if (reconnectTimerRef.current !== null) {
-        window.clearTimeout(reconnectTimerRef.current);
+    }
+    if (reconnectIds.length === 0) return;
+
+    const timers = reconnectTimersRef.current;
+    for (const id of reconnectIds) {
+      if (timers.has(id)) continue;
+      timers.set(id, window.setTimeout(() => {
+        timers.delete(id);
+        connectTerminal(id);
+      }, 1200));
+    }
+    return () => {
+      for (const id of reconnectIds) {
+        const t = timers.get(id);
+        if (t !== undefined) { window.clearTimeout(t); timers.delete(id); }
       }
-      socketRef.current?.close();
+    };
+  }, [isOpen, sessionId, terminalInfos, getInstance, connectTerminal]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      for (const [, inst] of instancesRef.current) {
+        if (inst.socket) inst.socket.close();
+        if (inst.outputFrame !== null) window.cancelAnimationFrame(inst.outputFrame);
+        inst.xterm.dispose();
+      }
+      instancesRef.current.clear();
+      containerRefs.current.clear();
+      openedSetRef.current.clear();
+      for (const [, d] of dataDisposablesRef.current) d.dispose();
+      for (const [, d] of keyDisposablesRef.current) d.dispose();
+      for (const [, t] of reconnectTimersRef.current) window.clearTimeout(t);
+      for (const [, t] of resizeTimersRef.current) window.clearTimeout(t);
     };
   }, []);
 
+  // Close sockets when panel closes
+  useEffect(() => {
+    if (isOpen) return;
+    for (const [, inst] of instancesRef.current) {
+      if (inst.socket) { inst.socket.close(); inst.socket = null; }
+      inst.connectionState = "idle";
+    }
+  }, [isOpen]);
+
   const handleClear = useCallback(() => {
-    clearQueuedTerminalOutput();
-    terminalRef.current?.clear();
-    sendSocketMessage({ type: "clear" });
-  }, [clearQueuedTerminalOutput, sendSocketMessage]);
+    if (!activeTerminalId) return;
+    clearQueuedOutput(activeTerminalId);
+    const inst = getInstance(activeTerminalId);
+    inst?.xterm.clear();
+    sendSocketMessage(activeTerminalId, { type: "clear" });
+  }, [activeTerminalId, clearQueuedOutput, getInstance, sendSocketMessage]);
 
   const handleInterrupt = useCallback(() => {
-    sendSocketMessage({ type: "interrupt" });
-    terminalRef.current?.focus();
-  }, [sendSocketMessage]);
+    if (!activeTerminalId) return;
+    sendSocketMessage(activeTerminalId, { type: "interrupt" });
+    getInstance(activeTerminalId)?.xterm.focus();
+  }, [activeTerminalId, getInstance, sendSocketMessage]);
 
-  const connectionLabel =
-    connectionState === "open"
+  const handleCreateTerminal = useCallback(() => {
+    const preferredCwd =
+      (activeTerminalId ? getInstance(activeTerminalId)?.cwd : null)
+      || terminalInfos.find((terminal) => terminal.isDefault)?.cwd
+      || undefined;
+    void onCreateTerminal(preferredCwd);
+  }, [activeTerminalId, getInstance, onCreateTerminal, terminalInfos]);
+
+  const handleCloseTab = useCallback((terminalId: string) => {
+    const info = terminalInfos.find((t) => t.terminalId === terminalId);
+    if (!info) return;
+    if (info.isDefault) return;
+    if (info.kind === "managed-process") {
+      onTerminateProcess(terminalId);
+      return;
+    }
+    void onCloseTerminal(terminalId);
+  }, [onCloseTerminal, onTerminateProcess, terminalInfos]);
+
+  const activeInfo = activeTerminalId
+    ? terminalInfos.find((terminal) => terminal.terminalId === activeTerminalId) ?? null
+    : null;
+  const activeInst = activeTerminalId ? getInstance(activeTerminalId) : null;
+
+  const connectionLabel = activeInfo?.kind === "managed-process"
+    ? (
+      activeInfo.status === "running"
+        ? "运行中"
+        : activeInfo.status === "orphaned"
+          ? "后台运行"
+          : activeInfo.status === "completed"
+            ? "已完成"
+            : activeInfo.status === "terminated"
+              ? "已终止"
+              : activeInfo.status === "unknown"
+                ? "状态未知"
+                : activeInfo.status || "进程中"
+    )
+    : activeInst?.connectionState === "open"
       ? "已连接"
-      : connectionState === "connecting"
+      : activeInst?.connectionState === "connecting"
         ? "连接中"
-        : connectionState === "error"
+        : activeInst?.connectionState === "error"
           ? "异常"
           : "未连接";
 
@@ -400,29 +565,65 @@ export function TerminalPanel({
             transition={{ duration: 0.24, ease: [0.25, 0.1, 0.25, 1] }}
             className="border-t bg-background text-foreground flex flex-col overflow-hidden"
           >
-            <div className="border-b px-3 flex items-center justify-between shrink-0 bg-muted/40 h-9">
-              <div className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
-                <TerminalIcon className="w-3.5 h-3.5 shrink-0" />
-                <span className="shrink-0">PowerShell</span>
-                <Badge variant="secondary" className="font-mono text-[10px] uppercase">
-                  {backend === "winpty" ? "PTY" : "PIPE"}
-                </Badge>
-                <Badge
-                  variant={connectionState === "open" ? "secondary" : connectionState === "error" ? "destructive" : "outline"}
-                  className="font-mono text-[10px]"
-                >
-                  {connectionLabel}
-                </Badge>
-                <span className="truncate font-mono text-[11px]" title={cwd || "当前目录"}>
-                  {cwd || "等待终端就绪"}
-                </span>
-              </div>
-              <div className="flex items-center gap-1">
+            {/* Tab bar */}
+            <div className="flex items-center h-9 shrink-0 bg-muted/30 border-b px-1 gap-0.5 overflow-x-auto">
+              {terminalInfos.map((info) => {
+                const inst = getInstance(info.terminalId);
+                const isActive = info.terminalId === activeTerminalId;
+                const isConnected = inst?.connectionState === "open";
+                const hasError = inst?.connectionState === "error";
+                return (
+                  <button
+                    key={info.terminalId}
+                    onClick={() => onActiveTerminalChange(info.terminalId)}
+                    className={`
+                      flex items-center gap-1.5 h-7 px-2.5 rounded-t text-[11px] shrink-0
+                      transition-colors relative group border border-b-0 border-transparent
+                      ${isActive
+                        ? "bg-background text-foreground border-border"
+                        : "text-muted-foreground hover:text-foreground hover:bg-muted/50"
+                      }
+                    `}
+                    title={info.kind === "managed-process" ? info.command ?? info.name : info.cwd ?? info.name}
+                  >
+                    <TerminalIcon className="w-3 h-3 shrink-0" />
+                    <span className="truncate max-w-[120px]">{info.kind === "managed-process" ? (info.command?.split(" ").slice(0, 2).join(" ") ?? info.terminalId) : info.name}</span>
+                    {isConnected && (
+                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-500/80 shrink-0" />
+                    )}
+                    {hasError && (
+                      <span className="h-1.5 w-1.5 rounded-full bg-destructive/80 shrink-0" />
+                    )}
+                    {!info.isDefault && (
+                      <span
+                        onClick={(e) => { e.stopPropagation(); handleCloseTab(info.terminalId); }}
+                        className="ml-0.5 opacity-0 group-hover:opacity-100 transition-opacity hover:text-destructive"
+                      >
+                        <X className="w-3 h-3" />
+                      </span>
+                    )}
+                    {isActive && (
+                      <span className="absolute bottom-0 left-0 right-0 h-[2px] bg-primary" />
+                    )}
+                  </button>
+                );
+              })}
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={handleCreateTerminal}
+                className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground hover:bg-muted/60"
+                title="新建终端"
+              >
+                <Plus className="w-3.5 h-3.5" />
+              </Button>
+              <div className="flex-1" />
+              <div className="flex items-center gap-0.5 pr-1">
                 <Button
                   variant="ghost"
                   size="sm"
                   onClick={handleInterrupt}
-                  disabled={connectionState !== "open"}
+                  disabled={!activeInst || activeInst.connectionState !== "open" || activeInst.kind === "managed-process"}
                   className="h-7 px-2 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
                   title="发送 Ctrl+C 中断"
                 >
@@ -431,9 +632,9 @@ export function TerminalPanel({
                 <Button
                   variant="ghost"
                   size="icon"
-                  onClick={onRefreshProcesses}
+                  onClick={onRefreshTerminals}
                   className="h-7 w-7 text-muted-foreground hover:bg-muted hover:text-foreground"
-                  title="刷新 AI 进程"
+                  title="刷新终端列表"
                 >
                   <RefreshCw className="w-3.5 h-3.5" />
                 </Button>
@@ -441,7 +642,8 @@ export function TerminalPanel({
                   variant="ghost"
                   size="icon"
                   onClick={handleClear}
-                  className="h-7 w-7 text-muted-foreground hover:bg-muted hover:text-foreground"
+                  disabled={!activeInst || activeInst.kind === "managed-process"}
+                  className="h-7 w-7 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
                   title="清空终端"
                 >
                   <Eraser className="w-3.5 h-3.5" />
@@ -451,83 +653,69 @@ export function TerminalPanel({
                   size="icon"
                   onClick={onToggle}
                   className="h-7 w-7 text-muted-foreground hover:bg-muted hover:text-foreground"
-                  title="关闭终端"
+                  title="关闭终端面板"
                 >
                   <ChevronDown className="w-4 h-4" />
                 </Button>
               </div>
             </div>
 
-            <div className="grid flex-1 overflow-hidden md:grid-cols-[minmax(0,1fr)_320px]">
-              <div className="relative min-h-0 overflow-hidden bg-[#111314]">
-                <div
-                  ref={containerRef}
-                  className="h-full w-full overflow-hidden px-3 py-2 [&_.xterm]:h-full [&_.xterm-viewport]:!overflow-y-auto"
-                  onMouseDown={() => terminalRef.current?.focus()}
-                />
-                {errorMessage && connectionState === "error" ? (
-                  <div className="pointer-events-none absolute bottom-2 left-3 rounded border border-destructive/30 bg-destructive/10 px-2 py-1 text-[11px] text-destructive">
-                    {errorMessage}
-                  </div>
-                ) : null}
+            {/* Status bar for active terminal */}
+            <div className="flex items-center h-7 shrink-0 bg-muted/20 border-b px-3 gap-2">
+              <div className="flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
+                <Badge variant="secondary" className="font-mono text-[10px] uppercase">
+                  {activeInst?.backend === "winpty" ? "PTY" : activeInst?.backend === "managed" ? "AI" : "PIPE"}
+                </Badge>
+                <Badge
+                  variant={activeInst?.connectionState === "open" ? "secondary" : activeInst?.connectionState === "error" ? "destructive" : "outline"}
+                  className="font-mono text-[10px]"
+                >
+                  {connectionLabel}
+                </Badge>
+                <span className="truncate font-mono text-[11px]" title={activeInst?.cwd || "当前目录"}>
+                  {activeInst?.cwd || "等待终端就绪"}
+                </span>
               </div>
+              {activeInst?.kind === "managed-process" && activeTerminalId && (
+                <Button
+                  size="xs"
+                  variant="destructive"
+                  onClick={() => onTerminateProcess(activeTerminalId)}
+                  className="ml-auto"
+                >
+                  <Square className="size-3 fill-current" />
+                  终止进程
+                </Button>
+              )}
+            </div>
 
-              <div className="border-t md:border-l md:border-t-0 bg-background/80">
-                <div className="flex items-center justify-between border-b px-3 py-2">
-                  <div className="text-xs font-medium text-foreground">AI 受管进程</div>
-                  <Button
-                    size="xs"
-                    variant="destructive"
-                    onClick={onStopAllProcesses}
-                    disabled={processes.length === 0 || isStoppingProcesses}
-                  >
-                    <Square className="size-3 fill-current" />
-                    全部终止
-                  </Button>
+            {/* Terminal containers */}
+            <div ref={panelContainerRef} className="relative flex-1 overflow-hidden bg-[#111314]">
+              {terminalInfos.map((info) => {
+                const isActive = info.terminalId === activeTerminalId;
+                const inst = getInstance(info.terminalId);
+                return (
+                  <div
+                    key={info.terminalId}
+                    ref={(el) => {
+                      if (el) containerRefs.current.set(info.terminalId, el);
+                    }}
+                    className={`
+                      absolute inset-0 overflow-hidden px-3 py-2
+                      [&_.xterm]:h-full [&_.xterm-viewport]:!overflow-y-auto
+                      ${isActive ? "z-10" : "z-0 invisible pointer-events-none"}
+                    `}
+                    onMouseDown={() => {
+                      if (isActive) inst?.xterm.focus();
+                    }}
+                  />
+                );
+              })}
+              {activeInst?.errorMessage && activeInst.connectionState === "error" ? (
+                <div className="pointer-events-none absolute bottom-2 left-3 z-20 rounded border border-destructive/30 bg-destructive/10 px-2 py-1 text-[11px] text-destructive">
+                  {activeInst.errorMessage}
                 </div>
-                <div className="max-h-full overflow-auto p-3">
-                  {processes.length === 0 ? (
-                    <p className="text-xs text-muted-foreground">当前没有仍在运行的 AI 命令进程。</p>
-                  ) : (
-                    <div className="space-y-2">
-                      {processes.map((process) => (
-                        <div
-                          key={process.terminalId}
-                          className="rounded-md border bg-muted/20 p-2 text-xs"
-                        >
-                          <div className="flex items-start justify-between gap-2">
-                            <div className="min-w-0 space-y-1">
-                              <div className="flex items-center gap-2">
-                                <span className="font-medium text-foreground">{process.terminalId}</span>
-                                <Badge variant={process.status === "orphaned" ? "destructive" : "secondary"}>
-                                  {process.status === "running"
-                                    ? "运行中"
-                                    : process.status === "orphaned"
-                                      ? "残留"
-                                      : process.status}
-                                </Badge>
-                              </div>
-                              <p className="truncate font-mono text-[11px] text-muted-foreground">
-                                PID {process.rootPid} · {process.processCount} 个进程
-                              </p>
-                            </div>
-                            <Button
-                              size="xs"
-                              variant="outline"
-                              onClick={() => onTerminateProcess(process.terminalId)}
-                            >
-                              终止
-                            </Button>
-                          </div>
-                          <pre className="mt-2 whitespace-pre-wrap break-all rounded bg-background/70 p-2 font-mono text-[11px] leading-5 text-foreground">
-                            {process.command}
-                          </pre>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
+              ) : null}
             </div>
           </motion.div>
         )}
@@ -540,7 +728,7 @@ export function TerminalPanel({
         >
           <TerminalIcon className="w-3.5 h-3.5" />
           终端
-          {connectionState === "open" ? (
+          {terminalInfos.some((t) => t.kind === "interactive" && t.isAlive) ? (
             <span className="h-2 w-2 rounded-full bg-emerald-500/70" />
           ) : (
             <PlugZap className="h-3.5 w-3.5 opacity-60" />

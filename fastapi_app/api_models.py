@@ -217,6 +217,26 @@ class TerminalControlRequest(BaseModel):
     action: Literal["interrupt"]
 
 
+class CreateTerminalRequest(BaseModel):
+    cwd: str | None = None
+    name: str | None = None
+
+
+class TerminalInfoResponse(BaseModel):
+    terminalId: str
+    name: str
+    shell: str
+    backend: str
+    cwd: str | None = None
+    isAlive: bool = True
+    isDefault: bool = False
+    kind: Literal["interactive", "managed-process"] = "interactive"
+    command: str | None = None
+    rootPid: int | None = None
+    status: str | None = None
+    startedAt: int | None = None
+
+
 class ToolConfirmationRequest(BaseModel):
     approved: bool
 

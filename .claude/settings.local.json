@@ -3,7 +3,8 @@
     "allow": [
       "Bash(git *)",
       "Bash(Get-ChildItem -Path \"D:\\\\vibe_projs\\\\SuperCode\\\\fastapi_app\" -Recurse -Filter \"*.py\")",
-      "Bash(Select-Object -ExpandProperty FullName)"
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "Bash(Get-ChildItem -Path \"D:\\\\vibe_projs\\\\SuperCode\" -Depth 2 -Directory)"
     ]
   }
 }

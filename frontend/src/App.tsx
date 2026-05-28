@@ -29,6 +29,7 @@ import type {
   SessionHistoryItem,
   SessionPayload,
   SkillSummary,
+  TerminalInfo,
   TerminalSnapshotPayload,
   ToolCallRecord,
   UIModelProvider,
@@ -356,6 +357,8 @@ export default function App() {
   const [terminalBackend, setTerminalBackend] = useState('subprocess');
   const [managedProcesses, setManagedProcesses] = useState<ManagedProcessPayload[]>([]);
   const [isStoppingProcesses, setIsStoppingProcesses] = useState(false);
+  const [terminalInfos, setTerminalInfos] = useState<TerminalInfo[]>([]);
+  const [activeTerminalId, setActiveTerminalId] = useState<string | null>(null);
   const [selectedFileContent, setSelectedFileContent] = useState('');
   const [selectedFilePath, setSelectedFilePath] = useState('');
   const [planData, setPlanData] = useState<PlanData | null>(null);
@@ -506,6 +509,7 @@ export default function App() {
       includeOutput?: boolean;
       includeFileTree?: boolean;
       includeProcesses?: boolean;
+      includeTerminals?: boolean;
       silent?: boolean;
     }) => {
       const currentSessionId = options?.targetSessionId ?? sessionId;
@@ -513,10 +517,43 @@ export default function App() {
         if (options?.includeProcesses) {
           setManagedProcesses([]);
         }
+        if (options?.includeTerminals) {
+          setTerminalInfos([]);
+        }
         return;
       }
 
       try {
+        if (options?.includeTerminals) {
+          const terminalsRes = await fetch(
+            `http://localhost:3001/api/sessions/${currentSessionId}/terminals`
+          );
+          if (terminalsRes.ok) {
+            const terminalsData = await terminalsRes.json();
+            const infos: TerminalInfo[] = Array.isArray(terminalsData.terminals)
+              ? terminalsData.terminals
+              : [];
+            setTerminalInfos(infos);
+            const defaultTerminal = infos.find((t) => t.isDefault);
+            if (defaultTerminal) {
+              setTerminalCwd(defaultTerminal.cwd ?? '');
+              setTerminalBackend(defaultTerminal.backend);
+            }
+            const mp: ManagedProcessPayload[] = infos
+              .filter((t) => t.kind === 'managed-process')
+              .map((t) => ({
+                terminalId: t.terminalId,
+                command: t.command ?? '',
+                rootPid: t.rootPid ?? 0,
+                status: t.status ?? 'unknown',
+                startedAt: t.startedAt ?? 0,
+                processCount: 0,
+                processes: [],
+              }));
+            setManagedProcesses(mp);
+          }
+        }
+
         const query = new URLSearchParams();
         query.set('include_output', options?.includeOutput ? 'true' : 'false');
         if (options?.includeFileTree) {
@@ -553,7 +590,7 @@ export default function App() {
       void refreshTerminalState({
         targetSessionId,
         includeFileTree: true,
-        includeProcesses: isTerminalOpen,
+        includeTerminals: isTerminalOpen,
         silent: true,
       });
     },
@@ -751,6 +788,8 @@ export default function App() {
     setTerminalCwd(data.workspace ?? '');
     setTerminalBackend('subprocess');
     setManagedProcesses([]);
+    setTerminalInfos([]);
+    setActiveTerminalId(null);
     setSessionContext(null);
     setIsContextOpen(false);
     setIsTerminalOpen(false);
@@ -876,7 +915,7 @@ export default function App() {
     const pollTerminalState = () =>
       refreshTerminalState({
         targetSessionId: sessionId,
-        includeProcesses: true,
+        includeTerminals: true,
         silent: true,
       });
 
@@ -979,7 +1018,7 @@ export default function App() {
       void refreshTerminalState({
         targetSessionId: sessionId,
         includeFileTree: true,
-        includeProcesses: isTerminalOpen,
+        includeTerminals: isTerminalOpen,
         silent: true,
       });
     },
@@ -1040,6 +1079,42 @@ export default function App() {
     setHasTerminalBeenOpened(true);
     setIsTerminalOpen((prev) => !prev);
   }, []);
+
+  const createTerminal = useCallback(async (cwd?: string) => {
+    if (!sessionId) return null;
+    try {
+      const res = await fetch(`http://localhost:3001/api/sessions/${sessionId}/terminals`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cwd: cwd || undefined }),
+      });
+      if (!res.ok) throw new Error('创建终端失败');
+      const data = await res.json();
+      const newTerminalId = data.terminalId as string;
+      await refreshTerminalState({ includeTerminals: true, silent: true });
+      return newTerminalId;
+    } catch (error) {
+      console.error(error);
+      return null;
+    }
+  }, [refreshTerminalState, sessionId]);
+
+  const closeTerminal = useCallback(async (terminalId: string) => {
+    if (!sessionId) return;
+    try {
+      const res = await fetch(`http://localhost:3001/api/sessions/${sessionId}/terminals/${terminalId}`, {
+        method: 'DELETE',
+      });
+      if (!res.ok) throw new Error('关闭终端失败');
+      if (activeTerminalId === terminalId) {
+        const defaultTerminal = terminalInfos.find((t) => t.isDefault);
+        setActiveTerminalId(defaultTerminal?.terminalId ?? terminalInfos[0]?.terminalId ?? null);
+      }
+      await refreshTerminalState({ includeTerminals: true, silent: true });
+    } catch (error) {
+      console.error(error);
+    }
+  }, [activeTerminalId, refreshTerminalState, sessionId, terminalInfos]);
 
   const terminateManagedProcess = useCallback(
     async (terminalId: string) => {
@@ -1561,7 +1636,7 @@ export default function App() {
             ) {
               void refreshTerminalState({
                 includeFileTree: true,
-                includeProcesses: isTerminalOpen,
+                includeTerminals: isTerminalOpen,
               });
             }
             if (toolName === 'open_browser') {
@@ -1978,7 +2053,7 @@ export default function App() {
       if (currentSessionIdRef.current === streamSessionId) {
         setIsLoading(false);
         void refreshTerminalState({
-          includeProcesses: isTerminalOpen,
+          includeTerminals: isTerminalOpen,
           silent: true,
         });
         void loadSessionContext({ silent: !isContextOpen });
@@ -2201,7 +2276,7 @@ export default function App() {
         if (approved) {
           void refreshTerminalState({
             includeFileTree: true,
-            includeProcesses: isTerminalOpen,
+            includeTerminals: isTerminalOpen,
           });
         }
         if (data.shouldContinue) {
@@ -2271,7 +2346,7 @@ export default function App() {
         if (approved) {
           void refreshTerminalState({
             includeFileTree: true,
-            includeProcesses: isTerminalOpen,
+            includeTerminals: isTerminalOpen,
           });
         }
         if (data.shouldContinue) {
@@ -2598,6 +2673,8 @@ export default function App() {
     setTerminalCwd('');
     setTerminalBackend('subprocess');
     setManagedProcesses([]);
+    setTerminalInfos([]);
+    setActiveTerminalId(null);
     setSelectedFileContent('');
     setSelectedFilePath('');
     setBackendMode('demo');
@@ -2878,15 +2955,18 @@ export default function App() {
         />
         <TerminalPanel
           sessionId={sessionId}
-          cwd={terminalCwd}
-          backend={terminalBackend}
           isOpen={isTerminalOpen}
-          isStoppingProcesses={isStoppingProcesses}
-          processes={managedProcesses}
-          onRuntimeStatusChange={applyTerminalSnapshot}
+          terminalInfos={terminalInfos}
+          activeTerminalId={activeTerminalId}
+          onActiveTerminalChange={setActiveTerminalId}
+          onRuntimeStatusChange={(status) => {
+            if (status.cwd) setTerminalCwd(status.cwd);
+            if (status.backend) setTerminalBackend(status.backend);
+          }}
           onToggle={handleTerminalToggle}
-          onRefreshProcesses={() => void refreshTerminalState({ includeProcesses: true })}
-          onStopAllProcesses={() => void stopManagedProcesses()}
+          onRefreshTerminals={() => void refreshTerminalState({ includeTerminals: true })}
+          onCreateTerminal={createTerminal}
+          onCloseTerminal={closeTerminal}
           onTerminateProcess={(terminalId) => void terminateManagedProcess(terminalId)}
         />
       </div>

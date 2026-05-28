@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import codecs
 import re
 import subprocess
@@ -160,8 +161,21 @@ class TerminalRuntimeBase:
         self.stdout_thread.start()
 
     def _build_powershell_command(self) -> str:
+        encoded_bootstrap = base64.b64encode(
+            self._build_powershell_bootstrap().encode("utf-16le")
+        ).decode("ascii")
+        return (
+            "powershell "
+            "-NoLogo "
+            "-NoProfile "
+            "-NoExit "
+            "-ExecutionPolicy Bypass "
+            f"-EncodedCommand {encoded_bootstrap}"
+        )
+
+    def _build_powershell_bootstrap(self) -> str:
         escaped_workspace = self.workspace.replace("'", "''")
-        bootstrap = (
+        return (
             "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false); "
             "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
             "$OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
@@ -169,14 +183,6 @@ class TerminalRuntimeBase:
             "$env:PYTHONUTF8 = '1'; "
             "chcp 65001 > $null; "
             f"Set-Location -LiteralPath '{escaped_workspace}'"
-        )
-        return (
-            "powershell "
-            "-NoLogo "
-            "-NoProfile "
-            "-NoExit "
-            "-ExecutionPolicy Bypass "
-            f'-Command "{bootstrap}"'
         )
 
     def _pump_pty_stream(self) -> None:

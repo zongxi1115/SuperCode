@@ -73,6 +73,7 @@ from fastapi_app.api_models import (
     SessionRestoreRequest,
     SwitchModelRequest,
     TerminalControlRequest,
+    CreateTerminalRequest,
     ModelConfigPayload,
     SettingsPayload,
     TerminalInputRequest,
@@ -428,7 +429,8 @@ class UISession:
     open_files: list[str] = field(default_factory=lambda: list(DEFAULT_OPEN_FILES))
     terminal_output: str = ""
     preview_url: str = DEFAULT_BROWSER_PREVIEW_URL
-    terminal_runtime: TerminalRuntime | None = field(default=None, repr=False)
+    terminal_runtimes: dict[str, TerminalRuntime] = field(default_factory=dict, init=False, repr=False)
+    default_terminal_id: str | None = field(default=None, init=False, repr=False)
     interactive_command_session: InteractiveCommandSession | None = field(default=None, repr=False)
     chat_session: ChatSession | None = None
     is_generating: bool = False
@@ -470,9 +472,24 @@ class UISession:
         self.max_context_tokens = self.max_context_tokens or infer_model_context_limit(self.model)
         refresh_session_runtime_state(self)
 
+    @property
+    def terminal_runtime(self) -> TerminalRuntime | None:
+        return self.get_terminal()
+
+    def get_terminal(self, terminal_id: str | None = None) -> TerminalRuntime | None:
+        tid = terminal_id or self.default_terminal_id
+        return self.terminal_runtimes.get(tid) if tid else None
+
+    def _ensure_default_terminal(self, workspace: str) -> None:
+        if self.default_terminal_id is None or self.default_terminal_id not in self.terminal_runtimes:
+            self.default_terminal_id = "main"
+            self.terminal_runtimes["main"] = TerminalRuntime(workspace=workspace)
+
+
     def snapshot(self) -> CreateSessionResponse:
-        if self.terminal_runtime is not None:
-            self.terminal_output = self.terminal_runtime.snapshot(self.session_id).output
+        default_runtime = self.get_terminal()
+        if default_runtime is not None:
+            self.terminal_output = default_runtime.snapshot(self.session_id).output
         refresh_session_runtime_state(self)
         return CreateSessionResponse(
             sessionId=self.session_id,
@@ -526,10 +543,12 @@ class UISession:
         include_output: bool = False,
         include_file_tree: bool = False,
         include_processes: bool = False,
+        terminal_id: str | None = None,
     ) -> TerminalSnapshotResponse:
-        if self.terminal_runtime is None:
+        runtime = self.get_terminal(terminal_id)
+        if runtime is None:
             raise RuntimeError("terminal 不存在")
-        snapshot = self.terminal_runtime.snapshot(
+        snapshot = runtime.snapshot(
             self.session_id,
             include_output=include_output,
         )
@@ -674,8 +693,8 @@ async def lifespan(app: FastAPI):
     def _cleanup_sessions() -> None:
         for session in _sessions.values():
             stop_session_execution(session)
-            if session.terminal_runtime is not None:
-                session.terminal_runtime.close()
+            for runtime in session.terminal_runtimes.values():
+                runtime.close()
             if session.interactive_command_session is not None:
                 session.interactive_command_session.close()
 
@@ -1819,7 +1838,6 @@ def hydrate_session_from_state(state: PersistedSessionState) -> UISession:
         open_files=state.open_files,
         terminal_output=state.terminal_output,
         preview_url=state.preview_url or DEFAULT_BROWSER_PREVIEW_URL,
-        terminal_runtime=TerminalRuntime(workspace=state.workspace),
         interactive_command_session=interactive_command_session,
         chat_session=chat_session,
         history_messages=state.history_messages,
@@ -1841,6 +1859,7 @@ def hydrate_session_from_state(state: PersistedSessionState) -> UISession:
         deploy_connection_manager=deploy_connection_manager,
         deploy_state=state.deploy_state,
     )
+    session._ensure_default_terminal(state.workspace)
     if session.chat_session is not None:
         seed_chat_session_history(session.chat_session, state.history_messages, state.history_tools)
     if session.chat_session is not None and isinstance(session.chat_session.agent, Agent):
@@ -2167,7 +2186,6 @@ async def create_session(request: CreateSessionRequest) -> JSONResponse:
         workspace=workspace,
         env_file=env_file_used,
         agent_type=agent_type,
-        terminal_runtime=TerminalRuntime(workspace=workspace),
         interactive_command_session=interactive_command_session,
         chat_session=chat_session,
         mode="agent" if chat_session is not None else "demo",
@@ -2175,6 +2193,7 @@ async def create_session(request: CreateSessionRequest) -> JSONResponse:
         selected_file_path=pick_default_file(workspace),
         open_files=build_default_open_files(workspace),
     )
+    session._ensure_default_terminal(workspace)
     if session.chat_session is not None and isinstance(session.chat_session.agent, Agent):
         attach_agent_runtime_metadata(
             session.chat_session.agent,
@@ -2274,8 +2293,8 @@ async def delete_session(session_id: str) -> JSONResponse:
             raise HTTPException(status_code=404, detail="session 不存在")
     else:
         stop_session_execution(session)
-        if session.terminal_runtime is not None:
-            session.terminal_runtime.close()
+        for runtime in session.terminal_runtimes.values():
+            runtime.close()
         if session.interactive_command_session is not None:
             session.interactive_command_session.close()
     _session_store.delete(session_id)
@@ -3638,13 +3657,101 @@ async def post_session_terminal_clear(session_id: str) -> JSONResponse:
     return JSONResponse(snapshot.model_dump())
 
 
+@app.get("/api/sessions/{session_id}/terminals")
+async def list_session_terminals(session_id: str) -> JSONResponse:
+    session = require_session(session_id)
+    terminals: list[dict[str, Any]] = []
+    for tid, runtime in session.terminal_runtimes.items():
+        snapshot = runtime.snapshot(session_id, include_output=False)
+        terminals.append({
+            "terminalId": tid,
+            "name": "PowerShell" if tid == "main" else tid,
+            "shell": snapshot.shell,
+            "backend": snapshot.backend,
+            "cwd": snapshot.cwd or session.workspace,
+            "isAlive": snapshot.isAlive,
+            "isDefault": tid == session.default_terminal_id,
+            "kind": "interactive",
+        })
+    if session.interactive_command_session is not None:
+        for proc in session.interactive_command_session.list_managed_processes(only_active=True):
+            terminals.append({
+                "terminalId": proc["terminalId"],
+                "name": proc["terminalId"],
+                "shell": "powershell",
+                "backend": "managed",
+                "cwd": session.workspace,
+                "isAlive": proc["status"] in ("running", "orphaned"),
+                "isDefault": False,
+                "kind": "managed-process",
+                "command": proc["command"],
+                "rootPid": proc["rootPid"],
+                "status": proc["status"],
+                "startedAt": proc["startedAt"],
+            })
+    return JSONResponse({"terminals": terminals})
+
+
+@app.post("/api/sessions/{session_id}/terminals")
+async def create_session_terminal(
+    session_id: str,
+    request: CreateTerminalRequest,
+) -> JSONResponse:
+    session = require_session(session_id)
+    if len(session.terminal_runtimes) >= 8:
+        raise HTTPException(status_code=400, detail="终端数量已达上限（8 个）")
+    terminal_id = f"term_{uuid.uuid4().hex[:6]}"
+    workspace = session.workspace
+    default_runtime = session.get_terminal(session.default_terminal_id)
+    inherited_cwd = None
+    if default_runtime is not None:
+        try:
+            inherited_cwd = default_runtime.snapshot(session_id, include_output=False).cwd
+        except Exception:
+            inherited_cwd = None
+    cwd = request.cwd or inherited_cwd or workspace
+    name = request.name or f"PowerShell {len(session.terminal_runtimes) + 1}"
+    runtime = TerminalRuntime(workspace=workspace)
+    if cwd != workspace:
+        runtime.send_input(f"Set-Location -LiteralPath '{cwd}'", submit=True)
+    session.terminal_runtimes[terminal_id] = runtime
+    session.touch()
+    snapshot = runtime.snapshot(session_id, include_output=False)
+    return JSONResponse({
+        "terminalId": terminal_id,
+        "name": name,
+        "shell": snapshot.shell,
+        "backend": snapshot.backend,
+        "cwd": snapshot.cwd or workspace,
+        "isAlive": snapshot.isAlive,
+        "isDefault": terminal_id == session.default_terminal_id,
+        "kind": "interactive",
+    })
+
+
+@app.delete("/api/sessions/{session_id}/terminals/{terminal_id}")
+async def close_session_terminal(session_id: str, terminal_id: str) -> JSONResponse:
+    session = require_session(session_id)
+    if terminal_id == session.default_terminal_id:
+        raise HTTPException(status_code=400, detail="不能关闭默认终端")
+    runtime = session.terminal_runtimes.pop(terminal_id, None)
+    if runtime is None:
+        raise HTTPException(status_code=404, detail="终端不存在")
+    runtime.close()
+    session.touch()
+    return JSONResponse({"closed": True, "terminalId": terminal_id})
+
+
 @app.websocket("/api/sessions/{session_id}/terminal/ws")
 async def session_terminal_websocket(
     websocket: WebSocket,
     session_id: str,
+    terminal_id: str | None = Query(None),
 ) -> None:
     session = require_session(session_id)
-    if session.terminal_runtime is None:
+    resolved_id = terminal_id or session.default_terminal_id
+    runtime = session.get_terminal(resolved_id) if resolved_id else None
+    if runtime is None:
         await websocket.close(code=1011, reason="terminal 不存在")
         return
 
@@ -3656,14 +3763,14 @@ async def session_terminal_websocket(
     def enqueue_output(chunk: str) -> None:
         loop.call_soon_threadsafe(output_queue.put_nowait, chunk)
 
-    unsubscribe = session.terminal_runtime.read_loop(enqueue_output)
+    unsubscribe = runtime.read_loop(enqueue_output)
 
     async def send_terminal_message(message: dict[str, Any]) -> None:
         async with send_lock:
             await websocket.send_json(message)
 
     async def send_terminal_status() -> None:
-        snapshot = session.terminal_runtime.snapshot(
+        snapshot = runtime.snapshot(
             session_id,
             include_output=False,
         )
@@ -3678,7 +3785,7 @@ async def session_terminal_websocket(
         )
 
     async def send_runtime_output() -> None:
-        snapshot = session.terminal_runtime.snapshot(
+        snapshot = runtime.snapshot(
             session_id,
             include_output=True,
             output_tail_chars=TERMINAL_WS_INITIAL_REPLAY_MAX_CHARS,
@@ -3694,7 +3801,7 @@ async def session_terminal_websocket(
                         ],
                     }
                 )
-        session.terminal_output = session.terminal_runtime.snapshot(
+        session.terminal_output = runtime.snapshot(
             session_id,
             include_output=True,
         ).output
@@ -3727,7 +3834,7 @@ async def session_terminal_websocket(
 
             message_type = str(message.get("type") or "").strip().lower()
             if message_type == "input":
-                session.terminal_runtime.write(str(message.get("data") or ""))
+                runtime.write(str(message.get("data") or ""))
                 continue
             elif message_type == "resize":
                 try:
@@ -3735,15 +3842,15 @@ async def session_terminal_websocket(
                     rows = int(message.get("rows") or 0)
                 except (TypeError, ValueError):
                     continue
-                session.terminal_runtime.resize(cols, rows)
+                runtime.resize(cols, rows)
                 continue
             elif message_type == "clear":
-                session.terminal_runtime.clear()
+                runtime.clear()
                 session.terminal_output = ""
                 await send_terminal_message({"type": "clear"})
                 await send_terminal_status()
             elif message_type == "interrupt":
-                if not session.terminal_runtime.interrupt():
+                if not runtime.interrupt():
                     await send_terminal_message(
                         {"type": "error", "message": "当前终端后端不支持 Ctrl+C 中断"}
                     )
@@ -4951,7 +5058,6 @@ def _rebuild_chat_session_for_existing_history(
         open_files=deepcopy(open_files),
         terminal_output=terminal_output,
         preview_url=preview_url or DEFAULT_BROWSER_PREVIEW_URL,
-        terminal_runtime=TerminalRuntime(workspace=workspace),
         interactive_command_session=interactive_command_session,
         chat_session=chat_session,
         history_messages=deepcopy(history_messages),
@@ -4963,6 +5069,7 @@ def _rebuild_chat_session_for_existing_history(
         deploy_connection_manager=deploy_connection_manager,
         deploy_state=deepcopy(deploy_state),
     )
+    session._ensure_default_terminal(workspace)
     if session.chat_session is not None:
         seed_chat_session_history(session.chat_session, session.history_messages, session.history_tools)
     if session.chat_session is not None and isinstance(session.chat_session.agent, Agent):
@@ -5998,8 +6105,8 @@ if __name__ == "__main__":
     def _force_shutdown(signum: int, frame: Any) -> None:
         for session in _sessions.values():
             stop_session_execution(session)
-            if session.terminal_runtime is not None:
-                session.terminal_runtime.close()
+            for runtime in session.terminal_runtimes.values():
+                runtime.close()
             if session.interactive_command_session is not None:
                 session.interactive_command_session.close()
         import os

@@ -345,6 +345,21 @@ export type ManagedProcessPayload = {
   processes: ManagedProcessInfo[];
 };
 
+export type TerminalInfo = {
+  terminalId: string;
+  name: string;
+  shell: string;
+  backend: string;
+  cwd: string | null;
+  isAlive: boolean;
+  isDefault: boolean;
+  kind: 'interactive' | 'managed-process';
+  command?: string | null;
+  rootPid?: number | null;
+  status?: string | null;
+  startedAt?: number | null;
+};
+
 export type ModelOption = {
   id: string;
   name: string;
