@@ -37,6 +37,7 @@ type EditorPanelProps = {
   onPlanAnnotationsChange?: (annotations: Annotation[]) => void;
   onSubmitPlan?: (markdown: string, annotations: Annotation[]) => void;
   onClosePlan?: () => void;
+  isDarkMode?: boolean;
 };
 
 const DEFAULT_FILE_TREE_WIDTH = 200;
@@ -69,6 +70,7 @@ export function EditorPanel({
   onPlanAnnotationsChange,
   onSubmitPlan,
   onClosePlan,
+  isDarkMode = false,
 }: EditorPanelProps) {
   const [isEditing, setIsEditing] = useState(false);
   const [editContent, setEditContent] = useState('');
@@ -324,7 +326,7 @@ export function EditorPanel({
                           value={isEditing ? editContent : selectedFileContent}
                           onChange={isEditing ? ((value) => setEditContent(value ?? '')) : undefined}
                           onMount={handleEditorMount}
-                          theme="vs"
+                          theme={isDarkMode ? "vs-dark" : "vs"}
                           path={selectedFilePath}
                           options={{
                             readOnly: !isEditing,

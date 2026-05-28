@@ -929,11 +929,49 @@ function renderCitationMessage(
 }
 
 function normalizeThoughtText(value?: string | null) {
-  const trimmed = value?.trim() ?? "";
+  const trimmed = dedupeAdjacentThoughtText(value?.trim() ?? "");
   if (!trimmed || trimmed === "模型未提供思路。") {
     return "";
   }
   return trimmed;
+}
+
+function getThoughtTextKey(value: string) {
+  return value.trim().replace(/\s+/g, " ");
+}
+
+function dedupeAdjacentThoughtText(value: string) {
+  if (!value) {
+    return "";
+  }
+
+  const paragraphs = value.replace(/\r\n/g, "\n").split(/\n{2,}/);
+  const dedupedParagraphs: string[] = [];
+  let previousParagraphKey = "";
+
+  for (const paragraph of paragraphs) {
+    const dedupedLines: string[] = [];
+    let previousLineKey = "";
+
+    for (const line of paragraph.split("\n")) {
+      const lineKey = getThoughtTextKey(line);
+      if (lineKey && lineKey === previousLineKey) {
+        continue;
+      }
+      dedupedLines.push(line);
+      previousLineKey = lineKey;
+    }
+
+    const dedupedParagraph = dedupedLines.join("\n").trimEnd();
+    const paragraphKey = getThoughtTextKey(dedupedParagraph);
+    if (paragraphKey && paragraphKey === previousParagraphKey) {
+      continue;
+    }
+    dedupedParagraphs.push(dedupedParagraph);
+    previousParagraphKey = paragraphKey;
+  }
+
+  return dedupedParagraphs.join("\n\n").trim();
 }
 
 function parseGitStatus(raw: string): {
@@ -2887,6 +2925,27 @@ const MessageList = memo(function MessageList({
     }
     flushCot();
 
+    const thinkingBeforeText = (g: typeof groups[number]) =>
+      g.type === "cot" || g.type === "tools";
+    for (let gi = groups.length - 1; gi > 0; gi--) {
+      const group = groups[gi];
+      if (!thinkingBeforeText(group)) continue;
+      let targetIdx = -1;
+      for (let j = gi - 1; j >= 0; j--) {
+        if (thinkingBeforeText(groups[j])) { targetIdx = j; break; }
+      }
+      if (targetIdx === -1) continue;
+      const target = groups[targetIdx];
+      const merged = [...target.blocks, ...group.blocks];
+      const hasThinking = merged.some(
+        (b) => b.type === "thinking" && b.text.trim(),
+      );
+      groups[targetIdx] = hasThinking
+        ? { type: "cot", blocks: merged, hasThinking: true }
+        : { type: "tools", blocks: merged };
+      groups.splice(gi, 1);
+    }
+
     const activeCotGroupIdx =
       isLast && isLoading && groups[groups.length - 1]?.type === "cot"
         ? groups.length - 1
@@ -3086,17 +3145,21 @@ const MessageList = memo(function MessageList({
                   )
                 : -1;
               const rendered: React.ReactNode[] = [];
+              let lastRenderedThinkingKey = "";
               let i = 0;
               while (i < group.blocks.length) {
                 const block = group.blocks[i];
                 if (block.type === "thinking") {
-                  if (block.text.trim()) {
+                  const thoughtText = normalizeThoughtText(block.text);
+                  const thoughtKey = getThoughtTextKey(thoughtText);
+                  if (thoughtText && thoughtKey !== lastRenderedThinkingKey) {
+                    lastRenderedThinkingKey = thoughtKey;
                     const thinkingLabel =
                       thinkingRendering === "markdown" ? (
-                        renderCitationMessage(block.text, citations)
+                        renderCitationMessage(thoughtText, citations)
                       ) : (
                         <span className="whitespace-pre-wrap break-words">
-                          {block.text}
+                          {thoughtText}
                         </span>
                       );
                     rendered.push(

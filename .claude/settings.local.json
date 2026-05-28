@@ -4,7 +4,9 @@
       "Bash(git *)",
       "Bash(Get-ChildItem -Path \"D:\\\\vibe_projs\\\\SuperCode\\\\fastapi_app\" -Recurse -Filter \"*.py\")",
       "Bash(Select-Object -ExpandProperty FullName)",
-      "Bash(Get-ChildItem -Path \"D:\\\\vibe_projs\\\\SuperCode\" -Depth 2 -Directory)"
+      "Bash(Get-ChildItem -Path \"D:\\\\vibe_projs\\\\SuperCode\" -Depth 2 -Directory)",
+      "Bash(pnpm dev *)",
+      "Bash(pnpm check *)"
     ]
   }
 }

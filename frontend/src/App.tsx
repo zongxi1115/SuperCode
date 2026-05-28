@@ -54,7 +54,7 @@ import {
   resolvePlanDraftTitle,
 } from '@/lib/plan-draft';
 
-import { PanelRightOpen, PanelRightClose, Settings2 } from 'lucide-react';
+import { Moon, PanelRightOpen, PanelRightClose, Settings2, Sun } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 const DEFAULT_WEB_PREVIEW_URL = 'http://localhost:8888';
@@ -401,6 +401,11 @@ export default function App() {
     messageId: string;
     action: CompletionActionKey;
   } | null>(null);
+  const [isDarkMode, setIsDarkMode] = useState(() => {
+    const stored = localStorage.getItem('theme');
+    if (stored) return stored === 'dark';
+    return window.matchMedia('(prefers-color-scheme: dark)').matches;
+  });
   const activeRequestRef = useRef<AbortController | null>(null);
   const activeStreamSessionIdRef = useRef<string | null>(null);
   const currentSessionIdRef = useRef<string | null>(null);
@@ -408,6 +413,11 @@ export default function App() {
   useEffect(() => {
     currentSessionIdRef.current = sessionId;
   }, [sessionId]);
+
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', isDarkMode);
+    localStorage.setItem('theme', isDarkMode ? 'dark' : 'light');
+  }, [isDarkMode]);
 
   useEffect(() => {
     const handleHashChange = () => {
@@ -1665,11 +1675,28 @@ export default function App() {
           } else if (data.type === 'reasoning-delta') {
             const assistantId = currentAssistantId;
             if (!assistantId) return;
-            updateAssistantMessage(assistantId, (message) => ({
-              ...message,
-              thoughts: `${message.thoughts ?? ''}${data.delta ?? ''}`,
-              parts: appendToLastPart(message, 'thinking', data.delta ?? '')
-            }), false);
+            updateAssistantMessage(assistantId, (message) => {
+              const delta = data.delta ?? '';
+              if (!delta) return message;
+              const parts = message.parts ?? [];
+              const last = parts[parts.length - 1];
+              if (last && last.type === 'thinking') {
+                return {
+                  ...message,
+                  thoughts: `${message.thoughts ?? ''}${delta}`,
+                  parts: [...parts.slice(0, -1), { ...last, text: last.text + delta }],
+                };
+              }
+              const textIdx = parts.findIndex((p) => p.type === 'text');
+              const nextParts = textIdx === -1
+                ? [...parts, { type: 'thinking' as const, text: delta }]
+                : [...parts.slice(0, textIdx), { type: 'thinking' as const, text: delta }, ...parts.slice(textIdx)];
+              return {
+                ...message,
+                thoughts: `${message.thoughts ?? ''}${delta}`,
+                parts: nextParts,
+              };
+            }, false);
           } else if (data.type === 'tool-input-available') {
             const assistantId = currentAssistantId;
             if (!assistantId) return;
@@ -1932,11 +1959,28 @@ export default function App() {
             const assistantId = data.payload.assistant_id || currentAssistantId;
             if (!assistantId) return;
             currentAssistantId = assistantId;
-            updateAssistantMessage(assistantId, (message) => ({
-              ...message,
-              thoughts: `${message.thoughts ?? ''}${data.payload.delta ?? ''}`,
-              parts: appendToLastPart(message, 'thinking', data.payload.delta ?? '')
-            }), false);
+            updateAssistantMessage(assistantId, (message) => {
+              const delta = data.payload.delta ?? '';
+              if (!delta) return message;
+              const parts = message.parts ?? [];
+              const last = parts[parts.length - 1];
+              if (last && last.type === 'thinking') {
+                return {
+                  ...message,
+                  thoughts: `${message.thoughts ?? ''}${delta}`,
+                  parts: [...parts.slice(0, -1), { ...last, text: last.text + delta }],
+                };
+              }
+              const textIdx = parts.findIndex((p) => p.type === 'text');
+              const nextParts = textIdx === -1
+                ? [...parts, { type: 'thinking' as const, text: delta }]
+                : [...parts.slice(0, textIdx), { type: 'thinking' as const, text: delta }, ...parts.slice(textIdx)];
+              return {
+                ...message,
+                thoughts: `${message.thoughts ?? ''}${delta}`,
+                parts: nextParts,
+              };
+            }, false);
           } else if (data.type === 'thought') {
             const assistantId = data.payload.assistant_id || currentAssistantId;
             if (!assistantId) return;
@@ -1946,11 +1990,15 @@ export default function App() {
               if (!nextThought || message.thoughts?.trim()) {
                 return message;
               }
-              const newParts = appendToLastPart(message, 'thinking', nextThought);
+              const parts = message.parts ?? [];
+              const textIdx = parts.findIndex((p) => p.type === 'text');
+              const nextParts = textIdx === -1
+                ? [...parts, { type: 'thinking' as const, text: nextThought }]
+                : [...parts.slice(0, textIdx), { type: 'thinking' as const, text: nextThought }, ...parts.slice(textIdx)];
               return {
                 ...message,
                 thoughts: nextThought,
-                parts: newParts
+                parts: nextParts
               };
             }, true);
           } else if (data.type === 'tool_call') {
@@ -2740,6 +2788,15 @@ export default function App() {
           <Settings2 className="w-3.5 h-3.5" />
           设置
         </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7 rounded-full"
+          onClick={() => setIsDarkMode((prev) => !prev)}
+          title={isDarkMode ? '切换到浅色模式' : '切换到深色模式'}
+        >
+          {isDarkMode ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+        </Button>
         <Button variant="ghost" size="icon" onClick={toggleRightPanel} className="h-7 w-7 ml-2" title={isRightPanelCollapsed ? '展开右侧面板' : '收起右侧面板'}>
           {isRightPanelCollapsed ? <PanelRightOpen className="w-4 h-4" /> : <PanelRightClose className="w-4 h-4" />}
         </Button>
@@ -2839,6 +2896,7 @@ export default function App() {
           onToggleWebPreview={() => setIsWebPreviewOpen((prev) => !prev)}
           webPreviewUrl={webPreviewUrl}
           onWebPreviewUrlChange={setWebPreviewUrl}
+          isDarkMode={isDarkMode}
           onSelectPreviewElement={(html, selector, sourceUrl) => {
             setElementAttachments((prev) => [
               ...prev,

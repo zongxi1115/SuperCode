@@ -15,7 +15,7 @@ import {
 import { cn } from "@/lib/utils";
 import type { CodeChangeRecord } from "@/lib/app-types";
 import { getFileIcon } from "@/lib/file-icons";
-import { ChevronRight, FileStack } from "lucide-react";
+import { ChevronRight, ChevronsDownUp, ChevronsUpDown, FileStack } from "lucide-react";
 import { memo, useMemo, useState } from "react";
 
 type AggregatedChange = {
@@ -158,6 +158,12 @@ export const TurnFileChangeList = memo(function TurnFileChangeList({
 
   if (changes.length === 0) return null;
 
+  const [expanded, setExpanded] = useState(false);
+  const DEFAULT_VISIBLE = 5;
+  const hasOverflow = aggregated.length > DEFAULT_VISIBLE;
+  const visibleList = expanded ? aggregated : aggregated.slice(0, DEFAULT_VISIBLE);
+  const hiddenCount = aggregated.length - DEFAULT_VISIBLE;
+
   return (
     <div
       className={cn(
@@ -185,9 +191,31 @@ export const TurnFileChangeList = memo(function TurnFileChangeList({
       </div>
 
       <div className="flex flex-col bg-card divide-y-0">
-        {aggregated.map((agg) => (
+        {visibleList.map((agg) => (
           <FileChangeItem key={`${agg.action}::${agg.path}`} agg={agg} />
         ))}
+        {hasOverflow && (
+          <button
+            onClick={() => setExpanded((v) => !v)}
+            className={cn(
+              "flex w-full items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-muted-foreground transition-colors",
+              "hover:bg-muted/60 hover:text-foreground",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+            )}
+          >
+            {expanded ? (
+              <>
+                <ChevronsDownUp className="h-3.5 w-3.5" />
+                收起
+              </>
+            ) : (
+              <>
+                <ChevronsUpDown className="h-3.5 w-3.5" />
+                还有 {hiddenCount} 个文件，点击展开
+              </>
+            )}
+          </button>
+        )}
       </div>
     </div>
   );

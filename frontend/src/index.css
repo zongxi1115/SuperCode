@@ -60,9 +60,33 @@
       radial-gradient(circle at top, rgba(158, 71, 255, 0.3), transparent 40%),
       linear-gradient(180deg, #220038 0%, #170023 45%, #12001b 100%);
   }
+  html.dark {
+    background: var(--background);
+  }
   body {
     @apply bg-background text-foreground;
     min-height: 100%;
+  }
+
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: oklch(0.75 0 0 / 0.25);
+    border-radius: 4px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: oklch(0.75 0 0 / 0.45);
+  }
+  .dark ::-webkit-scrollbar-thumb {
+    background: oklch(0.35 0 0 / 0.6);
+  }
+  .dark ::-webkit-scrollbar-thumb:hover {
+    background: oklch(0.4 0 0 / 0.8);
   }
 }
 
