@@ -6,8 +6,8 @@ param(
     [switch]$AutoInstallTools,
     [switch]$StartBackend,
     [switch]$StartFrontend,
-    [int]$BackendPort = 8000,
-    [int]$FrontendPort = 5173
+    [int]$BackendPort = 3001,
+    [int]$FrontendPort = 8888
 )
 
 $ErrorActionPreference = "Stop"

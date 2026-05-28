@@ -6,7 +6,7 @@ function isLoopbackHost(hostname: string): boolean {
 }
 
 export function canUsePreviewSelectBridge(url: string): boolean {
-  if (!url || !import.meta.env.DEV) {
+  if (!url) {
     return false;
   }
 

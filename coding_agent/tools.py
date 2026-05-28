@@ -2669,7 +2669,7 @@ class OpenBrowserTool(CodingBaseTool):
     name = "open_browser"
     description = (
         "打开内置浏览器预览。参数二选一："
-        "1) url：网络地址，例如 http://localhost:3000、https://example.com、localhost:5173；"
+        "1) url：网络地址，例如 http://localhost:3000、https://example.com、localhost:8888；"
         "2) path：本地文件或目录路径，支持工作区内相对路径和绝对路径。"
         "如果 path 指向目录，会自动寻找其中的 index.html 或 index.htm。"
         "不要把本地文件路径塞进 url，也不要把网络地址塞进 path。"
@@ -2708,7 +2708,7 @@ class OpenBrowserTool(CodingBaseTool):
             )
 
         backend_base_url = str(
-            context.metadata.get("backend_base_url", "http://localhost:8000")
+            context.metadata.get("backend_base_url", "http://localhost:3001")
         ).rstrip("/")
         if selected_kind == "url":
             resolved_url = self._normalize_url(selected_target)

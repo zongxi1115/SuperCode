@@ -82,7 +82,7 @@ function CommitForm({
     if (!message.trim() || isCommitting) return;
     setIsCommitting(true);
     try {
-      const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/git/commit`, {
+      const res = await fetch(`http://localhost:3001/api/sessions/${sessionId}/git/commit`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: message.trim() }),
@@ -159,7 +159,7 @@ function TagForm({ sessionId, tags, onTagCreated }: { sessionId: string; tags: G
     if (!tagName.trim() || isCreating) return;
     setIsCreating(true);
     try {
-      const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/git/tag`, {
+      const res = await fetch(`http://localhost:3001/api/sessions/${sessionId}/git/tag`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ tag: tagName.trim(), message: tagMessage.trim() || undefined }),
@@ -246,8 +246,8 @@ export const GitPanel = memo(function GitPanel({ sessionId }: GitPanelProps) {
     setIsLoading(true);
     try {
       const [logRes, tagsRes] = await Promise.all([
-        fetch(`http://localhost:8000/api/sessions/${sessionId}/git/log?count=30`),
-        fetch(`http://localhost:8000/api/sessions/${sessionId}/git/tags`),
+        fetch(`http://localhost:3001/api/sessions/${sessionId}/git/log?count=30`),
+        fetch(`http://localhost:3001/api/sessions/${sessionId}/git/tags`),
       ]);
       if (logRes.ok) {
         const logData: GitLogPayload = await logRes.json();

@@ -7,7 +7,7 @@ import {
   WebPreviewUrl,
 } from '@/components/ai-elements/web-preview';
 import { Button } from '@/components/ui/button';
-import { buildPreviewSelectBridgeSrc, canUsePreviewSelectBridge } from '@/lib/preview-select-bridge';
+import { canUsePreviewSelectBridge } from '@/lib/preview-select-bridge';
 import { AnimatePresence, motion } from 'motion/react';
 import { ExternalLink, FolderTree, Globe, MousePointerClick, PanelRightClose, RefreshCw, X } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -20,7 +20,7 @@ type EditorSidebarProps = {
   onToggleFileTree: () => void;
   url: string;
   onUrlChange: (url: string) => void;
-  onSelectElement?: (html: string, selector: string) => void;
+  onSelectElement?: (html: string, selector: string, sourceUrl?: string) => void;
 };
 
 type PreviewConsoleLog = {
@@ -30,6 +30,14 @@ type PreviewConsoleLog = {
 };
 
 type PreviewAccessState = 'unknown' | 'same-origin' | 'cross-origin';
+type PreviewSelectBridgeState = 'unknown' | 'ready' | 'selecting' | 'unavailable';
+
+const BRIDGE_READY = 'SC_SELECT_BRIDGE_READY';
+const BRIDGE_PING = 'SC_SELECT_BRIDGE_PING';
+const BRIDGE_START = 'SC_SELECT_START';
+const BRIDGE_CANCEL = 'SC_SELECT_CANCEL';
+const BRIDGE_RESULT = 'SC_SELECT_RESULT';
+const BRIDGE_ERROR = 'SC_SELECT_ERROR';
 
 function getElementSelector(el: HTMLElement): string {
   const parts: string[] = [];
@@ -66,6 +74,24 @@ function getElementSelector(el: HTMLElement): string {
   return parts.slice(0, 4).join(' > ');
 }
 
+function getPostMessageTargetOrigin(url: string): string {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return '*';
+  }
+}
+
+function isBridgeMessage(value: unknown): value is {
+  type: string;
+  selector?: unknown;
+  html?: unknown;
+  message?: unknown;
+  sourceUrl?: unknown;
+} {
+  return typeof value === 'object' && value !== null && 'type' in value;
+}
+
 export function EditorSidebar({
   isOpen,
   isFileTreeVisible,
@@ -82,10 +108,14 @@ export function EditorSidebar({
   const detachConsoleRef = useRef<(() => void) | null>(null);
   const [consoleLogs, setConsoleLogs] = useState<PreviewConsoleLog[]>([]);
   const [previewAccessState, setPreviewAccessState] = useState<PreviewAccessState>('unknown');
-  const [isSelectBridgeActive, setIsSelectBridgeActive] = useState(false);
+  const [previewSelectBridgeState, setPreviewSelectBridgeState] =
+    useState<PreviewSelectBridgeState>('unknown');
   const previewAccessStateRef = useRef<PreviewAccessState>('unknown');
+  const previewSelectBridgeStateRef = useRef<PreviewSelectBridgeState>('unknown');
   const crossOriginNoticeShownRef = useRef(false);
-  const pendingBridgeSelectionRef = useRef(false);
+  const bridgeUnavailableNoticeShownRef = useRef(false);
+
+  const canBridgeCurrentPreview = canUsePreviewSelectBridge(url);
 
   const pushConsoleLog = useCallback((level: PreviewConsoleLog['level'], message: string) => {
     setConsoleLogs((prev) => [
@@ -102,11 +132,6 @@ export function EditorSidebar({
     setConsoleLogs([]);
   }, []);
 
-  const canBridgeCurrentPreview = canUsePreviewSelectBridge(url);
-  const previewFrameSrc = isSelectBridgeActive
-    ? buildPreviewSelectBridgeSrc(url)
-    : undefined;
-
   const setPreviewAccess = useCallback((next: PreviewAccessState) => {
     if (previewAccessStateRef.current === next) {
       return;
@@ -115,10 +140,26 @@ export function EditorSidebar({
     setPreviewAccessState(next);
   }, []);
 
+  const setBridgeState = useCallback((next: PreviewSelectBridgeState) => {
+    if (previewSelectBridgeStateRef.current === next) {
+      return;
+    }
+    previewSelectBridgeStateRef.current = next;
+    setPreviewSelectBridgeState(next);
+  }, []);
+
   const resetSelectModeState = useCallback(() => {
     setIsSelectMode(false);
     cleanupRef.current = null;
   }, []);
+
+  const postBridgeMessage = useCallback((type: string) => {
+    const iframeWindow = iframeRef.current?.contentWindow;
+    if (!iframeWindow) {
+      return;
+    }
+    iframeWindow.postMessage({ type }, getPostMessageTargetOrigin(url));
+  }, [url]);
 
   const markCrossOrigin = useCallback((error?: unknown) => {
     setPreviewAccess('cross-origin');
@@ -129,7 +170,7 @@ export function EditorSidebar({
         error instanceof Error
           ? error.message
           : '浏览器同源策略阻止了 iframe DOM 访问';
-      pushConsoleLog('warn', `当前预览是跨域页面，无法直接选择元素或捕获控制台输出：${message}`);
+      pushConsoleLog('warn', `当前预览是跨域页面，无法直接捕获控制台输出：${message}`);
       crossOriginNoticeShownRef.current = true;
     }
 
@@ -162,11 +203,13 @@ export function EditorSidebar({
     if (iframeRef.current) {
       resetConsoleLogs();
       crossOriginNoticeShownRef.current = false;
+      bridgeUnavailableNoticeShownRef.current = false;
       setPreviewAccess('unknown');
+      setBridgeState('unknown');
       resetSelectModeState();
-      iframeRef.current.src = previewFrameSrc ?? url;
+      iframeRef.current.src = url;
     }
-  }, [previewFrameSrc, resetConsoleLogs, resetSelectModeState, setPreviewAccess, url]);
+  }, [resetConsoleLogs, resetSelectModeState, setBridgeState, setPreviewAccess, url]);
 
   const handleOpenInNewTab = useCallback(() => {
     if (url) {
@@ -175,20 +218,23 @@ export function EditorSidebar({
   }, [url]);
 
   const cancelSelectMode = useCallback(() => {
+    if (previewSelectBridgeStateRef.current === 'selecting') {
+      postBridgeMessage(BRIDGE_CANCEL);
+      setBridgeState('ready');
+      resetSelectModeState();
+      return;
+    }
+
     const doc = resolveIframeDocument();
     if (!doc) {
       resetSelectModeState();
-      pendingBridgeSelectionRef.current = false;
-      setIsSelectBridgeActive(false);
       return;
     }
     doc.querySelectorAll('.__highlight-hover').forEach((el) => el.classList.remove('__highlight-hover'));
     doc.querySelectorAll('.__highlight-selected').forEach((el) => el.classList.remove('__highlight-selected'));
     cleanupRef.current?.();
     cleanupRef.current = null;
-    pendingBridgeSelectionRef.current = false;
-    setIsSelectBridgeActive(false);
-  }, [resetSelectModeState, resolveIframeDocument]);
+  }, [postBridgeMessage, resetSelectModeState, resolveIframeDocument, setBridgeState]);
 
   const attachConsoleCapture = useCallback(() => {
     detachConsoleRef.current?.();
@@ -283,116 +329,137 @@ export function EditorSidebar({
       return;
     }
 
+    let unavailableTimer: number | undefined;
+
     const handleLoad = () => {
       crossOriginNoticeShownRef.current = false;
+      bridgeUnavailableNoticeShownRef.current = false;
       setPreviewAccess('unknown');
+      setBridgeState('unknown');
       resetSelectModeState();
       resetConsoleLogs();
       attachConsoleCapture();
 
-      if (pendingBridgeSelectionRef.current) {
-        pendingBridgeSelectionRef.current = false;
-        queueMicrotask(() => {
-          const doc = resolveIframeDocument();
-          if (!doc) {
-            return;
+      if (canBridgeCurrentPreview) {
+        window.clearTimeout(unavailableTimer);
+        window.setTimeout(() => postBridgeMessage(BRIDGE_PING), 0);
+        unavailableTimer = window.setTimeout(() => {
+          if (
+            previewAccessStateRef.current === 'cross-origin' &&
+            previewSelectBridgeStateRef.current === 'unknown'
+          ) {
+            setBridgeState('unavailable');
           }
-
-          setIsSelectMode(true);
-
-          const style = doc.createElement('style');
-          style.setAttribute('data-selector-mode', 'true');
-          style.textContent = `
-            * { cursor: crosshair !important; }
-            .__highlight-hover { outline: 2px dashed #3b82f6 !important; outline-offset: 2px !important; background-color: rgba(59, 130, 246, 0.1) !important; }
-            .__highlight-selected { outline: 2px solid #3b82f6 !important; outline-offset: 2px !important; background-color: rgba(59, 130, 246, 0.15) !important; }
-          `;
-          doc.head.appendChild(style);
-
-          const handleMouseOver = (e: MouseEvent) => {
-            e.stopPropagation();
-            const target = e.target as HTMLElement;
-            if (target === doc.body || target === doc.documentElement) return;
-            doc.querySelectorAll('.__highlight-hover').forEach((el) => el.classList.remove('__highlight-hover'));
-            target.classList.add('__highlight-hover');
-          };
-
-          const handleMouseOut = (e: MouseEvent) => {
-            (e.target as HTMLElement).classList.remove('__highlight-hover');
-          };
-
-          const handleClick = (e: MouseEvent) => {
-            e.preventDefault();
-            e.stopPropagation();
-            const target = e.target as HTMLElement;
-            if (target === doc.body || target === doc.documentElement) return;
-
-            doc.querySelectorAll('.__highlight-selected').forEach((el) => el.classList.remove('__highlight-selected'));
-            doc.querySelectorAll('.__highlight-hover').forEach((el) => el.classList.remove('__highlight-hover'));
-            target.classList.add('__highlight-selected');
-
-            const outerHtml = target.outerHTML;
-            const selector = getElementSelector(target);
-
-            cleanup();
-            onSelectElement?.(outerHtml, selector);
-            setIsSelectBridgeActive(false);
-          };
-
-          const handleKeyDown = (e: KeyboardEvent) => {
-            if (e.key === 'Escape') {
-              cancelSelectMode();
-            }
-          };
-
-          const cleanup = () => {
-            style.remove();
-            doc.removeEventListener('mouseover', handleMouseOver, true);
-            doc.removeEventListener('mouseout', handleMouseOut, true);
-            doc.removeEventListener('click', handleClick, true);
-            doc.removeEventListener('keydown', handleKeyDown, true);
-            setIsSelectMode(false);
-            cleanupRef.current = null;
-          };
-
-          cleanupRef.current = cleanup;
-
-          doc.addEventListener('mouseover', handleMouseOver, true);
-          doc.addEventListener('mouseout', handleMouseOut, true);
-          doc.addEventListener('click', handleClick, true);
-          doc.addEventListener('keydown', handleKeyDown, true);
-        });
+        }, 800);
       }
     };
 
     iframe.addEventListener('load', handleLoad);
     return () => {
       iframe.removeEventListener('load', handleLoad);
+      window.clearTimeout(unavailableTimer);
     };
-  }, [attachConsoleCapture, cancelSelectMode, isOpen, onSelectElement, resetConsoleLogs, resetSelectModeState, resolveIframeDocument, setPreviewAccess, url]);
+  }, [
+    attachConsoleCapture,
+    canBridgeCurrentPreview,
+    isOpen,
+    postBridgeMessage,
+    resetConsoleLogs,
+    resetSelectModeState,
+    setBridgeState,
+    setPreviewAccess,
+  ]);
+
+  useEffect(() => {
+    const handleBridgeMessage = (event: MessageEvent<unknown>) => {
+      const iframeWindow = iframeRef.current?.contentWindow;
+      if (!iframeWindow || event.source !== iframeWindow || !isBridgeMessage(event.data)) {
+        return;
+      }
+
+      const sourceUrl = typeof event.data.sourceUrl === 'string' ? event.data.sourceUrl : url;
+      if (!canUsePreviewSelectBridge(sourceUrl)) {
+        return;
+      }
+
+      if (event.data.type === BRIDGE_READY) {
+        setPreviewAccess('cross-origin');
+        setBridgeState('ready');
+        crossOriginNoticeShownRef.current = true;
+        bridgeUnavailableNoticeShownRef.current = false;
+        return;
+      }
+
+      if (event.data.type === BRIDGE_RESULT) {
+        const selector = typeof event.data.selector === 'string' ? event.data.selector : '';
+        const html = typeof event.data.html === 'string' ? event.data.html : '';
+        setBridgeState('ready');
+        resetSelectModeState();
+        if (selector && html) {
+          onSelectElement?.(html, selector, sourceUrl);
+        }
+        return;
+      }
+
+      if (event.data.type === BRIDGE_ERROR) {
+        const message = typeof event.data.message === 'string' ? event.data.message : '选择元素失败';
+        pushConsoleLog('error', `跨域选择失败：${message}`);
+        setBridgeState('ready');
+        resetSelectModeState();
+        return;
+      }
+
+      if (event.data.type === BRIDGE_CANCEL) {
+        setBridgeState('ready');
+        resetSelectModeState();
+      }
+    };
+
+    window.addEventListener('message', handleBridgeMessage);
+    return () => {
+      window.removeEventListener('message', handleBridgeMessage);
+    };
+  }, [onSelectElement, pushConsoleLog, resetSelectModeState, setBridgeState, setPreviewAccess, url]);
 
   useEffect(() => {
     return () => {
+      if (previewSelectBridgeStateRef.current === 'selecting') {
+        postBridgeMessage(BRIDGE_CANCEL);
+      }
       cleanupRef.current?.();
       cleanupRef.current = null;
       detachConsoleRef.current?.();
       detachConsoleRef.current = null;
     };
-  }, []);
+  }, [postBridgeMessage]);
 
-  const handleUnavailableSelect = useCallback(() => {
-    if (canBridgeCurrentPreview) {
-      pendingBridgeSelectionRef.current = true;
-      setIsSelectBridgeActive(true);
-      pushConsoleLog('log', '正在尝试为本地页面启用桥接选择模式...');
+  const handleBridgeSelectElement = useCallback(() => {
+    if (!canBridgeCurrentPreview) {
+      markCrossOrigin(new Error('跨域页面暂不支持直接选择元素'));
       return;
     }
-    markCrossOrigin(new Error('浏览器同源策略阻止访问跨域 iframe 的 DOM'));
-  }, [canBridgeCurrentPreview, markCrossOrigin, pushConsoleLog]);
+
+    if (previewSelectBridgeStateRef.current !== 'ready') {
+      if (!bridgeUnavailableNoticeShownRef.current) {
+        pushConsoleLog(
+          'warn',
+          '需要在目标 dev 页面引入 <script src="http://localhost:3001/api/preview/select-bridge.js" defer></script> 后才能跨域选择元素。'
+        );
+        bridgeUnavailableNoticeShownRef.current = true;
+      }
+      setBridgeState('unavailable');
+      return;
+    }
+
+    postBridgeMessage(BRIDGE_START);
+    setBridgeState('selecting');
+    setIsSelectMode(true);
+  }, [canBridgeCurrentPreview, markCrossOrigin, postBridgeMessage, pushConsoleLog, setBridgeState]);
 
   const handleSelectElement = useCallback(() => {
-    const doc = resolveIframeDocument();
+    const doc = previewAccessStateRef.current === 'cross-origin' ? null : resolveIframeDocument();
     if (!doc) {
+      handleBridgeSelectElement();
       return;
     }
     setIsSelectMode(true);
@@ -432,7 +499,7 @@ export function EditorSidebar({
       const selector = getElementSelector(target);
 
       cleanup();
-      onSelectElement?.(outerHtml, selector);
+      onSelectElement?.(outerHtml, selector, url);
     };
 
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -457,21 +524,25 @@ export function EditorSidebar({
     doc.addEventListener('mouseout', handleMouseOut, true);
     doc.addEventListener('click', handleClick, true);
     doc.addEventListener('keydown', handleKeyDown, true);
-  }, [onSelectElement, cancelSelectMode, resolveIframeDocument]);
+  }, [cancelSelectMode, handleBridgeSelectElement, onSelectElement, resolveIframeDocument, url]);
 
   const selectTooltip = isSelectMode
     ? '取消选择'
     : previewAccessState === 'cross-origin'
-      ? canBridgeCurrentPreview
-        ? '跨域本地页面将尝试桥接选择元素'
-        : '跨域页面暂不支持直接选择元素'
+      ? previewSelectBridgeState === 'ready'
+        ? '跨域本地页面可通过 bridge 选择元素'
+        : previewSelectBridgeState === 'unavailable'
+          ? '目标页面需要引入 SuperCode 选择脚本'
+          : canBridgeCurrentPreview
+            ? '等待目标页面选择 bridge 握手'
+            : '跨域页面暂不支持直接选择元素'
       : previewAccessState === 'unknown'
         ? '页面加载完成后可选择元素'
         : '选择元素';
 
   const selectButtonClassName = [
     isSelectMode ? 'bg-primary/15 text-primary' : '',
-    !isSelectMode && previewAccessState === 'cross-origin' ? 'opacity-50' : '',
+    !isSelectMode && previewAccessState === 'cross-origin' && previewSelectBridgeState !== 'ready' ? 'opacity-70' : '',
   ].filter(Boolean).join(' ');
   return (
     <>
@@ -502,13 +573,7 @@ export function EditorSidebar({
                 <WebPreviewUrl />
                 <WebPreviewNavigationButton
                   tooltip={selectTooltip}
-                  onClick={
-                    isSelectMode
-                      ? cancelSelectMode
-                      : previewAccessState === 'cross-origin'
-                        ? handleUnavailableSelect
-                        : handleSelectElement
-                  }
+                  onClick={isSelectMode ? cancelSelectMode : handleSelectElement}
                   className={selectButtonClassName}
                 >
                   <MousePointerClick className="w-4 h-4" />
@@ -520,7 +585,7 @@ export function EditorSidebar({
                   <X className="w-4 h-4" />
                 </WebPreviewNavigationButton>
               </WebPreviewNavigation>
-              <WebPreviewBody ref={iframeRef} className="bg-white" src={previewFrameSrc} />
+              <WebPreviewBody ref={iframeRef} className="bg-white" />
               <WebPreviewConsole logs={consoleLogs} />
             </WebPreview>
           </motion.div>

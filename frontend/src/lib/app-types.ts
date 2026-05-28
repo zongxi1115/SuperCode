@@ -302,9 +302,28 @@ export type TerminalSnapshotPayload = {
   cwd?: string | null;
   supportsInterrupt?: boolean;
   supportsRawInput?: boolean;
+  supportsResize?: boolean;
   fileTree?: FileTreeNode[] | null;
   processes?: ManagedProcessPayload[] | null;
 };
+
+export type TerminalSocketClientMessage =
+  | { type: 'input'; data: string }
+  | { type: 'resize'; cols: number; rows: number }
+  | { type: 'clear' }
+  | { type: 'interrupt' };
+
+export type TerminalSocketServerMessage =
+  | { type: 'output'; data: string }
+  | {
+      type: 'status';
+      cwd?: string | null;
+      backend?: string;
+      supportsInterrupt?: boolean;
+      supportsResize?: boolean;
+    }
+  | { type: 'clear' }
+  | { type: 'error'; message: string };
 
 export type ManagedProcessInfo = {
   pid: number;

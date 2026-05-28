@@ -249,6 +249,12 @@ export default defineConfig({
       },
     },
   ],
+  server: {
+    port: 8888,
+  },
+  preview: {
+    port: 8888,
+  },
   resolve: {
     alias: [
       // Force `@/` imports to resolve into `src/` even if a real `frontend/@` folder exists.

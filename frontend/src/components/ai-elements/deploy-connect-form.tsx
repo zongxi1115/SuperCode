@@ -110,7 +110,7 @@ export function DeployConnectForm({
       }
       if (!sessionId) return;
       const res = await fetch(
-        `http://localhost:8000/api/sessions/${sessionId}/tools/${inputRequest.id}/connect`,
+        `http://localhost:3001/api/sessions/${sessionId}/tools/${inputRequest.id}/connect`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },

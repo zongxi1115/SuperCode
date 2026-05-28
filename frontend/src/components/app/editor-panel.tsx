@@ -31,7 +31,7 @@ type EditorPanelProps = {
   onToggleWebPreview: () => void;
   webPreviewUrl: string;
   onWebPreviewUrlChange: (url: string) => void;
-  onSelectPreviewElement?: (html: string, selector: string) => void;
+  onSelectPreviewElement?: (html: string, selector: string, sourceUrl?: string) => void;
   planData?: PlanData | null;
   onPlanSave?: (markdown: string, annotations: Annotation[]) => void;
   onPlanAnnotationsChange?: (annotations: Annotation[]) => void;
@@ -148,7 +148,7 @@ export function EditorPanel({
           session_id: sessionId,
           path: selectedFilePath,
         });
-        const res = await fetch(`http://localhost:8000/api/files?${query.toString()}`, {
+        const res = await fetch(`http://localhost:3001/api/files?${query.toString()}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ content: editContentRef.current }),
@@ -214,7 +214,7 @@ export function EditorPanel({
     if (!sessionId || !selectedFilePath) return;
 
     try {
-      const res = await fetch('http://localhost:8000/api/files/open', {
+      const res = await fetch('http://localhost:3001/api/files/open', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

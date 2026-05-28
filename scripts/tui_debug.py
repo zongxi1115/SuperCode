@@ -32,7 +32,7 @@ from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.history import InMemoryHistory
 
 console = Console()
-BASE = "http://localhost:8000"
+BASE = "http://localhost:3001"
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -98,7 +98,7 @@ def api(endpoint: str, *, method="GET", json_body=None, params=None, timeout=30,
         return r.json()
     except httpx.ConnectError:
         if not silent:
-            console.print("[red]连不上后端 localhost:8000[/]")
+            console.print("[red]连不上后端 localhost:3001[/]")
         return None
     except Exception as e:
         if not silent:

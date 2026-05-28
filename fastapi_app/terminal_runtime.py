@@ -4,9 +4,11 @@ import re
 import subprocess
 import threading
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from fastapi_app.api_models import TerminalSnapshotResponse
+
+MAX_TERMINAL_OUTPUT_CHARS = 300_000
 
 
 TERMINAL_INTERRUPT_KEYS = {
@@ -64,9 +66,15 @@ class TerminalRuntimeBase:
     current_directory: str = field(default="", init=False)
     supports_interrupt: bool = field(default=False, init=False)
     supports_raw_input: bool = field(default=True, init=False)
+    supports_resize: bool = field(default=False, init=False)
     pty_process: Any | None = field(default=None, init=False, repr=False)
     process: subprocess.Popen[str] | None = field(default=None, init=False, repr=False)
     lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    output_subscribers: list[Callable[[str], None]] = field(
+        default_factory=list,
+        init=False,
+        repr=False,
+    )
     stdout_thread: threading.Thread | None = field(default=None, init=False, repr=False)
     stderr_thread: threading.Thread | None = field(default=None, init=False, repr=False)
     prompt_pattern: re.Pattern[str] = field(
@@ -134,6 +142,7 @@ class TerminalRuntimeBase:
         self.pty_process = pty_process_class.spawn(command)
         self.backend = "winpty"
         self.supports_interrupt = True
+        self.supports_resize = True
         self.append_output(f"PowerShell started in {self.workspace}\n")
         self.stdout_thread = threading.Thread(
             target=self._pump_pty_stream,
@@ -166,7 +175,7 @@ class TerminalRuntimeBase:
             return
         try:
             while self.pty_process.isalive():
-                chunk = self.pty_process.read(1024)
+                chunk = self.pty_process.read(8192)
                 if chunk == "":
                     break
                 self.append_output(chunk)
@@ -186,12 +195,24 @@ class TerminalRuntimeBase:
             self.append_output("\n[terminal reader stopped unexpectedly]\n")
 
     def append_output(self, text: str) -> None:
+        if text == "":
+            return
         with self.lock:
-            self.output += text
+            next_output = self.output + text
+            if len(next_output) > MAX_TERMINAL_OUTPUT_CHARS:
+                next_output = next_output[-MAX_TERMINAL_OUTPUT_CHARS:]
+            self.output = next_output
             inferred_cwd = self._infer_current_directory(self.output[-4096:])
             if inferred_cwd:
                 self.current_directory = inferred_cwd
             self.revision += 1
+            subscribers = list(self.output_subscribers)
+
+        for subscriber in subscribers:
+            try:
+                subscriber(text)
+            except Exception:
+                continue
 
     def _infer_current_directory(self, text: str) -> str | None:
         matches = list(self.prompt_pattern.finditer(text))
@@ -203,6 +224,9 @@ class TerminalRuntimeBase:
         payload = content
         if submit:
             payload += "\n"
+        self.write_raw(payload)
+
+    def write_raw(self, payload: str) -> None:
         if payload == "":
             return
         if self.pty_process is not None:
@@ -214,7 +238,24 @@ class TerminalRuntimeBase:
         self.process.stdin.flush()
 
     def write(self, command: str) -> None:
-        self.send_input(command, submit=True)
+        self.write_raw(command)
+
+    def read_loop(self, on_data: Callable[[str], None]) -> Callable[[], None]:
+        return self.subscribe_output(on_data)
+
+    def subscribe_output(self, on_data: Callable[[str], None]) -> Callable[[], None]:
+        with self.lock:
+            self.output_subscribers.append(on_data)
+
+        def unsubscribe() -> None:
+            with self.lock:
+                self.output_subscribers = [
+                    subscriber
+                    for subscriber in self.output_subscribers
+                    if subscriber is not on_data
+                ]
+
+        return unsubscribe
 
     def send_key(self, key: str) -> bool:
         normalized_key = _normalize_terminal_key(key)
@@ -232,6 +273,36 @@ class TerminalRuntimeBase:
         self.pty_process.sendcontrol("c")
         return True
 
+    def resize(self, cols: int, rows: int) -> bool:
+        if self.pty_process is None:
+            return False
+
+        normalized_cols = max(int(cols or 0), 2)
+        normalized_rows = max(int(rows or 0), 1)
+        method_attempts = (
+            ("setwinsize", (normalized_rows, normalized_cols)),
+            ("set_size", (normalized_cols, normalized_rows)),
+            ("resize", (normalized_cols, normalized_rows)),
+        )
+        for method_name, args in method_attempts:
+            method = getattr(self.pty_process, method_name, None)
+            if callable(method):
+                try:
+                    method(*args)
+                    return True
+                except Exception:
+                    continue
+
+        low_level_pty = getattr(self.pty_process, "pty", None)
+        method = getattr(low_level_pty, "set_size", None)
+        if callable(method):
+            try:
+                method(normalized_cols, normalized_rows)
+                return True
+            except Exception:
+                return False
+        return False
+
     def snapshot(self, session_id: str) -> TerminalSnapshotResponse:
         with self.lock:
             return TerminalSnapshotResponse(
@@ -244,6 +315,7 @@ class TerminalRuntimeBase:
                 cwd=self.current_directory or self.workspace,
                 supportsInterrupt=self.supports_interrupt,
                 supportsRawInput=self.supports_raw_input,
+                supportsResize=self.supports_resize,
             )
 
     def is_alive(self) -> bool:

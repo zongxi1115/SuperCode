@@ -273,6 +273,7 @@ class TerminalSnapshotResponse(BaseModel):
     cwd: str | None = None
     supportsInterrupt: bool = False
     supportsRawInput: bool = True
+    supportsResize: bool = False
     fileTree: list[dict[str, Any]] | None = None
     processes: list[dict[str, Any]] | None = None
 

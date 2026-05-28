@@ -118,7 +118,7 @@ class PlanAgentToolsTests(unittest.TestCase):
         context = ToolContext(
             workspace=self.workspace,
             metadata={
-                "backend_base_url": "http://localhost:8000",
+                "backend_base_url": "http://localhost:3001",
                 "session_id": "session-1",
             },
         )

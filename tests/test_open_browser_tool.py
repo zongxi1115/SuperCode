@@ -14,9 +14,9 @@ class OpenBrowserToolTests(unittest.TestCase):
     def test_url_does_not_require_session_id(self) -> None:
         tool = OpenBrowserTool()
 
-        result = tool.run({"url": "localhost:5173"}, self.context)
+        result = tool.run({"url": "localhost:8888"}, self.context)
 
-        self.assertEqual(result["resolved_url"], "http://localhost:5173")
+        self.assertEqual(result["resolved_url"], "http://localhost:8888")
         self.assertEqual(result["source_type"], "network_url")
 
     def test_local_path_still_requires_session_id(self) -> None:

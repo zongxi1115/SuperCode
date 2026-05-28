@@ -56,7 +56,7 @@ import {
 import { PanelRightOpen, PanelRightClose, Settings2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
-const DEFAULT_WEB_PREVIEW_URL = 'http://localhost:5173';
+const DEFAULT_WEB_PREVIEW_URL = 'http://localhost:8888';
 const CONTEXT_COMPRESSION_USAGE_THRESHOLD = 0.8;
 
 function getPreviewUrlFromToolPayload(payload: { preview_url?: unknown; output?: unknown }) {
@@ -352,12 +352,8 @@ export default function App() {
   const [fileTree, setFileTree] = useState<FileTreeNode[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [activePlugin, setActivePlugin] = useState<string | null>(null);
-  const [terminalOutput, setTerminalOutput] = useState('');
-  const [terminalInput, setTerminalInput] = useState('');
-  const [isTerminalSubmitting, setIsTerminalSubmitting] = useState(false);
   const [terminalCwd, setTerminalCwd] = useState('');
   const [terminalBackend, setTerminalBackend] = useState('subprocess');
-  const [terminalSupportsInterrupt, setTerminalSupportsInterrupt] = useState(false);
   const [managedProcesses, setManagedProcesses] = useState<ManagedProcessPayload[]>([]);
   const [isStoppingProcesses, setIsStoppingProcesses] = useState(false);
   const [selectedFileContent, setSelectedFileContent] = useState('');
@@ -484,10 +480,8 @@ export default function App() {
   }, [messages]);
 
   const applyTerminalSnapshot = useCallback((data: Partial<TerminalSnapshotPayload>) => {
-    setTerminalOutput((prev) => data.output ?? prev);
     setTerminalCwd((prev) => data.cwd ?? prev);
     setTerminalBackend((prev) => data.backend ?? prev);
-    setTerminalSupportsInterrupt((prev) => data.supportsInterrupt ?? prev);
   }, []);
 
   const appendCodeChanges = useCallback((incoming: CodeChangeRecord[]) => {
@@ -530,7 +524,7 @@ export default function App() {
           query.set('include_processes', 'true');
         }
         const res = await fetch(
-          `http://localhost:8000/api/sessions/${currentSessionId}/terminal${query.size ? `?${query.toString()}` : ''}`
+          `http://localhost:3001/api/sessions/${currentSessionId}/terminal${query.size ? `?${query.toString()}` : ''}`
         );
         if (!res.ok) {
           throw new Error('读取终端状态失败');
@@ -575,7 +569,7 @@ export default function App() {
       }
 
       try {
-        const res = await fetch(`http://localhost:8000/api/sessions/${targetSessionId}/context`);
+        const res = await fetch(`http://localhost:3001/api/sessions/${targetSessionId}/context`);
         if (!res.ok) {
           throw new Error('读取上下文失败');
         }
@@ -619,7 +613,7 @@ export default function App() {
   });
 
   const loadModels = useCallback(async () => {
-    const res = await fetch('http://localhost:8000/api/models');
+    const res = await fetch('http://localhost:3001/api/models');
     const data: { models: ModelOption[] } = await res.json();
     const nextOptions = data.models ?? [];
     setModelOptions(nextOptions);
@@ -633,14 +627,14 @@ export default function App() {
   }, []);
 
   const loadAppSettings = useCallback(async () => {
-    const res = await fetch('http://localhost:8000/api/settings');
+    const res = await fetch('http://localhost:3001/api/settings');
     const data = await res.json();
     setAppSettings(data);
     return data;
   }, []);
 
   const saveAppSettings = useCallback(async (settings: AppSettings) => {
-    const res = await fetch('http://localhost:8000/api/settings', {
+    const res = await fetch('http://localhost:3001/api/settings', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(settings),
@@ -653,7 +647,7 @@ export default function App() {
   }, []);
 
   const loadModelConfigs = useCallback(async () => {
-    const res = await fetch('http://localhost:8000/api/model-configs');
+    const res = await fetch('http://localhost:3001/api/model-configs');
     const data: ModelConfigPayload = await res.json();
     setVisualModelProviders(data.providers ?? []);
     setEnvModelConfigs(data.envConfigs ?? []);
@@ -663,7 +657,7 @@ export default function App() {
   }, [loadAppSettings]);
 
   useEffect(() => {
-    fetch('http://localhost:8000/api/workspaces')
+    fetch('http://localhost:3001/api/workspaces')
       .then((res) => res.json())
       .then((data: { workspaces: WorkspaceOption[] }) => {
         const options = data.workspaces ?? [];
@@ -674,7 +668,7 @@ export default function App() {
       })
       .catch(console.error);
 
-    fetch('http://localhost:8000/api/models')
+    fetch('http://localhost:3001/api/models')
       .then((res) => res.json())
       .then((data: { models: ModelOption[] }) => {
         const nextOptions = data.models ?? [];
@@ -688,7 +682,7 @@ export default function App() {
       })
       .catch(console.error);
 
-    fetch('http://localhost:8000/api/model-configs')
+    fetch('http://localhost:3001/api/model-configs')
       .then((res) => res.json())
       .then((data: ModelConfigPayload) => {
         setVisualModelProviders(data.providers ?? []);
@@ -697,7 +691,7 @@ export default function App() {
       })
       .catch(console.error);
 
-    fetch('http://localhost:8000/api/plugins')
+    fetch('http://localhost:3001/api/plugins')
       .then((res) => res.json())
       .then((data: { plugins?: PluginSummary[] }) => {
         setAvailablePlugins(data.plugins ?? []);
@@ -716,7 +710,6 @@ export default function App() {
     setMessages(hydrateMessages(data.messages ?? [], data.thoughts, data.toolCalls));
     setCodeChanges(data.codeChanges ?? []);
     setFileTree(data.fileTree ?? []);
-    setTerminalOutput(data.terminalOutput ?? '');
     setWebPreviewUrl(data.previewUrl ?? DEFAULT_WEB_PREVIEW_URL);
     setSelectedFilePath(data.selectedFilePath ?? '');
     setSelectedFileContent(data.selectedFileContent ?? '');
@@ -728,7 +721,7 @@ export default function App() {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 30000);
     try {
-      const res = await fetch(`http://localhost:8000/api/sessions/${targetSessionId}`, {
+      const res = await fetch(`http://localhost:3001/api/sessions/${targetSessionId}`, {
         signal: controller.signal,
       });
       if (!res.ok) {
@@ -755,7 +748,6 @@ export default function App() {
     syncVisibleSessionSnapshot(data);
     setTerminalCwd(data.workspace ?? '');
     setTerminalBackend('subprocess');
-    setTerminalSupportsInterrupt(false);
     setManagedProcesses([]);
     setSessionContext(null);
     setIsContextOpen(false);
@@ -770,7 +762,7 @@ export default function App() {
   const loadSessionHistory = useCallback(async () => {
     setIsHistoryLoading(true);
     try {
-      const res = await fetch('http://localhost:8000/api/sessions/history');
+      const res = await fetch('http://localhost:3001/api/sessions/history');
       if (!res.ok) {
         throw new Error('读取历史会话失败');
       }
@@ -788,7 +780,7 @@ export default function App() {
       if (!selectedWorkspace || !cardId) return;
       try {
         const response = await fetch(
-          `http://localhost:8000/api/workspaces/${encodeURIComponent(selectedWorkspace)}/kanban/cards/${cardId}`,
+          `http://localhost:3001/api/workspaces/${encodeURIComponent(selectedWorkspace)}/kanban/cards/${cardId}`,
           {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
@@ -816,7 +808,7 @@ export default function App() {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 60000);
 
-      const res = await fetch('http://localhost:8000/api/sessions', {
+      const res = await fetch('http://localhost:3001/api/sessions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -917,7 +909,7 @@ export default function App() {
 
     try {
       const query = new URLSearchParams({ path });
-      const res = await fetch(`http://localhost:8000/api/directories?${query.toString()}`);
+      const res = await fetch(`http://localhost:3001/api/directories?${query.toString()}`);
       const data = await res.json();
       const children = workspaceOptionsToDirectoryNodes(data.children ?? []);
       setDirectoryTree((prev) =>
@@ -948,7 +940,7 @@ export default function App() {
     setSelectedFilePath(path);
     try {
       const query = new URLSearchParams({ session_id: sessionId, path });
-      const res = await fetch(`http://localhost:8000/api/files?${query.toString()}`);
+      const res = await fetch(`http://localhost:3001/api/files?${query.toString()}`);
       const data = await res.json();
       setSelectedFilePath(data.selectedFilePath ?? path);
       setSelectedFileContent(data.selectedFileContent ?? '');
@@ -962,7 +954,7 @@ export default function App() {
       if (!sessionId) return;
 
       const query = new URLSearchParams({ session_id: sessionId, path });
-      const res = await fetch(`http://localhost:8000/api/files?${query.toString()}`, {
+      const res = await fetch(`http://localhost:3001/api/files?${query.toString()}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content }),
@@ -1009,7 +1001,7 @@ export default function App() {
 
     const syncSnapshot = async () => {
       try {
-        const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}`);
+        const res = await fetch(`http://localhost:3001/api/sessions/${sessionId}`);
         if (!res.ok) {
           throw new Error('同步会话状态失败');
         }
@@ -1037,105 +1029,6 @@ export default function App() {
     };
   }, [isLoading, loadSessionContext, sessionId, syncVisibleSessionSnapshot]);
 
-  const sendTerminalCommand = useCallback(async () => {
-    if (!sessionId || isTerminalSubmitting) {
-      return;
-    }
-
-    const command = terminalInput;
-    setTerminalInput('');
-    setIsTerminalSubmitting(true);
-    try {
-      const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/terminal/input`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command, submit: true }),
-      });
-      if (!res.ok) {
-        throw new Error('终端命令发送失败');
-      }
-      const data: TerminalSnapshotPayload = await res.json();
-      applyTerminalSnapshot(data);
-      refreshFileTreeAfterTerminalActivity(sessionId);
-    } catch (error) {
-      console.error(error);
-    } finally {
-      setIsTerminalSubmitting(false);
-    }
-  }, [applyTerminalSnapshot, isTerminalSubmitting, refreshFileTreeAfterTerminalActivity, sessionId, terminalInput]);
-
-  const sendTerminalKey = useCallback(async (key: string) => {
-    if (!sessionId || isTerminalSubmitting) {
-      return;
-    }
-
-    setIsTerminalSubmitting(true);
-    try {
-      const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/terminal/input`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key, submit: false }),
-      });
-      if (!res.ok) {
-        throw new Error('终端按键发送失败');
-      }
-      const data: TerminalSnapshotPayload = await res.json();
-      applyTerminalSnapshot(data);
-      refreshFileTreeAfterTerminalActivity(sessionId);
-    } catch (error) {
-      console.error(error);
-    } finally {
-      setIsTerminalSubmitting(false);
-    }
-  }, [applyTerminalSnapshot, isTerminalSubmitting, refreshFileTreeAfterTerminalActivity, sessionId]);
-
-  const interruptTerminal = useCallback(async () => {
-    if (!sessionId || isTerminalSubmitting || !terminalSupportsInterrupt) {
-      return;
-    }
-
-    setIsTerminalSubmitting(true);
-    try {
-      const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/terminal/control`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'interrupt' }),
-      });
-      if (!res.ok) {
-        throw new Error('终端中断失败');
-      }
-      const data: TerminalSnapshotPayload = await res.json();
-      applyTerminalSnapshot(data);
-      refreshFileTreeAfterTerminalActivity(sessionId);
-    } catch (error) {
-      console.error(error);
-    } finally {
-      setIsTerminalSubmitting(false);
-    }
-  }, [applyTerminalSnapshot, isTerminalSubmitting, refreshFileTreeAfterTerminalActivity, sessionId, terminalSupportsInterrupt]);
-
-  const clearTerminal = useCallback(async () => {
-    if (!sessionId || isTerminalSubmitting) {
-      return;
-    }
-
-    setIsTerminalSubmitting(true);
-    try {
-      const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/terminal/clear`, {
-        method: 'POST',
-      });
-      if (!res.ok) {
-        throw new Error('终端清空失败');
-      }
-      const data: TerminalSnapshotPayload = await res.json();
-      applyTerminalSnapshot(data);
-    } catch (error) {
-      console.error(error);
-    } finally {
-      setIsTerminalSubmitting(false);
-    }
-  }, [applyTerminalSnapshot, isTerminalSubmitting, sessionId]);
-
   const handleTerminalToggle = useCallback(() => {
     setHasTerminalBeenOpened(true);
     setIsTerminalOpen((prev) => !prev);
@@ -1146,7 +1039,7 @@ export default function App() {
       if (!sessionId || !terminalId) return;
       setIsStoppingProcesses(true);
       try {
-        const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/processes/${terminalId}/terminate`, {
+        const res = await fetch(`http://localhost:3001/api/sessions/${sessionId}/processes/${terminalId}/terminate`, {
           method: 'POST',
         });
         if (!res.ok) {
@@ -1171,7 +1064,7 @@ export default function App() {
       if (!currentSessionId) return;
       setIsStoppingProcesses(true);
       try {
-        const res = await fetch(`http://localhost:8000/api/sessions/${currentSessionId}/stop`, {
+        const res = await fetch(`http://localhost:3001/api/sessions/${currentSessionId}/stop`, {
           method: 'POST',
         });
         if (!res.ok) {
@@ -1227,7 +1120,7 @@ export default function App() {
     async (modelId: string) => {
       if (!sessionId) return;
       try {
-        const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/model`, {
+        const res = await fetch(`http://localhost:3001/api/sessions/${sessionId}/model`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -1273,7 +1166,7 @@ export default function App() {
         return;
       }
       try {
-        const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/model`, {
+        const res = await fetch(`http://localhost:3001/api/sessions/${sessionId}/model`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -1316,7 +1209,7 @@ export default function App() {
 
   const saveModelProviders = useCallback(
     async (providers: UIModelProvider[]) => {
-      const res = await fetch('http://localhost:8000/api/model-configs', {
+      const res = await fetch('http://localhost:3001/api/model-configs', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ providers }),
@@ -1334,7 +1227,7 @@ export default function App() {
   );
 
   const discoverProviderModels = useCallback(async (provider: UIModelProvider) => {
-    const res = await fetch('http://localhost:8000/api/model-configs/discover-models', {
+    const res = await fetch('http://localhost:3001/api/model-configs/discover-models', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(provider),
@@ -1349,7 +1242,7 @@ export default function App() {
   const handleDeleteHistory = useCallback(
     async (targetSessionId: string) => {
       try {
-        const res = await fetch(`http://localhost:8000/api/sessions/${targetSessionId}`, {
+        const res = await fetch(`http://localhost:3001/api/sessions/${targetSessionId}`, {
           method: 'DELETE',
         });
         if (!res.ok) {
@@ -1373,10 +1266,8 @@ export default function App() {
         setMessages([]);
         setCodeChanges([]);
         setFileTree([]);
-        setTerminalOutput('');
         setTerminalCwd('');
         setTerminalBackend('subprocess');
-        setTerminalSupportsInterrupt(false);
         setSelectedFileContent('');
         setSelectedFilePath('');
         setSessionContext(null);
@@ -1576,7 +1467,7 @@ export default function App() {
               return;
             }
             try {
-              const res = await fetch(`http://localhost:8000/api/sessions/${streamSessionId}/git/status`);
+              const res = await fetch(`http://localhost:3001/api/sessions/${streamSessionId}/git/status`);
               if (!res.ok) {
                 return;
               }
@@ -1655,11 +1546,6 @@ export default function App() {
               toolName === 'terminal_input' ||
               toolName === 'terminal_wait'
             ) {
-              if (typeof payload.terminal_output === 'string') {
-                applyTerminalSnapshot({ output: payload.terminal_output });
-              } else if (typeof payload.output === 'string') {
-                applyTerminalSnapshot({ output: payload.output });
-              }
               refreshFileTreeAfterTerminalActivity(streamSessionId);
             }
             if (
@@ -1894,7 +1780,7 @@ export default function App() {
             }
           } else if (data.type === 'data-terminal-output') {
             if (typeof data.data?.output === 'string' && isVisibleStreamSession()) {
-              applyTerminalSnapshot({ output: data.data.output });
+              refreshFileTreeAfterTerminalActivity(streamSessionId);
             }
           } else if (data.type === 'data-preview-url') {
             if (typeof data.data?.url === 'string' && isVisibleStreamSession()) {
@@ -2113,7 +1999,7 @@ export default function App() {
     }
 
     await streamAssistantResponse({
-      url: 'http://localhost:8000/api/chat/stream',
+      url: 'http://localhost:3001/api/chat/stream',
       body: {
         session_id: sessionId,
         message: finalMsg,
@@ -2130,7 +2016,7 @@ export default function App() {
     if (!sessionId || !assistantId) return;
 
     await streamAssistantResponse({
-      url: 'http://localhost:8000/api/chat/continue',
+      url: 'http://localhost:3001/api/chat/continue',
       body: { session_id: sessionId, assistant_id: assistantId },
       streamSessionId: sessionId,
       initialAssistantId: assistantId,
@@ -2176,7 +2062,7 @@ export default function App() {
       await persistState(initialState);
 
       void streamAssistantResponse({
-        url: 'http://localhost:8000/api/chat/stream',
+        url: 'http://localhost:3001/api/chat/stream',
         body: {
           session_id: sessionId,
           message,
@@ -2255,7 +2141,7 @@ export default function App() {
       if (!sessionId) return;
 
       try {
-        const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/tools/${toolCallId}/confirm-delete`, {
+        const res = await fetch(`http://localhost:3001/api/sessions/${sessionId}/tools/${toolCallId}/confirm-delete`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ approved }),
@@ -2334,7 +2220,7 @@ export default function App() {
 
       try {
         const endpoint = type === 'commit' ? 'confirm-commit' : 'confirm-tag';
-        const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/tools/${toolCallId}/${endpoint}`, {
+        const res = await fetch(`http://localhost:3001/api/sessions/${sessionId}/tools/${toolCallId}/${endpoint}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ approved }),
@@ -2403,7 +2289,7 @@ export default function App() {
       if (!sessionId) return;
 
       try {
-        const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/tools/${toolCallId}/connect`, {
+        const res = await fetch(`http://localhost:3001/api/sessions/${sessionId}/tools/${toolCallId}/connect`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ values }),
@@ -2493,7 +2379,7 @@ export default function App() {
         };
       });
 
-      const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/tools/${toolCallId}/input`, {
+      const res = await fetch(`http://localhost:3001/api/sessions/${sessionId}/tools/${toolCallId}/input`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ answers: payloadAnswers }),
@@ -2574,7 +2460,7 @@ export default function App() {
 
       setCompletionActionState({ messageId: message.id, action: 'compress' });
       try {
-        const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/context/compress`, {
+        const res = await fetch(`http://localhost:3001/api/sessions/${sessionId}/context/compress`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -2614,7 +2500,7 @@ export default function App() {
 
       setCompletionActionState({ messageId: message.id, action: 'fork' });
       try {
-        const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/fork`, {
+        const res = await fetch(`http://localhost:3001/api/sessions/${sessionId}/fork`, {
           method: 'POST',
         });
         if (!res.ok) {
@@ -2641,7 +2527,7 @@ export default function App() {
 
       setCompletionActionState({ messageId: message.id, action: 'restore' });
       try {
-        const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/restore`, {
+        const res = await fetch(`http://localhost:3001/api/sessions/${sessionId}/restore`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ messageId: message.id }),
@@ -2704,10 +2590,8 @@ export default function App() {
     setMessages([]);
     setCodeChanges([]);
     setFileTree([]);
-    setTerminalOutput('');
     setTerminalCwd('');
     setTerminalBackend('subprocess');
-    setTerminalSupportsInterrupt(false);
     setManagedProcesses([]);
     setSelectedFileContent('');
     setSelectedFilePath('');
@@ -2873,10 +2757,10 @@ export default function App() {
           onToggleWebPreview={() => setIsWebPreviewOpen((prev) => !prev)}
           webPreviewUrl={webPreviewUrl}
           onWebPreviewUrlChange={setWebPreviewUrl}
-          onSelectPreviewElement={(html, selector) => {
+          onSelectPreviewElement={(html, selector, sourceUrl) => {
             setElementAttachments((prev) => [
               ...prev,
-              { id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, selector, html, sourceUrl: webPreviewUrl },
+              { id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, selector, html, sourceUrl: sourceUrl ?? webPreviewUrl },
             ]);
           }}
           planData={planData}
@@ -2890,7 +2774,7 @@ export default function App() {
             if (!sessionId) return;
             try {
               const annotationPayload = formatPlanAnnotations(annotations);
-              const response = await fetch(`http://localhost:8000/api/sessions/${sessionId}/plan-draft`, {
+              const response = await fetch(`http://localhost:3001/api/sessions/${sessionId}/plan-draft`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -2927,7 +2811,7 @@ export default function App() {
             if (!sessionId) return;
 
             try {
-              const res = await fetch(`http://localhost:8000/api/sessions/${sessionId}/plan/submit`, {
+              const res = await fetch(`http://localhost:3001/api/sessions/${sessionId}/plan/submit`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -2968,7 +2852,7 @@ export default function App() {
               await loadSessionHistory();
 
               await streamAssistantResponse({
-                url: 'http://localhost:8000/api/chat/stream',
+                url: 'http://localhost:3001/api/chat/stream',
                 body: {
                   session_id: sessionId,
                   message: codingInput,
@@ -2988,21 +2872,14 @@ export default function App() {
           }}
         />
         <TerminalPanel
-          output={terminalOutput}
-          input={terminalInput}
+          sessionId={sessionId}
           cwd={terminalCwd}
           backend={terminalBackend}
           isOpen={isTerminalOpen}
-          isSubmitting={isTerminalSubmitting}
-          supportsInterrupt={terminalSupportsInterrupt}
           isStoppingProcesses={isStoppingProcesses}
           processes={managedProcesses}
-          onInputChange={setTerminalInput}
-          onSubmit={() => void sendTerminalCommand()}
-          onSendKey={(key) => void sendTerminalKey(key)}
-          onInterrupt={() => void interruptTerminal()}
+          onRuntimeStatusChange={applyTerminalSnapshot}
           onToggle={handleTerminalToggle}
-          onClear={() => void clearTerminal()}
           onRefreshProcesses={() => void refreshTerminalState({ includeProcesses: true })}
           onStopAllProcesses={() => void stopManagedProcesses()}
           onTerminateProcess={(terminalId) => void terminateManagedProcess(terminalId)}

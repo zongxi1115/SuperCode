@@ -29,7 +29,7 @@ type BoardPayload = {
 };
 
 function workspaceKanbanUrl(workspace: string, suffix: string) {
-  return `http://localhost:8000/api/workspaces/${encodeURIComponent(workspace)}/kanban${suffix}`;
+  return `http://localhost:3001/api/workspaces/${encodeURIComponent(workspace)}/kanban${suffix}`;
 }
 
 async function readApiError(response: Response, fallback: string) {

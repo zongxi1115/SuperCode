@@ -22,9 +22,9 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import unquote
 
-from fastapi import Body, FastAPI, HTTPException, Query
+from fastapi import Body, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 
 try:
     from winpty import PtyProcess
@@ -150,8 +150,8 @@ from fastapi_app.workspace_utils import (
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_WORKSPACE = ROOT
-BACKEND_BASE_URL = "http://localhost:8000"
-DEFAULT_BROWSER_PREVIEW_URL = "http://localhost:5173"
+BACKEND_BASE_URL = "http://localhost:3001"
+DEFAULT_BROWSER_PREVIEW_URL = "http://localhost:8888"
 DEFAULT_SELECTED_FILE = None
 DEFAULT_OPEN_FILES = [
     "ChatLayout.tsx",
@@ -171,6 +171,201 @@ MAX_CONTEXT_COMPRESSION_SOURCE_MESSAGES = 24
 MAX_CONTEXT_COMPRESSION_SOURCE_TOOLS = 20
 MAX_CONTEXT_COMPRESSION_SOURCE_THOUGHTS = 10
 MAX_CONTEXT_COMPRESSION_SOURCE_CODE_CHANGES = 8
+
+PREVIEW_SELECT_BRIDGE_SCRIPT = r"""
+(() => {
+  const READY = "SC_SELECT_BRIDGE_READY";
+  const PING = "SC_SELECT_BRIDGE_PING";
+  const START = "SC_SELECT_START";
+  const CANCEL = "SC_SELECT_CANCEL";
+  const RESULT = "SC_SELECT_RESULT";
+  const ERROR = "SC_SELECT_ERROR";
+  const HOVER_CLASS = "__sc-select-hover";
+  const SELECTED_CLASS = "__sc-select-selected";
+  const STYLE_ID = "__sc-select-bridge-style";
+
+  if (window.__SUPER_CODE_SELECT_BRIDGE__) {
+    window.parent?.postMessage({ type: READY, sourceUrl: window.location.href }, "*");
+    return;
+  }
+
+  window.__SUPER_CODE_SELECT_BRIDGE__ = true;
+
+  let selecting = false;
+  let activeTarget = null;
+
+  const post = (message) => {
+    try {
+      window.parent?.postMessage({ ...message, sourceUrl: window.location.href }, "*");
+    } catch (error) {
+      console.warn("[SuperCode] select bridge postMessage failed", error);
+    }
+  };
+
+  const ensureStyle = () => {
+    let style = document.getElementById(STYLE_ID);
+    if (style) return style;
+    style = document.createElement("style");
+    style.id = STYLE_ID;
+    style.textContent = `
+      * { cursor: crosshair !important; }
+      .${HOVER_CLASS} {
+        outline: 2px dashed #3b82f6 !important;
+        outline-offset: 2px !important;
+        background-color: rgba(59, 130, 246, 0.1) !important;
+      }
+      .${SELECTED_CLASS} {
+        outline: 2px solid #3b82f6 !important;
+        outline-offset: 2px !important;
+        background-color: rgba(59, 130, 246, 0.15) !important;
+      }
+    `;
+    document.head.appendChild(style);
+    return style;
+  };
+
+  const clearClasses = () => {
+    document.querySelectorAll(`.${HOVER_CLASS}, .${SELECTED_CLASS}`).forEach((el) => {
+      el.classList.remove(HOVER_CLASS, SELECTED_CLASS);
+    });
+    activeTarget = null;
+  };
+
+  const cleanup = () => {
+    selecting = false;
+    clearClasses();
+    document.getElementById(STYLE_ID)?.remove();
+    document.removeEventListener("mouseover", handleMouseOver, true);
+    document.removeEventListener("mouseout", handleMouseOut, true);
+    document.removeEventListener("click", handleClick, true);
+    document.removeEventListener("keydown", handleKeyDown, true);
+  };
+
+  const getElementSelector = (el) => {
+    const parts = [];
+    let current = el;
+    while (current && current.nodeType === Node.ELEMENT_NODE) {
+      let selector = current.tagName.toLowerCase();
+      if (current.id) {
+        selector += `#${CSS.escape(current.id)}`;
+        parts.unshift(selector);
+        break;
+      }
+
+      const classes = Array.from(current.classList || [])
+        .filter((className) => className && !className.startsWith("__sc-select"));
+      if (classes.length) {
+        selector += classes.map((className) => `.${CSS.escape(className)}`).join("");
+      }
+
+      const parent = current.parentElement;
+      if (parent) {
+        const siblings = Array.from(parent.children).filter(
+          (sibling) => sibling.tagName === current.tagName,
+        );
+        if (siblings.length > 1) {
+          selector += `:nth-of-type(${siblings.indexOf(current) + 1})`;
+        }
+      }
+
+      parts.unshift(selector);
+      current = current.parentElement;
+    }
+    return parts.slice(-4).join(" > ");
+  };
+
+  function shouldIgnoreTarget(target) {
+    return (
+      !target ||
+      !(target instanceof HTMLElement) ||
+      target === document.body ||
+      target === document.documentElement
+    );
+  }
+
+  function handleMouseOver(event) {
+    if (!selecting) return;
+    event.stopPropagation();
+    const target = event.target;
+    if (shouldIgnoreTarget(target)) return;
+    if (activeTarget && activeTarget !== target) {
+      activeTarget.classList.remove(HOVER_CLASS);
+    }
+    activeTarget = target;
+    target.classList.add(HOVER_CLASS);
+  }
+
+  function handleMouseOut(event) {
+    if (!selecting) return;
+    const target = event.target;
+    if (target instanceof HTMLElement) {
+      target.classList.remove(HOVER_CLASS);
+    }
+  }
+
+  function handleClick(event) {
+    if (!selecting) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const target = event.target;
+    if (shouldIgnoreTarget(target)) return;
+
+    try {
+      clearClasses();
+      target.classList.add(SELECTED_CLASS);
+      const selector = getElementSelector(target);
+      const html = target.outerHTML;
+      cleanup();
+      post({ type: RESULT, selector, html });
+    } catch (error) {
+      cleanup();
+      post({
+        type: ERROR,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  function handleKeyDown(event) {
+    if (event.key === "Escape") {
+      cleanup();
+      post({ type: CANCEL });
+    }
+  }
+
+  const start = () => {
+    if (selecting) return;
+    selecting = true;
+    ensureStyle();
+    document.addEventListener("mouseover", handleMouseOver, true);
+    document.addEventListener("mouseout", handleMouseOut, true);
+    document.addEventListener("click", handleClick, true);
+    document.addEventListener("keydown", handleKeyDown, true);
+  };
+
+  window.addEventListener("message", (event) => {
+    if (event.source !== window.parent) return;
+    const type = event.data?.type;
+    if (type === START) {
+      start();
+      return;
+    }
+    if (type === PING) {
+      post({ type: READY });
+      return;
+    }
+    if (type === CANCEL) {
+      cleanup();
+    }
+  });
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", () => post({ type: READY }), { once: true });
+  } else {
+    post({ type: READY });
+  }
+})();
+"""
 
 
 def _empty_session_token_usage() -> dict[str, int]:
@@ -345,6 +540,7 @@ class UISession:
             cwd=snapshot.cwd,
             supportsInterrupt=snapshot.supportsInterrupt,
             supportsRawInput=snapshot.supportsRawInput,
+            supportsResize=snapshot.supportsResize,
             fileTree=self.get_file_tree() if include_file_tree else None,
             processes=self.get_managed_processes(active_only=True) if include_processes else None,
         )
@@ -2194,6 +2390,15 @@ async def preview_session_file(session_id: str, preview_path: str = "") -> FileR
     return FileResponse(target)
 
 
+@app.get("/api/preview/select-bridge.js")
+async def get_preview_select_bridge_script() -> Response:
+    return Response(
+        PREVIEW_SELECT_BRIDGE_SCRIPT,
+        media_type="application/javascript; charset=utf-8",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @app.get("/api/sessions/{session_id}/file-tree")
 async def get_file_tree(session_id: str) -> JSONResponse:
     session = require_session(session_id)
@@ -3421,6 +3626,128 @@ async def post_session_terminal_clear(session_id: str) -> JSONResponse:
     snapshot = session.terminal_runtime.snapshot(session_id)
     session.terminal_output = snapshot.output
     return JSONResponse(snapshot.model_dump())
+
+
+@app.websocket("/api/sessions/{session_id}/terminal/ws")
+async def session_terminal_websocket(
+    websocket: WebSocket,
+    session_id: str,
+) -> None:
+    session = require_session(session_id)
+    if session.terminal_runtime is None:
+        await websocket.close(code=1011, reason="terminal 不存在")
+        return
+
+    await websocket.accept()
+    loop = asyncio.get_running_loop()
+    output_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    send_lock = asyncio.Lock()
+
+    def enqueue_output(chunk: str) -> None:
+        loop.call_soon_threadsafe(output_queue.put_nowait, chunk)
+
+    unsubscribe = session.terminal_runtime.read_loop(enqueue_output)
+
+    async def send_terminal_message(message: dict[str, Any]) -> None:
+        async with send_lock:
+            await websocket.send_json(message)
+
+    async def send_terminal_status() -> None:
+        snapshot = session.terminal_runtime.snapshot(session_id)
+        session.terminal_output = snapshot.output
+        await send_terminal_message(
+            {
+                "type": "status",
+                "cwd": snapshot.cwd,
+                "backend": snapshot.backend,
+                "supportsInterrupt": snapshot.supportsInterrupt,
+                "supportsResize": snapshot.supportsResize,
+            }
+        )
+
+    async def send_runtime_output() -> None:
+        snapshot = session.terminal_runtime.snapshot(session_id)
+        if snapshot.output:
+            await send_terminal_message({"type": "output", "data": snapshot.output})
+        await send_terminal_status()
+
+        while True:
+            chunk = await output_queue.get()
+            if chunk is None:
+                break
+            chunks = [chunk]
+            buffered_chars = len(chunk)
+            deadline = time.monotonic() + 0.016
+            while time.monotonic() < deadline and buffered_chars < 64_000:
+                try:
+                    next_chunk = output_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if next_chunk is None:
+                    await output_queue.put(None)
+                    break
+                chunks.append(next_chunk)
+                buffered_chars += len(next_chunk)
+            await send_terminal_message({"type": "output", "data": "".join(chunks)})
+
+    async def receive_terminal_input() -> None:
+        while True:
+            message = await websocket.receive_json()
+            if not isinstance(message, dict):
+                await send_terminal_message({"type": "error", "message": "无效的终端消息"})
+                continue
+
+            message_type = str(message.get("type") or "").strip().lower()
+            if message_type == "input":
+                session.terminal_runtime.write(str(message.get("data") or ""))
+                continue
+            elif message_type == "resize":
+                try:
+                    cols = int(message.get("cols") or 0)
+                    rows = int(message.get("rows") or 0)
+                except (TypeError, ValueError):
+                    continue
+                session.terminal_runtime.resize(cols, rows)
+                continue
+            elif message_type == "clear":
+                session.terminal_runtime.clear()
+                session.terminal_output = ""
+                await send_terminal_message({"type": "clear"})
+                await send_terminal_status()
+            elif message_type == "interrupt":
+                if not session.terminal_runtime.interrupt():
+                    await send_terminal_message(
+                        {"type": "error", "message": "当前终端后端不支持 Ctrl+C 中断"}
+                    )
+                await send_terminal_status()
+            else:
+                await send_terminal_message(
+                    {"type": "error", "message": f"不支持的终端消息类型: {message_type}"}
+                )
+
+    sender = asyncio.create_task(send_runtime_output())
+    receiver = asyncio.create_task(receive_terminal_input())
+    try:
+        done, pending = await asyncio.wait(
+            {sender, receiver},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in done:
+            task.result()
+        for task in pending:
+            task.cancel()
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        with suppress(Exception):
+            await send_terminal_message(
+                {"type": "error", "message": "终端连接已断开"}
+            )
+    finally:
+        unsubscribe()
+        await output_queue.put(None)
+        sender.cancel()
+        receiver.cancel()
 
 
 @app.post("/api/chat/stream")
@@ -5653,4 +5980,4 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, _force_shutdown)
     signal.signal(signal.SIGTERM, _force_shutdown)
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=3001)

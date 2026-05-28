@@ -999,7 +999,7 @@ function GitCommitPreview({
     }
 
     let disposed = false;
-    void fetch(`http://localhost:8000/api/sessions/${sessionId}/git/status`)
+    void fetch(`http://localhost:3001/api/sessions/${sessionId}/git/status`)
       .then(async (res) => {
         if (!res.ok) {
           return;

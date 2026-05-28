@@ -139,7 +139,7 @@ Common options:
 ## 💻 Usage / 使用指南
 
 ### 1. Complete Web UI Experience
-Once booted, navigate to `http://localhost:5173`.
+Once booted, navigate to `http://localhost:8888`.
 - Explore local workspace file trees.
 - Chat with the code assistant. Type `@` in the text area to trigger the dropdown for active markdown skills.
 - Observe model thought logs, terminal standard outputs, and file diff replacements live.
