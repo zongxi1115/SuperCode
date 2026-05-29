@@ -27,6 +27,7 @@ import type {
   SessionContextPayload,
   SessionContextCompressionPayload,
   SessionHistoryItem,
+  SessionExecutionMode,
   SessionPayload,
   SkillSummary,
   TerminalInfo,
@@ -56,6 +57,8 @@ import {
 
 import { Moon, PanelRightOpen, PanelRightClose, Settings2, Sun } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { AnimatePresence } from 'motion/react';
+import { SplashScreen } from '@/components/app/splash-screen';
 
 const DEFAULT_WEB_PREVIEW_URL = 'http://localhost:8888';
 const CONTEXT_COMPRESSION_USAGE_THRESHOLD = 0.8;
@@ -105,6 +108,16 @@ function resolveSelectedModelId(
 function normalizeReasoningEffort(value?: string | null) {
   const normalized = value?.trim().toLowerCase();
   return normalized ? normalized : null;
+}
+
+function normalizeExecutionMode(value?: string | null): SessionExecutionMode {
+  return value === 'worktree' ? 'worktree' : 'local';
+}
+
+function getPathLeaf(path?: string | null): string {
+  const normalized = (path ?? '').replace(/\\/g, '/');
+  const segments = normalized.split('/').filter(Boolean);
+  return segments[segments.length - 1] || path || '';
 }
 
 function decodeMentionTokenValue(value: string) {
@@ -382,10 +395,14 @@ export default function App() {
   const [isWebPreviewOpen, setIsWebPreviewOpen] = useState(false);
   const [webPreviewUrl, setWebPreviewUrl] = useState(DEFAULT_WEB_PREVIEW_URL);
   const [elementAttachments, setElementAttachments] = useState<{ id: string; selector: string; html: string; sourceUrl?: string }[]>([]);
-  const [chatPanelWidth, setChatPanelWidth] = useState(820);
+  const [chatPanelWidth, setChatPanelWidth] = useState(920);
   const [sessionHistory, setSessionHistory] = useState<SessionHistoryItem[]>([]);
   const [isHistoryLoading, setIsHistoryLoading] = useState(false);
   const [recentProjects, setRecentProjects] = useState<RecentProject[]>(() => getRecentProjects());
+  const [newSessionExecutionMode, setNewSessionExecutionMode] = useState<SessionExecutionMode>('local');
+  const [currentSessionExecutionMode, setCurrentSessionExecutionMode] = useState<SessionExecutionMode>('local');
+  const [currentBaseWorkspace, setCurrentBaseWorkspace] = useState('');
+  const [currentWorktreeBranch, setCurrentWorktreeBranch] = useState<string | null>(null);
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
   const [selectedReasoningEffort, setSelectedReasoningEffort] = useState<string | null>(null);
   const [selectedAgentMode, setSelectedAgentMode] = useState<AgentMode>('auto');
@@ -393,7 +410,14 @@ export default function App() {
   const [availablePlugins, setAvailablePlugins] = useState<PluginSummary[]>([]);
   const [availableSkills, setAvailableSkills] = useState<SkillSummary[]>([]);
   const [isModelConfigOpen, setIsModelConfigOpen] = useState(false);
-  const [appSettings, setAppSettings] = useState<AppSettings>({ autoApprove: false, thinkingRendering: 'text' });
+  const [appSettings, setAppSettings] = useState<AppSettings>({
+    autoApprove: false,
+    thinkingRendering: 'text',
+    bodyFontFamily:
+      'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+    bodyFontSize: 14,
+    bodyLineHeight: 22,
+  });
   const [visualModelProviders, setVisualModelProviders] = useState<UIModelProvider[]>([]);
   const [envModelConfigs, setEnvModelConfigs] = useState<ModelOption[]>([]);
   const [modelConfigPath, setModelConfigPath] = useState<string | null>(null);
@@ -418,6 +442,12 @@ export default function App() {
     document.documentElement.classList.toggle('dark', isDarkMode);
     localStorage.setItem('theme', isDarkMode ? 'dark' : 'light');
   }, [isDarkMode]);
+
+  useEffect(() => {
+    document.documentElement.style.setProperty('--font-sans', appSettings.bodyFontFamily);
+    document.documentElement.style.setProperty('--app-body-font-size', `${appSettings.bodyFontSize}px`);
+    document.documentElement.style.setProperty('--app-body-line-height', `${appSettings.bodyLineHeight}px`);
+  }, [appSettings.bodyFontFamily, appSettings.bodyFontSize, appSettings.bodyLineHeight]);
 
   useEffect(() => {
     const handleHashChange = () => {
@@ -750,6 +780,11 @@ export default function App() {
 
   const syncVisibleSessionSnapshot = useCallback((data: SessionPayload) => {
     setBackendMode(data.mode);
+    const executionMode = normalizeExecutionMode(data.executionMode);
+    setCurrentSessionExecutionMode(executionMode);
+    setNewSessionExecutionMode(executionMode);
+    setCurrentBaseWorkspace(data.baseWorkspace ?? data.workspace);
+    setCurrentWorktreeBranch(data.worktreeBranch ?? null);
     setStartupError(data.startupError ?? null);
     if (isAgentMode(data.agentType)) {
       setSelectedAgentMode(data.agentType);
@@ -791,6 +826,7 @@ export default function App() {
   }, [fetchSessionSnapshot, syncVisibleSessionSnapshot]);
 
   const applySessionPayload = useCallback((data: SessionPayload) => {
+    const baseWorkspace = data.baseWorkspace ?? data.workspace;
     currentSessionIdRef.current = data.sessionId;
     setSessionId(data.sessionId);
     setSelectedWorkspace(data.workspace);
@@ -804,8 +840,8 @@ export default function App() {
     setIsContextOpen(false);
     setIsTerminalOpen(false);
     setHasTerminalBeenOpened(false);
-    saveLastSession(data.workspace);
-    addRecentProject(data.workspace);
+    saveLastSession(baseWorkspace);
+    addRecentProject(baseWorkspace);
     setRecentProjects(getRecentProjects());
     setShowWorkspacePicker(false);
   }, [syncVisibleSessionSnapshot]);
@@ -850,7 +886,7 @@ export default function App() {
 
   const createSessionWithWorkspace = useCallback(async (
     workspace: string,
-    options?: { agentMode?: AgentMode },
+    options?: { agentMode?: AgentMode; executionMode?: SessionExecutionMode },
   ) => {
     setIsSessionBooting(true);
     setSessionError(null);
@@ -1296,8 +1332,8 @@ export default function App() {
   );
 
   const handleNewSession = useCallback(() => {
-    void createSessionWithWorkspace(selectedWorkspace);
-  }, [createSessionWithWorkspace, selectedWorkspace]);
+    void createSessionWithWorkspace(currentBaseWorkspace || selectedWorkspace);
+  }, [createSessionWithWorkspace, currentBaseWorkspace, selectedWorkspace]);
 
   const saveModelProviders = useCallback(
     async (providers: UIModelProvider[]) => {
@@ -1333,47 +1369,57 @@ export default function App() {
 
   const handleDeleteHistory = useCallback(
     async (targetSessionId: string) => {
-      try {
-        const res = await fetch(`http://localhost:3001/api/sessions/${targetSessionId}`, {
-          method: 'DELETE',
-        });
-        if (!res.ok) {
-          throw new Error('删除历史会话失败');
-        }
+      const deletedItem = sessionHistory.find((item) => item.sessionId === targetSessionId);
+      if (!deletedItem) return;
 
-        const remainingItems = sessionHistory.filter((item) => item.sessionId !== targetSessionId);
-        setSessionHistory(remainingItems);
+      const remainingItems = sessionHistory.filter((item) => item.sessionId !== targetSessionId);
+      setSessionHistory(remainingItems);
 
-        if (targetSessionId !== sessionId) {
-          return;
-        }
+      fetch(`http://localhost:3001/api/sessions/${targetSessionId}`, { method: 'DELETE' }).catch(
+        () => {
+          setSessionHistory((prev) => {
+            const insertIdx = prev.findIndex(
+              (item) => (item.updatedAt ?? 0) < (deletedItem.updatedAt ?? 0),
+            );
+            const next = [...prev];
+            next.splice(insertIdx === -1 ? next.length : insertIdx, 0, deletedItem);
+            return next;
+          });
+          setSessionError('删除历史会话失败，已恢复');
+        },
+      );
 
-        const nextItem = remainingItems[0];
-        if (nextItem) {
-          await restoreSession(nextItem.sessionId);
-          return;
-        }
+      if (targetSessionId !== sessionId) return;
 
-        setSessionId(null);
-        setMessages([]);
-        setCodeChanges([]);
-        setFileTree([]);
-        setTerminalCwd('');
-        setTerminalBackend('subprocess');
-        setSelectedFileContent('');
-        setSelectedFilePath('');
-        setSessionContext(null);
-        setIsContextOpen(false);
-        setShowWorkspacePicker(true);
-        clearLastSession();
-      } catch (error) {
-        console.error(error);
-        setSessionError(error instanceof Error ? error.message : '删除历史会话失败');
-      } finally {
-        void loadSessionHistory();
+      const nextItem = remainingItems[0];
+      if (nextItem) {
+        setSessionError(null);
+        fetchSessionSnapshot(nextItem.sessionId)
+          .then((data) => applySessionPayload(data))
+          .catch((error) => {
+            console.error(error);
+            setSessionError(error instanceof Error ? error.message : '恢复历史会话失败');
+          });
+        return;
       }
+
+      setSessionId(null);
+      setMessages([]);
+      setCodeChanges([]);
+      setFileTree([]);
+      setTerminalCwd('');
+      setTerminalBackend('subprocess');
+      setSelectedFileContent('');
+      setSelectedFilePath('');
+      setCurrentSessionExecutionMode('local');
+      setCurrentBaseWorkspace('');
+      setCurrentWorktreeBranch(null);
+      setSessionContext(null);
+      setIsContextOpen(false);
+      setShowWorkspacePicker(true);
+      clearLastSession();
     },
-    [loadSessionHistory, restoreSession, sessionHistory, sessionId]
+    [fetchSessionSnapshot, applySessionPayload, sessionHistory, sessionId],
   );
 
   const streamAssistantResponse = useCallback(async ({
@@ -1856,10 +1902,30 @@ export default function App() {
               !Array.isArray(data.data)
             ) ? data.data as Partial<SessionContextPayload> : {};
             onSessionStateChange?.(payload);
+            if (typeof payload.workspace === 'string' && payload.workspace) {
+              setSelectedWorkspace(payload.workspace);
+              setTerminalCwd(payload.workspace);
+            }
+            if (payload.executionMode) {
+              const executionMode = normalizeExecutionMode(payload.executionMode);
+              setCurrentSessionExecutionMode(executionMode);
+              setNewSessionExecutionMode(executionMode);
+            }
+            if (typeof payload.baseWorkspace === 'string') {
+              setCurrentBaseWorkspace(payload.baseWorkspace);
+            }
+            if ('worktreeBranch' in payload) {
+              setCurrentWorktreeBranch(payload.worktreeBranch ?? null);
+            }
             setSessionContext((prev) =>
               prev
                 ? {
-                    ...prev,
+                      ...prev,
+                    workspace: payload.workspace ?? prev.workspace,
+                    executionMode: payload.executionMode ?? prev.executionMode,
+                    baseWorkspace: payload.baseWorkspace ?? prev.baseWorkspace,
+                    worktreePath: payload.worktreePath ?? prev.worktreePath,
+                    worktreeBranch: payload.worktreeBranch ?? prev.worktreeBranch,
                     agentType: payload.agentType ?? prev.agentType,
                     phase: payload.phase ?? prev.phase,
                     deployState: payload.deployState ?? prev.deployState,
@@ -2131,6 +2197,7 @@ export default function App() {
       body: {
         session_id: sessionId,
         message: finalMsg,
+        execution_mode: currentSessionExecutionMode === 'worktree' ? 'worktree' : newSessionExecutionMode,
         agent_mode: resolveAgentModeForRequest(selectedAgentMode) ?? 'auto',
         skills: selectedSkills,
       },
@@ -2726,6 +2793,9 @@ export default function App() {
     setSelectedFileContent('');
     setSelectedFilePath('');
     setBackendMode('demo');
+    setCurrentSessionExecutionMode('local');
+    setCurrentBaseWorkspace('');
+    setCurrentWorktreeBranch(null);
     setStartupError(null);
     setSessionError(null);
       setSessionContext(null);
@@ -2738,32 +2808,30 @@ export default function App() {
       setShowWorkspacePicker(true);
   }, []);
 
-  if (showWorkspacePicker || !sessionId) {
-    return (
-      <WorkspacePicker
-        shouldRestoreSession={shouldRestoreSession}
-        customWorkspace={customWorkspace}
-        sessionError={sessionError}
-        isSessionBooting={isSessionBooting}
-        selectedWorkspace={selectedWorkspace}
-        directoryTree={directoryTree}
-        directoryExpanded={directoryExpanded}
-        recentProjects={recentProjects}
-        onDirectoryExpandedChange={handleDirectoryExpandedChange}
-        onCustomWorkspaceChange={setCustomWorkspace}
-        onSelectWorkspace={(path) => {
-          setSelectedWorkspace(path);
-          setCustomWorkspace('');
-        }}
-        onCreateSession={createSession}
-        onOpenRecentProject={handleOpenRecentProject}
-        onRemoveRecentProject={handleRemoveRecentProject}
-      />
-    );
-  }
-
   return (
-    <div className="flex flex-col h-screen bg-background text-foreground text-sm font-sans w-full overflow-hidden">
+    <>
+      {(showWorkspacePicker || !sessionId) ? (
+        <WorkspacePicker
+          shouldRestoreSession={shouldRestoreSession}
+          customWorkspace={customWorkspace}
+          sessionError={sessionError}
+          isSessionBooting={isSessionBooting}
+          selectedWorkspace={selectedWorkspace}
+          directoryTree={directoryTree}
+          directoryExpanded={directoryExpanded}
+          recentProjects={recentProjects}
+          onDirectoryExpandedChange={handleDirectoryExpandedChange}
+          onCustomWorkspaceChange={setCustomWorkspace}
+          onSelectWorkspace={(path) => {
+            setSelectedWorkspace(path);
+            setCustomWorkspace('');
+          }}
+          onCreateSession={createSession}
+          onOpenRecentProject={handleOpenRecentProject}
+          onRemoveRecentProject={handleRemoveRecentProject}
+        />
+      ) : (
+    <div className="flex flex-col h-screen bg-background text-foreground font-sans w-full overflow-hidden text-[var(--app-body-font-size)] leading-[var(--app-body-line-height)]">
       <header className="flex items-center h-10 px-3 border-b bg-muted/30 flex-shrink-0 gap-2">
         <div className="flex items-center gap-2">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" className="text-primary">
@@ -2774,7 +2842,18 @@ export default function App() {
           <span className="text-sm font-bold tracking-tight">Super Code</span>
         </div>
         <div className="flex-1" />
-        <div className="text-[11px] text-muted-foreground truncate max-w-[300px]" title={selectedWorkspace}>{selectedWorkspace}</div>
+        <div className="flex max-w-[420px] items-center gap-2 text-[11px] text-muted-foreground">
+          {currentSessionExecutionMode === 'worktree' ? (
+            <span className="shrink-0 rounded border border-primary/20 bg-primary/10 px-1.5 py-0.5 text-primary">
+              Worktree{currentWorktreeBranch ? ` · ${currentWorktreeBranch.replace('supercode/session-', '')}` : ''}
+            </span>
+          ) : null}
+          <span className="truncate" title={selectedWorkspace}>
+            {currentSessionExecutionMode === 'worktree'
+              ? `${getPathLeaf(currentBaseWorkspace)} -> ${selectedWorkspace}`
+              : selectedWorkspace}
+          </span>
+        </div>
         <Button
           variant="ghost"
           size="sm"
@@ -2808,6 +2887,7 @@ export default function App() {
         isHistoryLoading={isHistoryLoading}
         isCollapsed={isSidebarCollapsed}
         selectedWorkspace={selectedWorkspace}
+        selectedBaseWorkspace={currentBaseWorkspace || selectedWorkspace}
         backendMode={backendMode}
         startupError={startupError}
         width={sidebarWidth}
@@ -2840,7 +2920,7 @@ export default function App() {
         </div>
       ) : (
       <>
-      <div style={isRightPanelCollapsed ? undefined : { width: chatPanelWidth }} className={isRightPanelCollapsed ? 'flex-1' : 'flex-shrink-0'}>
+      <div style={isRightPanelCollapsed ? undefined : { width: chatPanelWidth }} className={isRightPanelCollapsed ? 'flex-1 min-w-0' : 'flex-shrink-0'}>
         <ChatPanel
         sessionId={sessionId}
         contextData={sessionContext}
@@ -2852,10 +2932,16 @@ export default function App() {
         isLoading={isLoading}
         model={selectedModelId}
         reasoningEffort={selectedReasoningEffort}
+        executionMode={currentSessionExecutionMode === 'worktree' ? 'worktree' : newSessionExecutionMode}
         modelOptions={modelOptions}
         fileTree={fileTree}
         onModelChange={handleModelChange}
         onReasoningEffortChange={handleReasoningEffortChange}
+        onExecutionModeChange={(mode) => {
+          if (currentSessionExecutionMode !== 'worktree') {
+            setNewSessionExecutionMode(mode);
+          }
+        }}
         onContextOpenChange={handleContextOpenChange}
         onInputChange={setInput}
         onKeyDown={handleKeyDown}
@@ -2879,7 +2965,7 @@ export default function App() {
       {!isRightPanelCollapsed && (
       <ResizableHandle
         side="left"
-        onResize={(delta) => setChatPanelWidth((prev) => Math.min(Math.max(prev + delta, 400), 1000))}
+        onResize={(delta) => setChatPanelWidth((prev) => Math.min(Math.max(prev + delta, 560), 1120))}
       />
       )}
       {!isRightPanelCollapsed && (
@@ -3047,5 +3133,12 @@ export default function App() {
         />
       ) : null}
     </div>
+      )}
+      <AnimatePresence>
+        {isSessionBooting && (
+          <SplashScreen key="splash" workspace={selectedWorkspace || customWorkspace} />
+        )}
+      </AnimatePresence>
+    </>
   );
 }

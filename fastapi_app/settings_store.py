@@ -10,6 +10,9 @@ SETTINGS_FILE_NAME = "settings.json"
 DEFAULT_SETTINGS: dict[str, Any] = {
     "autoApprove": False,
     "thinkingRendering": "text",
+    "bodyFontFamily": 'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+    "bodyFontSize": 14,
+    "bodyLineHeight": 22,
 }
 
 

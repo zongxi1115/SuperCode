@@ -22,6 +22,10 @@ class PersistedSessionState:
     created_at: int
     updated_at: int
     reasoning_effort: str | None = None
+    execution_mode: str = "local"
+    base_workspace: str | None = None
+    worktree_path: str | None = None
+    worktree_branch: str | None = None
     agent_type: str = "coding"
     phase: str = "idle"
     route_state: dict[str, Any] = field(default_factory=dict)
@@ -90,7 +94,7 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                 """
                 INSERT INTO sessions (
                     session_id, workspace, mode, model, agent_type, phase, route_state, title, preview,
-                    reasoning_effort,
+                    reasoning_effort, execution_mode, base_workspace, worktree_path, worktree_branch,
                     message_count, tool_call_count, created_at, updated_at,
                     is_generating,
                     startup_error, env_file, selected_file_path, open_files,
@@ -102,7 +106,7 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                 )
                 VALUES (
                     :session_id, :workspace, :mode, :model, :agent_type, :phase, :route_state, :title, :preview,
-                    :reasoning_effort,
+                    :reasoning_effort, :execution_mode, :base_workspace, :worktree_path, :worktree_branch,
                     :message_count, :tool_call_count, :created_at, :updated_at,
                     :is_generating,
                     :startup_error, :env_file, :selected_file_path, :open_files,
@@ -117,6 +121,10 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                     mode = excluded.mode,
                     model = excluded.model,
                     reasoning_effort = excluded.reasoning_effort,
+                    execution_mode = excluded.execution_mode,
+                    base_workspace = excluded.base_workspace,
+                    worktree_path = excluded.worktree_path,
+                    worktree_branch = excluded.worktree_branch,
                     agent_type = excluded.agent_type,
                     phase = excluded.phase,
                     route_state = excluded.route_state,
@@ -187,6 +195,10 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                     mode TEXT NOT NULL,
                     model TEXT NOT NULL,
                     reasoning_effort TEXT,
+                    execution_mode TEXT NOT NULL DEFAULT 'local',
+                    base_workspace TEXT,
+                    worktree_path TEXT,
+                    worktree_branch TEXT,
                     agent_type TEXT NOT NULL DEFAULT 'coding',
                     phase TEXT NOT NULL DEFAULT 'idle',
                     route_state TEXT NOT NULL DEFAULT '{}',
@@ -246,6 +258,22 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                 connection.execute(
                     "ALTER TABLE sessions ADD COLUMN reasoning_effort TEXT"
                 )
+            if "execution_mode" not in existing_columns:
+                connection.execute(
+                    "ALTER TABLE sessions ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'local'"
+                )
+            if "base_workspace" not in existing_columns:
+                connection.execute(
+                    "ALTER TABLE sessions ADD COLUMN base_workspace TEXT"
+                )
+            if "worktree_path" not in existing_columns:
+                connection.execute(
+                    "ALTER TABLE sessions ADD COLUMN worktree_path TEXT"
+                )
+            if "worktree_branch" not in existing_columns:
+                connection.execute(
+                    "ALTER TABLE sessions ADD COLUMN worktree_branch TEXT"
+                )
             if "phase" not in existing_columns:
                 connection.execute(
                     "ALTER TABLE sessions ADD COLUMN phase TEXT NOT NULL DEFAULT 'idle'"
@@ -301,6 +329,10 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
             "mode": state.mode,
             "model": state.model,
             "reasoning_effort": state.reasoning_effort,
+            "execution_mode": state.execution_mode,
+            "base_workspace": state.base_workspace,
+            "worktree_path": state.worktree_path,
+            "worktree_branch": state.worktree_branch,
             "agent_type": state.agent_type,
             "phase": state.phase,
             "route_state": self._to_json(state.route_state),
@@ -342,6 +374,10 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
             mode=str(row["mode"]),
             model=str(row["model"]),
             reasoning_effort=row["reasoning_effort"] if "reasoning_effort" in row.keys() else None,
+            execution_mode=str(row["execution_mode"] if "execution_mode" in row.keys() else "local"),
+            base_workspace=row["base_workspace"] if "base_workspace" in row.keys() else None,
+            worktree_path=row["worktree_path"] if "worktree_path" in row.keys() else None,
+            worktree_branch=row["worktree_branch"] if "worktree_branch" in row.keys() else None,
             agent_type=str(row["agent_type"] if "agent_type" in row.keys() else "coding"),
             phase=str(row["phase"] if "phase" in row.keys() else "idle"),
             route_state=self._from_json(row["route_state"] if "route_state" in row.keys() else "{}", {}),

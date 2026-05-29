@@ -22,6 +22,8 @@ def session_has_persistable_history(session: Any) -> bool:
     pending_user_inputs = getattr(session, "pending_user_input_requests", {})
     if isinstance(pending_user_inputs, dict) and pending_user_inputs:
         return True
+    if getattr(session, "execution_mode", "local") == "worktree":
+        return True
     return False
 
 
@@ -53,6 +55,10 @@ def session_to_persisted_state(session: Any) -> PersistedSessionState:
         mode=session.mode,
         model=session.model,
         reasoning_effort=session.reasoning_effort,
+        execution_mode=session.execution_mode,
+        base_workspace=session.base_workspace,
+        worktree_path=session.worktree_path,
+        worktree_branch=session.worktree_branch,
         agent_type=session.agent_type,
         phase=session.phase,
         route_state=session.route_state,
@@ -92,6 +98,10 @@ def persisted_state_to_history_item(state: PersistedSessionState) -> SessionHist
     return SessionHistoryItem(
         sessionId=state.session_id,
         workspace=state.workspace,
+        executionMode=state.execution_mode if state.execution_mode in {"local", "worktree"} else "local",
+        baseWorkspace=state.base_workspace,
+        worktreePath=state.worktree_path,
+        worktreeBranch=state.worktree_branch,
         mode=state.mode,
         model=state.model,
         agentType=state.agent_type,

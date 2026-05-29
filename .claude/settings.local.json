@@ -6,7 +6,12 @@
       "Bash(Select-Object -ExpandProperty FullName)",
       "Bash(Get-ChildItem -Path \"D:\\\\vibe_projs\\\\SuperCode\" -Depth 2 -Directory)",
       "Bash(pnpm dev *)",
-      "Bash(pnpm check *)"
+      "Bash(pnpm check *)",
+      "Bash(findstr \"motion framer\")",
+      "Bash(findstr \"motion\")",
+      "Bash(node -e \"try { const m = require.resolve\\('motion/react'\\); console.log\\('motion/react:', m\\); } catch\\(e\\) { console.log\\('motion/react not found'\\); } try { const m = require.resolve\\('motion'\\); console.log\\('motion:', m\\); } catch\\(e\\) { console.log\\('motion not found'\\); }\")",
+      "Bash(node -e \"const m = require\\('motion/react'\\); console.log\\('AnimatePresence:', typeof m.AnimatePresence\\); console.log\\('motion:', typeof m.motion\\);\")",
+      "Bash(npx tsc *)"
     ]
   }
 }

@@ -14,6 +14,7 @@ type SidebarProps = {
   isCollapsed: boolean;
   isResizing: boolean;
   selectedWorkspace: string;
+  selectedBaseWorkspace: string;
   backendMode: 'agent' | 'demo';
   startupError: string | null;
   width: number;
@@ -48,6 +49,7 @@ export function Sidebar({
   isCollapsed,
   isResizing,
   selectedWorkspace,
+  selectedBaseWorkspace,
   backendMode,
   startupError,
   isGitPanelOpen,
@@ -67,12 +69,12 @@ export function Sidebar({
   const projectGroups = useMemo<ProjectGroup[]>(() => {
     const map = new Map<string, SessionHistoryItem[]>();
     for (const item of historyItems) {
-      const ws = item.workspace || '未知项目';
+      const ws = item.baseWorkspace || item.workspace || '未知项目';
       if (!map.has(ws)) map.set(ws, []);
       map.get(ws)!.push(item);
     }
     const groups: ProjectGroup[] = [];
-    const currentWs = selectedWorkspace;
+    const currentWs = selectedBaseWorkspace || selectedWorkspace;
     if (map.has(currentWs)) {
       groups.push({ workspace: currentWs, name: getFolderName(currentWs), items: map.get(currentWs)! });
       map.delete(currentWs);
@@ -81,7 +83,7 @@ export function Sidebar({
       groups.push({ workspace: ws, name: getFolderName(ws), items });
     }
     return groups;
-  }, [historyItems, selectedWorkspace]);
+  }, [historyItems, selectedBaseWorkspace, selectedWorkspace]);
 
   const toggleProjectCollapse = (workspace: string) => {
     setCollapsedProjects((prev) => {
@@ -113,10 +115,10 @@ export function Sidebar({
               transition={{ duration: 0.15 }}
               className="flex-1 flex gap-1.5 min-w-0"
             >
-              <Button variant="default" size="sm" className="flex-1 justify-start gap-1.5 h-8 text-xs" onClick={onNewSession}>
+              <Button variant="default" size="sm" className="min-w-0 flex-1 justify-start gap-1.5 h-8 text-xs" onClick={onNewSession}>
                 <Plus className="w-3.5 h-3.5" /> 新建会话
               </Button>
-              <Button variant="outline" size="sm" className="flex-1 justify-start gap-1.5 h-8 text-xs" onClick={onSelectOtherProject}>
+              <Button variant="outline" size="sm" className="min-w-0 flex-1 justify-start gap-1.5 h-8 text-xs" onClick={onSelectOtherProject}>
                 <FolderOpen className="w-3.5 h-3.5" /> 打开项目
               </Button>
             </motion.div>
@@ -224,12 +226,19 @@ export function Sidebar({
                             transition={{ duration: 0.15 }}
                             className="overflow-hidden"
                           >
-                            <div className="space-y-px pl-2">
+                            <AnimatePresence mode="popLayout" initial={false}>
                               {group.items.map((item) => {
                                 const isActive = item.sessionId === currentSessionId;
+                                const isWorktree = item.executionMode === 'worktree';
                                 return (
-                                  <div
+                                  <motion.div
                                     key={item.sessionId}
+                                    layout
+                                    layoutAnimation="to-zero"
+                                    initial={{ opacity: 0 }}
+                                    animate={{ opacity: 1 }}
+                                    exit={{ opacity: 0, height: 0, marginBottom: 0, paddingTop: 0, paddingBottom: 0 }}
+                                    transition={{ duration: 0.2, ease: [0.25, 0.1, 0.25, 1] }}
                                     className={cn(
                                       'group flex items-center gap-1 rounded-md px-2 py-1.5 transition-colors cursor-pointer',
                                       isActive
@@ -238,7 +247,14 @@ export function Sidebar({
                                     )}
                                     onClick={() => onSelectHistory(item.sessionId)}
                                   >
-                                    <span className="min-w-0 flex-1 break-all text-left">{item.title}</span>
+                                    <span className="min-w-0 flex-1 break-all text-left text-xs leading-snug">
+                                      <span>{item.title}</span>
+                                      {isWorktree ? (
+                                        <span className="ml-1 inline-flex items-center rounded border border-primary/20 bg-primary/10 px-1 text-[10px] text-primary">
+                                          Worktree{item.worktreeBranch ? ` · ${item.worktreeBranch.replace('supercode/session-', '')}` : ''}
+                                        </span>
+                                      ) : null}
+                                    </span>
                                     <button
                                       type="button"
                                       onClick={(event) => {
@@ -251,10 +267,10 @@ export function Sidebar({
                                     >
                                       <Trash2 className="w-3 h-3" />
                                     </button>
-                                  </div>
+                                  </motion.div>
                                 );
                               })}
-                            </div>
+                            </AnimatePresence>
                           </motion.div>
                         )}
                       </AnimatePresence>

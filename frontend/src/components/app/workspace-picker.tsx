@@ -68,9 +68,6 @@ export function WorkspacePicker({
             <h1 className="text-2xl font-semibold">加载中...</h1>
             <p className="text-sm text-muted-foreground">工作区：{customWorkspace}</p>
           </div>
-          <div className="flex justify-center py-8">
-            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
-          </div>
         </div>
       </div>
     );

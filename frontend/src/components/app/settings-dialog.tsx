@@ -33,11 +33,36 @@ import {
   Shield,
   ShieldCheck,
   Trash2,
+  Type,
 } from 'lucide-react';
 
 type EditableProvider = UIModelProvider & {
   modelsText: string;
 };
+
+const BODY_FONT_OPTIONS = [
+  {
+    label: '默认界面',
+    value:
+      'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+  },
+  {
+    label: '圆润舒适',
+    value:
+      '"DM Sans", "SF Pro Rounded", "Segoe UI", ui-rounded, system-ui, -apple-system, sans-serif',
+  },
+  {
+    label: '代码风格',
+    value: '"Cascadia Mono", "JetBrains Mono", Consolas, "Courier New", monospace',
+  },
+] as const;
+
+const BODY_TEXT_SIZE_OPTIONS = [
+  { label: '紧凑', fontSize: 13, lineHeight: 20 },
+  { label: '默认', fontSize: 14, lineHeight: 22 },
+  { label: '舒适', fontSize: 15, lineHeight: 24 },
+  { label: '大字', fontSize: 16, lineHeight: 26 },
+] as const;
 
 type SettingsDialogProps = {
   open: boolean;
@@ -98,6 +123,12 @@ export function SettingsDialog({
   const [visibleKeys, setVisibleKeys] = useState<Set<string>>(new Set());
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [selectedProviderIndex, setSelectedProviderIndex] = useState(0);
+  const activeTextSize =
+    BODY_TEXT_SIZE_OPTIONS.find(
+      (option) =>
+        option.fontSize === draftSettings.bodyFontSize &&
+        option.lineHeight === draftSettings.bodyLineHeight,
+    ) ?? BODY_TEXT_SIZE_OPTIONS[1];
 
   const toggleKeyVisibility = (key: string) => {
     setVisibleKeys((prev) => {
@@ -464,6 +495,98 @@ export function SettingsDialog({
 
           <TabsContent value="general" className="mt-0 min-h-0 flex-1 overflow-y-auto px-6 py-4">
             <div className="space-y-5">
+              <div>
+                <h3 className="mb-3 text-sm font-semibold">正文风格</h3>
+                <div className="rounded-lg border bg-card p-4">
+                  <div className="flex items-start gap-3">
+                    <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-sky-500/10">
+                      <Type className="size-4 text-sky-600 dark:text-sky-400" />
+                    </div>
+                    <div className="min-w-0 flex-1 space-y-3">
+                      <div>
+                        <div className="text-sm font-medium">全局正文字体</div>
+                        <div className="text-xs text-muted-foreground">
+                          影响聊天正文、面板正文和输入区域的基础字体观感
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="space-y-1.5">
+                          <label className="text-[11px] font-medium text-muted-foreground">
+                            字体
+                          </label>
+                          <Select
+                            value={draftSettings.bodyFontFamily}
+                            onValueChange={(bodyFontFamily) =>
+                              setDraftSettings((prev) => ({
+                                ...prev,
+                                bodyFontFamily,
+                              }))
+                            }
+                          >
+                            <SelectTrigger className="h-8 text-xs">
+                              <SelectValue placeholder="选择字体" />
+                            </SelectTrigger>
+                            <SelectContent align="start">
+                              {BODY_FONT_OPTIONS.map((option) => (
+                                <SelectItem
+                                  key={option.label}
+                                  value={option.value}
+                                  style={{ fontFamily: option.value }}
+                                >
+                                  {option.label}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div className="space-y-1.5">
+                          <label className="text-[11px] font-medium text-muted-foreground">
+                            字号
+                          </label>
+                          <Select
+                            value={activeTextSize.label}
+                            onValueChange={(label) => {
+                              const nextSize =
+                                BODY_TEXT_SIZE_OPTIONS.find(
+                                  (option) => option.label === label,
+                                ) ?? activeTextSize;
+                              setDraftSettings((prev) => ({
+                                ...prev,
+                                bodyFontSize: nextSize.fontSize,
+                                bodyLineHeight: nextSize.lineHeight,
+                              }));
+                            }}
+                          >
+                            <SelectTrigger className="h-8 text-xs">
+                              <SelectValue placeholder="选择字号" />
+                            </SelectTrigger>
+                            <SelectContent align="start">
+                              {BODY_TEXT_SIZE_OPTIONS.map((option) => (
+                                <SelectItem key={option.label} value={option.label}>
+                                  {option.label}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      </div>
+                      <div
+                        className="rounded-md border bg-background/70 px-3 py-2 text-muted-foreground"
+                        style={{
+                          fontFamily: draftSettings.bodyFontFamily,
+                          fontSize: draftSettings.bodyFontSize,
+                          lineHeight: `${draftSettings.bodyLineHeight}px`,
+                        }}
+                      >
+                        预览：SuperCode 正在使用这套正文风格。
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <Separator />
+
               <div>
                 <h3 className="mb-3 text-sm font-semibold">安全与确认</h3>
                 <div className="space-y-4">

@@ -45,6 +45,10 @@ class CreateSessionResponse(BaseModel):
     modelId: str | None = None
     reasoningEffort: str | None = None
     mode: str
+    executionMode: Literal["local", "worktree"] = "local"
+    baseWorkspace: str | None = None
+    worktreePath: str | None = None
+    worktreeBranch: str | None = None
     agentType: str = "coding"
     phase: str = "idle"
     routeState: dict[str, Any] = Field(default_factory=dict)
@@ -93,6 +97,10 @@ class SessionContextResponse(BaseModel):
     sessionId: str
     workspace: str
     mode: str
+    executionMode: Literal["local", "worktree"] = "local"
+    baseWorkspace: str | None = None
+    worktreePath: str | None = None
+    worktreeBranch: str | None = None
     model: str
     reasoningEffort: str | None = None
     agentType: str = "coding"
@@ -155,6 +163,7 @@ class SessionRestoreRequest(BaseModel):
 
 class CreateSessionRequest(BaseModel):
     workspace: str | None = None
+    execution_mode: Literal["local", "worktree"] = "local"
     model: str | None = None
     env_file: str | None = None
     reasoning_effort: str | None = None
@@ -178,11 +187,18 @@ class ModelConfigPayload(BaseModel):
 class SettingsPayload(BaseModel):
     autoApprove: bool = False
     thinkingRendering: Literal["text", "markdown"] = "text"
+    bodyFontFamily: str = 'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
+    bodyFontSize: int = 14
+    bodyLineHeight: int = 22
 
 
 class SessionHistoryItem(BaseModel):
     sessionId: str
     workspace: str
+    executionMode: Literal["local", "worktree"] = "local"
+    baseWorkspace: str | None = None
+    worktreePath: str | None = None
+    worktreeBranch: str | None = None
     mode: str
     model: str
     agentType: str = "coding"
@@ -198,6 +214,7 @@ class SessionHistoryItem(BaseModel):
 class ChatStreamRequest(BaseModel):
     session_id: str = Field(alias="session_id")
     message: str
+    execution_mode: Literal["local", "worktree"] = "local"
     agent_mode: str | None = None
     skills: list[str] = Field(default_factory=list)
 

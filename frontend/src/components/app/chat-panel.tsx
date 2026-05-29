@@ -153,6 +153,7 @@ import type {
   ModelOption,
   PlanStep,
   SessionContextPayload,
+  SessionExecutionMode,
   SkillSummary,
   SubagentSnapshot,
   ToolCallRecord,
@@ -221,6 +222,7 @@ type ChatPanelProps = {
   isLoading: boolean;
   model: string | null;
   reasoningEffort: string | null;
+  executionMode: SessionExecutionMode;
   modelOptions: ModelOption[];
   availableSkills: SkillSummary[];
   fileTree: FileTreeNode[];
@@ -248,6 +250,7 @@ type ChatPanelProps = {
   onAgentModeChange: (mode: AgentMode) => void;
   onModelChange: (modelId: string) => void;
   onReasoningEffortChange: (reasoningEffort: string) => void;
+  onExecutionModeChange: (mode: SessionExecutionMode) => void;
   onCompletionAction?: (
     action: CompletionActionKey,
     message: ChatMessage,
@@ -714,10 +717,7 @@ function useStreamingCodeBlocks(
     const scrollStates = new WeakMap<HTMLElement, boolean>();
     const badgeMap = new WeakMap<HTMLElement, HTMLElement>();
 
-    const setBadgeState = (
-      badge: HTMLElement,
-      state: "loading" | "arrow",
-    ) => {
+    const setBadgeState = (badge: HTMLElement, state: "loading" | "arrow") => {
       const iconSlot = badge.querySelector("[data-icon-slot]");
       const labelSlot = badge.querySelector("[data-label-slot]");
       if (!iconSlot || !labelSlot) return;
@@ -758,7 +758,8 @@ function useStreamingCodeBlocks(
 
       const iconSlot = document.createElement("span");
       iconSlot.setAttribute("data-icon-slot", "");
-      iconSlot.className = "inline-flex items-center transition-opacity duration-150";
+      iconSlot.className =
+        "inline-flex items-center transition-opacity duration-150";
       el.appendChild(iconSlot);
 
       const labelSlot = document.createElement("span");
@@ -779,11 +780,12 @@ function useStreamingCodeBlocks(
     };
 
     const updateOverlay = (pre: HTMLElement) => {
-      const block = pre.closest('[data-streamdown="code-block"]') as HTMLElement;
+      const block = pre.closest(
+        '[data-streamdown="code-block"]',
+      ) as HTMLElement;
       if (!block) return;
 
-      const atBottom =
-        pre.scrollHeight - pre.scrollTop - pre.clientHeight < 20;
+      const atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 20;
       const wasAtBottom = scrollStates.get(pre) ?? true;
       scrollStates.set(pre, atBottom);
 
@@ -862,9 +864,7 @@ function useStreamingCodeBlocks(
     return () => {
       mo.disconnect();
       container
-        .querySelectorAll<HTMLPreElement>(
-          '[data-streamdown="code-block"] pre',
-        )
+        .querySelectorAll<HTMLPreElement>('[data-streamdown="code-block"] pre')
         .forEach((pre) => {
           pre.removeEventListener("scroll", onScroll);
           const badge = badgeMap.get(pre);
@@ -1228,11 +1228,11 @@ function ToolBody({
     (toolCall.name === "replace_file" ? toolCall.streamedInput : undefined)) as
     | string
     | undefined;
-  const applyPatchPreview = ((toolCall.name === "apply_patch" && isStreaming
-    ? (args.new_content || toolCall.streamedInput)
-    : undefined)) as
-    | string
-    | undefined;
+  const applyPatchPreview = (
+    toolCall.name === "apply_patch" && isStreaming
+      ? args.new_content || toolCall.streamedInput
+      : undefined
+  ) as string | undefined;
   const command =
     args.command || args.cmd || (args.content as string | undefined);
   const terminalPayload =
@@ -2570,23 +2570,265 @@ const PersonaRail = memo(function PersonaRail({
   );
 });
 
-const EmptyStateWithPersona = memo(function EmptyStateWithPersona({
-  state,
+const TextMorph = memo(function TextMorph({
+  text,
+  className,
+  characterClassName,
 }: {
-  state: PersonaState;
+  text: string;
+  className?: string;
+  characterClassName?: string;
+}) {
+  const uniqueId = useId();
+  const previousCharactersRef = useRef<
+    Map<string, Array<{ id: string; used: boolean }>>
+  >(new Map());
+
+  const characters = useMemo(() => {
+    const segmenter =
+      typeof Intl !== "undefined" && "Segmenter" in Intl
+        ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
+        : null;
+    const textCharacters = segmenter
+      ? Array.from(segmenter.segment(text), ({ segment }) => segment)
+      : Array.from(text);
+    const previousCharacters = previousCharactersRef.current;
+    const nextCharacters = new Map<
+      string,
+      Array<{ id: string; used: boolean }>
+    >();
+    const characterCounts = new Map<string, number>();
+    const resolvedCharacters = textCharacters.map((character) => {
+      const characterKey = character.toLocaleLowerCase();
+      const previousMatch = previousCharacters
+        .get(characterKey)
+        ?.find((item) => !item.used);
+
+      if (previousMatch) {
+        previousMatch.used = true;
+      }
+
+      const occurrence = (characterCounts.get(characterKey) ?? 0) + 1;
+      characterCounts.set(characterKey, occurrence);
+      const id =
+        previousMatch?.id ?? `${uniqueId}-${characterKey}-${occurrence}`;
+
+      const nextBucket = nextCharacters.get(characterKey) ?? [];
+      nextBucket.push({ id, used: false });
+      nextCharacters.set(characterKey, nextBucket);
+
+      return {
+        id,
+        label: character === " " ? "\u00A0" : character,
+      };
+    });
+
+    previousCharactersRef.current = nextCharacters;
+    return resolvedCharacters;
+  }, [text, uniqueId]);
+
+  return (
+    <div
+      className={cn(
+        "flex max-w-full flex-wrap items-baseline justify-center text-center leading-tight select-none",
+        className,
+      )}
+    >
+      <AnimatePresence initial={false} mode="popLayout">
+        {characters.map((character, index) => (
+          <motion.span
+            key={character.id}
+            layoutId={character.id}
+            className={cn(
+              "inline-block whitespace-pre font-extrabold tracking-normal",
+              characterClassName,
+            )}
+            style={{
+              backgroundImage:
+                "linear-gradient(135deg, #a855f7 0%, #6366f1 50%, #ec4899 100%)",
+              WebkitBackgroundClip: "text",
+              WebkitTextFillColor: "transparent",
+              backgroundClip: "text",
+            }}
+            initial={{ opacity: 0, y: 14, filter: "blur(8px)" }}
+            animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
+            exit={{ opacity: 0, y: -14, filter: "blur(8px)" }}
+            transition={{
+              delay: Math.min(index * 0.018, 0.22),
+              duration: 0.32,
+              ease: [0.22, 1, 0.36, 1],
+            }}
+          >
+            {character.label}
+          </motion.span>
+        ))}
+      </AnimatePresence>
+    </div>
+  );
+});
+
+const CanvasEdgeGlow = memo(function CanvasEdgeGlow({
+  active,
+}: {
+  active: boolean;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    let hue = 0;
+    let raf: number;
+
+    const draw = () => {
+      const w = canvas.width;
+      const h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+      hue = (hue + 0.5) % 360;
+
+      const edgeSize = 120;
+
+      const topGrad = ctx.createLinearGradient(0, 0, 0, edgeSize);
+      topGrad.addColorStop(0, `hsla(${hue}, 80%, 60%, 0.6)`);
+      topGrad.addColorStop(1, "transparent");
+      ctx.fillStyle = topGrad;
+      ctx.fillRect(0, 0, w, edgeSize);
+
+      const bottomGrad = ctx.createLinearGradient(0, h, 0, h - edgeSize);
+      bottomGrad.addColorStop(0, `hsla(${(hue + 90) % 360}, 80%, 60%, 0.6)`);
+      bottomGrad.addColorStop(1, "transparent");
+      ctx.fillStyle = bottomGrad;
+      ctx.fillRect(0, h - edgeSize, w, edgeSize);
+
+      const leftGrad = ctx.createLinearGradient(0, 0, edgeSize, 0);
+      leftGrad.addColorStop(0, `hsla(${(hue + 180) % 360}, 80%, 60%, 0.6)`);
+      leftGrad.addColorStop(1, "transparent");
+      ctx.fillStyle = leftGrad;
+      ctx.fillRect(0, 0, edgeSize, h);
+
+      const rightGrad = ctx.createLinearGradient(w, 0, w - edgeSize, 0);
+      rightGrad.addColorStop(0, `hsla(${(hue + 270) % 360}, 80%, 60%, 0.6)`);
+      rightGrad.addColorStop(1, "transparent");
+      ctx.fillStyle = rightGrad;
+      ctx.fillRect(w - edgeSize, 0, edgeSize, h);
+
+      raf = requestAnimationFrame(draw);
+    };
+
+    draw();
+    return () => cancelAnimationFrame(raf);
+  }, []);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      width={typeof window !== "undefined" ? window.innerWidth : 1920}
+      height={typeof window !== "undefined" ? window.innerHeight : 1080}
+      className="fixed inset-0 pointer-events-none z-[60] transition-opacity duration-500"
+      style={{ opacity: active ? 1 : 0 }}
+    />
+  );
+});
+
+const SuperCodeTitle = memo(function SuperCodeTitle({
+  morphText,
+}: {
+  morphText?: string;
 }) {
   return (
-    <ConversationEmptyState className="min-h-[38vh]">
-      <motion.div layout className="flex items-center gap-4 text-left">
-        <PersonaShell state={state} />
-        <div className="space-y-1">
-          <h3 className="font-medium text-sm">智能代码助手</h3>
-          <p className="text-muted-foreground text-sm">
-            描述您的需求，我将为您生成代码并执行
-          </p>
-        </div>
-      </motion.div>
-    </ConversationEmptyState>
+    <TextMorph
+      text={morphText ?? "SuperCode"}
+      characterClassName={
+        morphText ? "text-4xl sm:text-5xl" : "text-6xl sm:text-7xl"
+      }
+    />
+  );
+});
+
+const EmptyHeroState = memo(function EmptyHeroState({
+  state,
+  isHandling,
+  children,
+}: {
+  state: PersonaState;
+  isHandling?: boolean;
+  children: React.ReactNode;
+}) {
+  const [idleMorphText, setIdleMorphText] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (isHandling) {
+      setIdleMorphText(null);
+      return;
+    }
+
+    const morphTimer = setTimeout(() => {
+      setIdleMorphText("Hi, How can SC Help you?");
+    }, 5000);
+
+    const revertTimer = setTimeout(() => {
+      setIdleMorphText(null);
+    }, 15000);
+
+    return () => {
+      clearTimeout(morphTimer);
+      clearTimeout(revertTimer);
+    };
+  }, [isHandling]);
+
+  const effectiveMorphText = isHandling
+    ? "SC is Handling your request~"
+    : (idleMorphText ?? undefined);
+
+  return (
+    <motion.div
+      key="empty-hero"
+      className="h-full flex flex-col min-w-0 border-r relative overflow-hidden"
+      initial={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: 0.35, ease: [0.4, 0, 0.2, 1] }}
+    >
+      <div
+        className="absolute inset-0 pointer-events-none"
+        style={{
+          background:
+            "radial-gradient(ellipse at 50% 35%, rgba(168,85,247,0.06) 0%, transparent 65%)",
+        }}
+      />
+      <div className="flex-1 flex items-center justify-center relative px-4">
+        <motion.div
+          className="flex w-full flex-col items-center gap-5"
+          initial={{ opacity: 0, y: 16 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.05, duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
+        >
+          <motion.div>
+            <Persona
+              variant="glint"
+              state={state}
+              className="size-24 drop-shadow-[0_0_28px_rgba(168,85,247,0.2)]"
+            />
+          </motion.div>
+          <div className="flex min-h-[9rem] w-full max-w-[860px] flex-col items-center justify-start">
+            <SuperCodeTitle morphText={effectiveMorphText} />
+            {!effectiveMorphText && (
+              <motion.p
+                className="text-muted-foreground text-sm tracking-wide"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ delay: 0.7, duration: 0.5 }}
+              >
+                让 AI 将想法转化为代码
+              </motion.p>
+            )}
+          </div>
+          <div className="mt-3 w-full max-w-[760px]">{children}</div>
+        </motion.div>
+      </div>
+    </motion.div>
   );
 });
 
@@ -2925,14 +3167,17 @@ const MessageList = memo(function MessageList({
     }
     flushCot();
 
-    const thinkingBeforeText = (g: typeof groups[number]) =>
+    const thinkingBeforeText = (g: (typeof groups)[number]) =>
       g.type === "cot" || g.type === "tools";
     for (let gi = groups.length - 1; gi > 0; gi--) {
       const group = groups[gi];
       if (!thinkingBeforeText(group)) continue;
       let targetIdx = -1;
       for (let j = gi - 1; j >= 0; j--) {
-        if (thinkingBeforeText(groups[j])) { targetIdx = j; break; }
+        if (thinkingBeforeText(groups[j])) {
+          targetIdx = j;
+          break;
+        }
       }
       if (targetIdx === -1) continue;
       const target = groups[targetIdx];
@@ -3453,10 +3698,6 @@ const ChatStreamBody = memo(function ChatStreamBody({
     }, 1200);
     return () => clearTimeout(timer);
   }, [activeCompletionAction, compressedMessageIds]);
-
-  if (messages.length === 0) {
-    return <EmptyStateWithPersona state={personaState} />;
-  }
 
   const lastAssistantMessage =
     [...messages].reverse().find((message) => message.role === "assistant") ??
@@ -4036,6 +4277,7 @@ export function ChatPanel({
   isLoading,
   model,
   reasoningEffort,
+  executionMode,
   modelOptions,
   availableSkills,
   fileTree,
@@ -4053,6 +4295,7 @@ export function ChatPanel({
   onAgentModeChange,
   onModelChange,
   onReasoningEffortChange,
+  onExecutionModeChange,
   onCompletionAction,
   activeCompletionAction,
   elementAttachments = [],
@@ -4067,6 +4310,35 @@ export function ChatPanel({
   const composerInputRef = useRef<HTMLDivElement>(null);
   const composerInputId = useId();
   const [isModelSelectorOpen, setIsModelSelectorOpen] = useState(false);
+  const [isHandling, setIsHandling] = useState(false);
+
+  const handleEmptySend = useCallback(() => {
+    if (isHandling) return;
+    setIsHandling(true);
+    onSendMessage();
+  }, [isHandling, onSendMessage]);
+
+  useEffect(() => {
+    if (!isHandling || isLoading) return;
+    setIsHandling(false);
+  }, [isHandling, isLoading]);
+
+  const [edgeGlowActive, setEdgeGlowActive] = useState(false);
+
+  useEffect(() => {
+    if (!isHandling) {
+      setEdgeGlowActive(false);
+      return;
+    }
+
+    setEdgeGlowActive(true);
+    const timer = setTimeout(() => {
+      setEdgeGlowActive(false);
+    }, 3000);
+
+    return () => clearTimeout(timer);
+  }, [isHandling]);
+
   const [composerSelection, setComposerSelection] =
     useState<ComposerSelectionOffsets>({
       start: 0,
@@ -4521,264 +4793,329 @@ export function ChatPanel({
     [activeMentionKey],
   );
 
-  return (
-    <div className="h-full flex flex-col min-w-0 border-r">
-      <div className="flex-1 relative min-h-0">
-        <Conversation className="absolute inset-0">
-          <ConversationContent className="gap-4 pb-4 max-w-[720px] mx-auto w-full">
-            <ChatStreamBody
-              sessionId={sessionId}
-              isLoading={isLoading}
-              messages={messages}
-              codeChanges={codeChanges}
-              onResolveDeleteConfirmation={onResolveDeleteConfirmation}
-              onResolveGitConfirmation={onResolveGitConfirmation}
-              onResolveConnectInput={onResolveConnectInput}
-              onResolvePlanQuestionsInput={onResolvePlanQuestionsInput}
-              onViewPlan={onViewPlan}
-              personaState={personaState}
-              onCompletionAction={onCompletionAction}
-              activeCompletionAction={activeCompletionAction}
-              canCompress={canCompress}
-              thinkingRendering={thinkingRendering}
+  const composer = (
+    <div className="shrink-0 border-t bg-background">
+      <div className="max-w-[720px] mx-auto w-full">
+        <PlanToggle planSteps={planSteps} isStreaming={isLoading} />
+        <div className="p-3 pt-2">
+          <div className="flex flex-col rounded-lg border bg-muted/30 p-2 shadow-sm focus-within:ring-1 focus-within:ring-ring">
+            <input
+              ref={fileInputRef}
+              type="file"
+              className="hidden"
+              multiple
+              onChange={handleFileInputChange}
             />
-          </ConversationContent>
-          <ConversationScrollButton className="bottom-16" />
-        </Conversation>
-        <div className="absolute right-2 top-0 bottom-0 flex items-center pointer-events-none z-10">
-          <div className="pointer-events-auto">
-            <MessageOutline messages={messages} isLoading={isLoading} />
-          </div>
-        </div>
-      </div>
 
-      <div className="shrink-0 border-t bg-background">
-        <div className="max-w-[720px] mx-auto w-full">
-          <PlanToggle planSteps={planSteps} isStreaming={isLoading} />
-          <div className="p-3 pt-2">
-            <div className="flex flex-col rounded-lg border bg-muted/30 p-2 shadow-sm focus-within:ring-1 focus-within:ring-ring">
-              <input
-                ref={fileInputRef}
-                type="file"
-                className="hidden"
-                multiple
-                onChange={handleFileInputChange}
-              />
-
-              {attachmentFiles.length > 0 && (
-                <div className="pb-2">
-                  <Attachments variant="inline">
-                    {attachmentFiles.map((file) => (
-                      <Attachment
-                        key={file.id}
-                        data={file}
-                        onRemove={() => handleRemoveAttachment(file.id)}
-                      >
-                        <AttachmentPreview />
-                        <AttachmentInfo />
-                        <AttachmentRemove />
-                      </Attachment>
-                    ))}
-                  </Attachments>
-                </div>
-              )}
-
-              {elementAttachments.length > 0 && (
-                <div className="pb-2 flex flex-wrap gap-1.5">
-                  {elementAttachments.map((el) => (
-                    <div
-                      key={el.id}
-                      className="group relative flex h-16 items-center gap-1.5 rounded-md border border-border px-1.5 py-1 transition-all hover:bg-accent/50"
+            {attachmentFiles.length > 0 && (
+              <div className="pb-2">
+                <Attachments variant="inline">
+                  {attachmentFiles.map((file) => (
+                    <Attachment
+                      key={file.id}
+                      data={file}
+                      onRemove={() => handleRemoveAttachment(file.id)}
                     >
-                      <div className="size-12 shrink-0 overflow-hidden rounded bg-white">
-                        <iframe
-                          srcDoc={el.html}
-                          title={el.selector}
-                          sandbox="allow-scripts"
-                          className="pointer-events-none size-full origin-top-left scale-[0.25]"
-                          style={{ width: "400%", height: "400%" }}
-                        />
-                      </div>
-                      <div className="flex flex-col gap-0.5 min-w-0 max-w-[140px]">
-                        <span className="truncate text-[10px] font-mono text-muted-foreground leading-tight">
-                          {el.selector}
-                        </span>
-                        {el.sourceUrl && (
-                          <span className="truncate text-[9px] text-muted-foreground/60 leading-tight">
-                            {el.sourceUrl.replace(/^https?:\/\//, "")}
-                          </span>
-                        )}
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => onRemoveElementAttachment?.(el.id)}
-                        className="absolute -top-1.5 -right-1.5 flex size-4 shrink-0 items-center justify-center rounded-full bg-background border shadow-sm opacity-0 transition-opacity group-hover:opacity-100 hover:bg-destructive/10"
-                      >
-                        <XIcon className="size-2.5 text-muted-foreground hover:text-destructive" />
-                      </button>
-                    </div>
+                      <AttachmentPreview />
+                      <AttachmentInfo />
+                      <AttachmentRemove />
+                    </Attachment>
                   ))}
-                </div>
-              )}
+                </Attachments>
+              </div>
+            )}
 
-              <div
-                ref={composerRef}
-                className="relative"
-                onFocusCapture={() => setIsFocused(true)}
-                onBlurCapture={(event) => {
-                  if (
-                    event.relatedTarget instanceof Node &&
-                    event.currentTarget.contains(event.relatedTarget)
-                  ) {
-                    return;
+            {elementAttachments.length > 0 && (
+              <div className="pb-2 flex flex-wrap gap-1.5">
+                {elementAttachments.map((el) => (
+                  <div
+                    key={el.id}
+                    className="group relative flex h-16 items-center gap-1.5 rounded-md border border-border px-1.5 py-1 transition-all hover:bg-accent/50"
+                  >
+                    <div className="size-12 shrink-0 overflow-hidden rounded bg-white">
+                      <iframe
+                        srcDoc={el.html}
+                        title={el.selector}
+                        sandbox="allow-scripts"
+                        className="pointer-events-none size-full origin-top-left scale-[0.25]"
+                        style={{ width: "400%", height: "400%" }}
+                      />
+                    </div>
+                    <div className="flex flex-col gap-0.5 min-w-0 max-w-[140px]">
+                      <span className="truncate text-[10px] font-mono text-muted-foreground leading-tight">
+                        {el.selector}
+                      </span>
+                      {el.sourceUrl && (
+                        <span className="truncate text-[9px] text-muted-foreground/60 leading-tight">
+                          {el.sourceUrl.replace(/^https?:\/\//, "")}
+                        </span>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => onRemoveElementAttachment?.(el.id)}
+                      className="absolute -top-1.5 -right-1.5 flex size-4 shrink-0 items-center justify-center rounded-full bg-background border shadow-sm opacity-0 transition-opacity group-hover:opacity-100 hover:bg-destructive/10"
+                    >
+                      <XIcon className="size-2.5 text-muted-foreground hover:text-destructive" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div
+              ref={composerRef}
+              className="relative"
+              onFocusCapture={() => setIsFocused(true)}
+              onBlurCapture={(event) => {
+                if (
+                  event.relatedTarget instanceof Node &&
+                  event.currentTarget.contains(event.relatedTarget)
+                ) {
+                  return;
+                }
+                setIsFocused(false);
+              }}
+            >
+              <ChatComposerEditor
+                value={input}
+                suggestions={mentionSuggestions}
+                onChange={onInputChange}
+                onSubmit={
+                  messages.length === 0 ? handleEmptySend : onSendMessage
+                }
+              />
+            </div>
+            <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2 border-t border-border/50 pt-2">
+              <div className="flex min-w-0 flex-wrap items-center gap-1">
+                <Button
+                  size="icon-sm"
+                  variant="ghost"
+                  onClick={() => fileInputRef.current?.click()}
+                  aria-label="添加附件"
+                  title="添加附件"
+                >
+                  <PaperclipIcon className="w-4 h-4" />
+                </Button>
+
+                <ModelSelector
+                  open={isModelSelectorOpen}
+                  onOpenChange={setIsModelSelectorOpen}
+                >
+                  <ModelSelectorTrigger asChild>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 gap-1.5 px-2 text-xs font-medium text-muted-foreground hover:text-foreground"
+                    >
+                      <ModelSelectorLogo
+                        provider={selectedModel?.provider ?? "openrouter"}
+                        model={selectedModel?.name}
+                      />
+                      <ModelSelectorName>
+                        {selectedModel?.label ??
+                          selectedModel?.name ??
+                          "选择模型"}
+                      </ModelSelectorName>
+                    </Button>
+                  </ModelSelectorTrigger>
+                  <ModelSelectorContent title="选择模型">
+                    <ModelSelectorInput placeholder="搜索模型..." />
+                    <ModelSelectorList>
+                      <ModelSelectorEmpty>未找到模型</ModelSelectorEmpty>
+                      <ModelSelectorGroup heading="可用模型">
+                        {modelOptions.map((m) => (
+                          <ModelSelectorItem
+                            key={m.id}
+                            onSelect={() => {
+                              onModelChange(m.id);
+                              setIsModelSelectorOpen(false);
+                            }}
+                            className="gap-2"
+                          >
+                            <ModelSelectorLogo
+                              provider={m.provider}
+                              model={m.name}
+                            />
+                            <ModelSelectorName>
+                              {m.label ?? m.name}
+                            </ModelSelectorName>
+                          </ModelSelectorItem>
+                        ))}
+                      </ModelSelectorGroup>
+                    </ModelSelectorList>
+                  </ModelSelectorContent>
+                </ModelSelector>
+
+                <Select
+                  value={agentMode}
+                  onValueChange={(value) =>
+                    onAgentModeChange(value as AgentMode)
                   }
-                  setIsFocused(false);
-                }}
-              >
-                <ChatComposerEditor
-                  value={input}
-                  suggestions={mentionSuggestions}
-                  onChange={onInputChange}
-                  onSubmit={onSendMessage}
+                >
+                  <SelectTrigger
+                    size="sm"
+                    className="h-7 min-w-[96px] max-w-full gap-1.5 border-0 px-2 text-xs text-muted-foreground shadow-none"
+                    aria-label="选择智能体模式"
+                  >
+                    <Code2Icon className="size-3.5" />
+                    <SelectValue placeholder="模式" />
+                  </SelectTrigger>
+                  <SelectContent align="start">
+                    <SelectItem value="auto">自动</SelectItem>
+                    <SelectItem value="plan">计划</SelectItem>
+                    <SelectItem value="coding">编码</SelectItem>
+                    <SelectItem value="deploy">部署</SelectItem>
+                  </SelectContent>
+                </Select>
+
+                <Select
+                  value={executionMode}
+                  onValueChange={(value) =>
+                    onExecutionModeChange(value as SessionExecutionMode)
+                  }
+                >
+                  <SelectTrigger
+                    size="sm"
+                    className="h-7 min-w-[104px] max-w-full gap-1.5 border-0 px-2 text-xs text-muted-foreground shadow-none"
+                    aria-label="选择运行位置"
+                  >
+                    {executionMode === "worktree" ? (
+                      <GitBranch className="size-3.5" />
+                    ) : (
+                      <FolderOpenIcon className="size-3.5" />
+                    )}
+                    <SelectValue placeholder="运行位置" />
+                  </SelectTrigger>
+                  <SelectContent align="start">
+                    <SelectItem value="local">本地</SelectItem>
+                    <SelectItem value="worktree">工作树</SelectItem>
+                  </SelectContent>
+                </Select>
+
+                <Select
+                  value={selectedReasoningEffort}
+                  onValueChange={onReasoningEffortChange}
+                >
+                  <SelectTrigger
+                    size="sm"
+                    className="hidden h-7 min-w-[108px] max-w-full gap-1.5 border-0 px-2 text-xs text-muted-foreground shadow-none"
+                    aria-label="选择思考程度"
+                  >
+                    <LightbulbIcon className="size-3.5" />
+                    <SelectValue placeholder="思考程度" />
+                  </SelectTrigger>
+                  <SelectContent align="start">
+                    <SelectItem value="default">默认</SelectItem>
+                    <SelectItem value="none">不思考</SelectItem>
+                    <SelectItem value="minimal">极低</SelectItem>
+                    <SelectItem value="low">低</SelectItem>
+                    <SelectItem value="medium">中</SelectItem>
+                    <SelectItem value="high">高</SelectItem>
+                    <SelectItem value="xhigh">超高</SelectItem>
+                  </SelectContent>
+                </Select>
+
+                <ContextViewer
+                  contextData={contextData}
+                  codeChanges={codeChanges}
+                  isLoading={isContextLoading}
+                  onOpenChange={onContextOpenChange}
+                  open={isContextOpen}
                 />
               </div>
-              <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2 border-t border-border/50 pt-2">
-                <div className="flex min-w-0 flex-wrap items-center gap-1">
-                  <Button
-                    size="icon-sm"
-                    variant="ghost"
-                    onClick={() => fileInputRef.current?.click()}
-                    aria-label="添加附件"
-                    title="添加附件"
-                  >
-                    <PaperclipIcon className="w-4 h-4" />
-                  </Button>
-
-                  <ModelSelector
-                    open={isModelSelectorOpen}
-                    onOpenChange={setIsModelSelectorOpen}
-                  >
-                    <ModelSelectorTrigger asChild>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        className="h-7 gap-1.5 px-2 text-xs font-medium text-muted-foreground hover:text-foreground"
-                      >
-                        <ModelSelectorLogo
-                          provider={selectedModel?.provider ?? "openrouter"}
-                          model={selectedModel?.name}
-                        />
-                        <ModelSelectorName>
-                          {selectedModel?.label ??
-                            selectedModel?.name ??
-                            "选择模型"}
-                        </ModelSelectorName>
-                      </Button>
-                    </ModelSelectorTrigger>
-                    <ModelSelectorContent title="选择模型">
-                      <ModelSelectorInput placeholder="搜索模型..." />
-                      <ModelSelectorList>
-                        <ModelSelectorEmpty>未找到模型</ModelSelectorEmpty>
-                        <ModelSelectorGroup heading="可用模型">
-                          {modelOptions.map((m) => (
-                            <ModelSelectorItem
-                              key={m.id}
-                              onSelect={() => {
-                                onModelChange(m.id);
-                                setIsModelSelectorOpen(false);
-                              }}
-                              className="gap-2"
-                            >
-                              <ModelSelectorLogo provider={m.provider} model={m.name} />
-                              <ModelSelectorName>
-                                {m.label ?? m.name}
-                              </ModelSelectorName>
-                            </ModelSelectorItem>
-                          ))}
-                        </ModelSelectorGroup>
-                      </ModelSelectorList>
-                    </ModelSelectorContent>
-                  </ModelSelector>
-
-                  <Select
-                    value={agentMode}
-                    onValueChange={(value) =>
-                      onAgentModeChange(value as AgentMode)
-                    }
-                  >
-                    <SelectTrigger
-                      size="sm"
-                      className="h-7 min-w-[96px] max-w-full gap-1.5 border-0 px-2 text-xs text-muted-foreground shadow-none"
-                      aria-label="选择智能体模式"
-                    >
-                      <Code2Icon className="size-3.5" />
-                      <SelectValue placeholder="模式" />
-                    </SelectTrigger>
-                    <SelectContent align="start">
-                      <SelectItem value="auto">自动</SelectItem>
-                      <SelectItem value="plan">计划</SelectItem>
-                      <SelectItem value="coding">编码</SelectItem>
-                      <SelectItem value="deploy">部署</SelectItem>
-                    </SelectContent>
-                  </Select>
-
-                  <Select
-                    value={selectedReasoningEffort}
-                    onValueChange={onReasoningEffortChange}
-                  >
-                    <SelectTrigger
-                      size="sm"
-                      className="h-7 min-w-[108px] max-w-full gap-1.5 border-0 px-2 text-xs text-muted-foreground shadow-none"
-                      aria-label="选择思考程度"
-                    >
-                      <LightbulbIcon className="size-3.5" />
-                      <SelectValue placeholder="思考程度" />
-                    </SelectTrigger>
-                    <SelectContent align="start">
-                      <SelectItem value="default">默认</SelectItem>
-                      <SelectItem value="none">不思考</SelectItem>
-                      <SelectItem value="minimal">极低</SelectItem>
-                      <SelectItem value="low">低</SelectItem>
-                      <SelectItem value="medium">中</SelectItem>
-                      <SelectItem value="high">高</SelectItem>
-                      <SelectItem value="xhigh">超高</SelectItem>
-                    </SelectContent>
-                  </Select>
-
-                  <ContextViewer
-                    contextData={contextData}
-                    codeChanges={codeChanges}
-                    isLoading={isContextLoading}
-                    onOpenChange={onContextOpenChange}
-                    open={isContextOpen}
-                  />
-                </div>
-                {isLoading ? (
-                  <Button
-                    size="icon"
-                    variant="destructive"
-                    onClick={onStopMessage}
-                    aria-label="终止生成"
-                    title="终止生成"
-                  >
-                    <Square className="w-3.5 h-3.5 fill-current" />
-                  </Button>
-                ) : (
-                  <Button
-                    size="icon"
-                    onClick={onSendMessage}
-                    disabled={!input.trim() && elementAttachments.length === 0}
-                    aria-label="发送消息"
-                    title="发送消息"
-                  >
-                    <ChevronRight className="w-4 h-4" />
-                  </Button>
-                )}
-              </div>
+              {isLoading ? (
+                <Button
+                  size="icon"
+                  variant="destructive"
+                  onClick={onStopMessage}
+                  aria-label="终止生成"
+                  title="终止生成"
+                >
+                  <Square className="w-3.5 h-3.5 fill-current" />
+                </Button>
+              ) : (
+                <Button
+                  size="icon"
+                  onClick={
+                    messages.length === 0 ? handleEmptySend : onSendMessage
+                  }
+                  disabled={!input.trim() && elementAttachments.length === 0}
+                  aria-label="发送消息"
+                  title="发送消息"
+                >
+                  <ChevronRight className="w-4 h-4" />
+                </Button>
+              )}
             </div>
           </div>
         </div>
       </div>
     </div>
+  );
+
+  return (
+    <>
+      <CanvasEdgeGlow active={edgeGlowActive} />
+      <AnimatePresence>
+        {messages.length === 0 && (
+          <EmptyHeroState state={personaState} isHandling={isHandling}>
+            <motion.div
+              key="empty-composer"
+              exit={{ opacity: 0, y: 24 }}
+              transition={{ duration: 0.18, ease: [0.4, 0, 0.2, 1] }}
+            >
+              {composer}
+            </motion.div>
+          </EmptyHeroState>
+        )}
+        {messages.length > 0 && (
+          <motion.div
+            key="normal"
+            className="h-full flex flex-col min-w-0 border-r"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
+          >
+            <div className="flex-1 relative min-h-0">
+              <Conversation className="absolute inset-0">
+                <ConversationContent className="gap-4 pb-4 max-w-[720px] mx-auto w-full">
+                  <ChatStreamBody
+                    sessionId={sessionId}
+                    isLoading={isLoading}
+                    messages={messages}
+                    codeChanges={codeChanges}
+                    onResolveDeleteConfirmation={onResolveDeleteConfirmation}
+                    onResolveGitConfirmation={onResolveGitConfirmation}
+                    onResolveConnectInput={onResolveConnectInput}
+                    onResolvePlanQuestionsInput={onResolvePlanQuestionsInput}
+                    onViewPlan={onViewPlan}
+                    personaState={personaState}
+                    onCompletionAction={onCompletionAction}
+                    activeCompletionAction={activeCompletionAction}
+                    canCompress={canCompress}
+                    thinkingRendering={thinkingRendering}
+                  />
+                </ConversationContent>
+                <ConversationScrollButton className="bottom-16" />
+              </Conversation>
+              <div className="absolute right-2 top-0 bottom-0 flex items-center pointer-events-none z-10">
+                <div className="pointer-events-auto">
+                  <MessageOutline messages={messages} isLoading={isLoading} />
+                </div>
+              </div>
+            </div>
+            <motion.div
+              initial={{ opacity: 1, y: "-32vh" }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.42, ease: [0.22, 1, 0.36, 1] }}
+            >
+              {composer}
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </>
   );
 }

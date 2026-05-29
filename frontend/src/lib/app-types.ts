@@ -115,6 +115,8 @@ export type WorkspaceOption = {
   label: string;
 };
 
+export type SessionExecutionMode = 'local' | 'worktree';
+
 export type DirectoryNode = {
   path: string;
   name: string;
@@ -190,6 +192,10 @@ export type SessionContextPayload = {
   sessionId: string;
   workspace: string;
   mode: 'agent' | 'demo' | string;
+  executionMode?: SessionExecutionMode;
+  baseWorkspace?: string | null;
+  worktreePath?: string | null;
+  worktreeBranch?: string | null;
   model: string;
   reasoningEffort?: string | null;
   agentType?: string;
@@ -243,6 +249,10 @@ export type SessionPayload = {
   modelId?: string | null;
   reasoningEffort?: string | null;
   mode: 'agent' | 'demo';
+  executionMode?: SessionExecutionMode;
+  baseWorkspace?: string | null;
+  worktreePath?: string | null;
+  worktreeBranch?: string | null;
   agentType?: string;
   phase?: string;
   routeState?: Record<string, unknown>;
@@ -282,6 +292,10 @@ export interface RecentProject {
 export type SessionHistoryItem = {
   sessionId: string;
   workspace: string;
+  executionMode?: SessionExecutionMode;
+  baseWorkspace?: string | null;
+  worktreePath?: string | null;
+  worktreeBranch?: string | null;
   mode: 'agent' | 'demo' | string;
   model: string;
   title: string;
@@ -391,6 +405,9 @@ export type ModelConfigPayload = {
 export type AppSettings = {
   autoApprove: boolean;
   thinkingRendering: "text" | "markdown";
+  bodyFontFamily: string;
+  bodyFontSize: number;
+  bodyLineHeight: number;
 };
 
 export type GitCommitInfo = {

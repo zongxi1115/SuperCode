@@ -420,6 +420,10 @@ class UISession:
     workspace: str
     reasoning_effort: str | None = None
     mode: str = "demo"
+    execution_mode: str = "local"
+    base_workspace: str | None = None
+    worktree_path: str | None = None
+    worktree_branch: str | None = None
     agent_type: str = "coding"
     phase: str = "idle"
     route_state: dict[str, Any] = field(default_factory=dict)
@@ -459,6 +463,14 @@ class UISession:
     plan_steps: list[dict[str, str]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
+        self.execution_mode = normalize_execution_mode(self.execution_mode)
+        if self.execution_mode == "local":
+            self.base_workspace = self.base_workspace or self.workspace
+            self.worktree_path = None
+            self.worktree_branch = None
+        else:
+            self.base_workspace = self.base_workspace or self.workspace
+            self.worktree_path = self.worktree_path or self.workspace
         if self.deploy_connection_manager is None:
             self.deploy_connection_manager = DeployConnectionManager(
                 workspace=resolve_workspace_path(self.workspace)
@@ -497,6 +509,10 @@ class UISession:
             modelId=resolve_model_reference_id(self.model, self.env_file),
             reasoningEffort=self.reasoning_effort,
             mode=self.mode,
+            executionMode=self.execution_mode,
+            baseWorkspace=self.base_workspace,
+            worktreePath=self.worktree_path,
+            worktreeBranch=self.worktree_branch,
             agentType=self.agent_type,
             phase=self.phase,
             routeState=self.route_state,
@@ -573,6 +589,10 @@ class UISession:
         return SessionHistoryItem(
             sessionId=self.session_id,
             workspace=self.workspace,
+            executionMode=self.execution_mode,
+            baseWorkspace=self.base_workspace,
+            worktreePath=self.worktree_path,
+            worktreeBranch=self.worktree_branch,
             mode=self.mode,
             model=self.model,
             agentType=self.agent_type,
@@ -606,6 +626,10 @@ class UISession:
             sessionId=self.session_id,
             workspace=self.workspace,
             mode=self.mode,
+            executionMode=self.execution_mode,
+            baseWorkspace=self.base_workspace,
+            worktreePath=self.worktree_path,
+            worktreeBranch=self.worktree_branch,
             model=self.model,
             reasoningEffort=self.reasoning_effort,
             agentType=self.agent_type,
@@ -1394,6 +1418,10 @@ def build_agent_runtime_state(session: UISession) -> dict[str, Any]:
         "agent_type": session.agent_type,
         "phase": session.phase,
         "workspace": session.workspace,
+        "execution_mode": session.execution_mode,
+        "base_workspace": session.base_workspace,
+        "worktree_path": session.worktree_path,
+        "worktree_branch": session.worktree_branch,
         "route_state": session.route_state,
         "deploy_state": session.deploy_state if session.agent_type == "deploy" else {},
         "plan_state": session.plan_state,
@@ -1827,6 +1855,10 @@ def hydrate_session_from_state(state: PersistedSessionState) -> UISession:
         model=model_name if chat_session is not None else state.model,
         reasoning_effort=resolved_reasoning_effort if chat_session is not None else state.reasoning_effort,
         workspace=state.workspace,
+        execution_mode=state.execution_mode,
+        base_workspace=state.base_workspace,
+        worktree_path=state.worktree_path,
+        worktree_branch=state.worktree_branch,
         mode="agent" if chat_session is not None else state.mode,
         agent_type=state.agent_type,
         phase=state.phase,
@@ -2141,6 +2173,21 @@ async def get_directories(path: str = Query(...)) -> JSONResponse:
 async def create_session(request: CreateSessionRequest) -> JSONResponse:
     session_id = uuid.uuid4().hex
     workspace = normalize_workspace(request.workspace)
+    execution_mode = normalize_execution_mode(request.execution_mode)
+    base_workspace = workspace
+    worktree_path: str | None = None
+    worktree_branch: str | None = None
+    if execution_mode == "worktree":
+        location = await asyncio.to_thread(
+            create_session_worktree,
+            session_id=session_id,
+            source_workspace=workspace,
+            base_workspace=base_workspace,
+        )
+        workspace = location.workspace
+        base_workspace = location.base_workspace
+        worktree_path = location.worktree_path
+        worktree_branch = location.worktree_branch
     agent_type = normalize_agent_type(request.agent_type)
     requested_env_file = resolve_requested_env_file(request.model, request.env_file)
     try:
@@ -2184,6 +2231,10 @@ async def create_session(request: CreateSessionRequest) -> JSONResponse:
         model=model_name,
         reasoning_effort=resolved_reasoning_effort,
         workspace=workspace,
+        execution_mode=execution_mode,
+        base_workspace=base_workspace,
+        worktree_path=worktree_path,
+        worktree_branch=worktree_branch,
         env_file=env_file_used,
         agent_type=agent_type,
         interactive_command_session=interactive_command_session,
@@ -2217,6 +2268,10 @@ async def create_session(request: CreateSessionRequest) -> JSONResponse:
             model=session.model,
             reasoningEffort=session.reasoning_effort,
             mode=session.mode,
+            executionMode=session.execution_mode,
+            baseWorkspace=session.base_workspace,
+            worktreePath=session.worktree_path,
+            worktreeBranch=session.worktree_branch,
             agentType=session.agent_type,
             phase=session.phase,
             routeState=session.route_state,
@@ -2259,6 +2314,10 @@ async def get_session_snapshot(session_id: str) -> JSONResponse:
             sessionId=session.session_id,
             model=session.model,
             mode=session.mode,
+            executionMode=session.execution_mode,
+            baseWorkspace=session.base_workspace,
+            worktreePath=session.worktree_path,
+            worktreeBranch=session.worktree_branch,
             agentType=session.agent_type,
             phase=session.phase,
             routeState=session.route_state,
@@ -3892,6 +3951,10 @@ async def chat_stream(
 ) -> StreamingResponse:
     session = require_session(request.session_id)
     session.cancel_event.clear()
+    requested_execution_mode = normalize_execution_mode(request.execution_mode)
+    if requested_execution_mode == "worktree" and session.execution_mode != "worktree":
+        await asyncio.to_thread(move_session_to_worktree, session)
+        session.cancel_event.clear()
     original_user_message = request.message.strip()
     if not original_user_message:
         raise HTTPException(status_code=400, detail="message 不能为空")
@@ -4985,8 +5048,152 @@ def normalize_workspace(raw_workspace: str | None) -> str:
     return normalize_workspace_impl(raw_workspace, DEFAULT_WORKSPACE)
 
 
+def normalize_execution_mode(raw_mode: str | None) -> str:
+    normalized = str(raw_mode or "local").strip().lower()
+    if normalized not in {"local", "worktree"}:
+        raise HTTPException(status_code=400, detail=f"不支持的运行模式: {raw_mode}")
+    return normalized
+
+
 def list_workspace_options() -> list[dict[str, str]]:
     return list_workspace_options_impl(DEFAULT_WORKSPACE)
+
+
+@dataclass(frozen=True)
+class WorktreeSessionLocation:
+    workspace: str
+    execution_mode: str
+    base_workspace: str
+    worktree_path: str
+    worktree_branch: str
+
+
+def run_git_command(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=500, detail="未找到 git 命令，无法创建 worktree") from exc
+
+
+def ensure_git_worktree_source(source_workspace: str) -> Path:
+    source_path = resolve_workspace_path(source_workspace)
+    if not source_path.exists() or not source_path.is_dir():
+        raise HTTPException(status_code=400, detail="工作区必须是已存在的目录")
+    result = run_git_command(["rev-parse", "--is-inside-work-tree"], source_path)
+    if result.returncode != 0 or result.stdout.strip().lower() != "true":
+        raise HTTPException(status_code=400, detail="工作树模式需要选择一个已有 git 仓库")
+    return source_path
+
+
+def create_session_worktree(
+    *,
+    session_id: str,
+    source_workspace: str,
+    base_workspace: str | None = None,
+) -> WorktreeSessionLocation:
+    source_path = ensure_git_worktree_source(source_workspace)
+    base_path = resolve_workspace_path(base_workspace or source_workspace)
+    short_id = session_id[:8]
+    branch_name = f"supercode/session-{short_id}"
+    worktrees_root = base_path.parent / f"{base_path.name}.worktrees"
+    worktree_path = worktrees_root / f"sc-{short_id}"
+    if worktree_path.exists():
+        raise HTTPException(status_code=409, detail=f"worktree 目录已存在：{worktree_path}")
+    worktrees_root.mkdir(parents=True, exist_ok=True)
+    result = run_git_command(
+        ["worktree", "add", "-b", branch_name, str(worktree_path), "HEAD"],
+        source_path,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "创建 git worktree 失败").strip()
+        raise HTTPException(status_code=400, detail=detail)
+    resolved_worktree = str(worktree_path.resolve())
+    return WorktreeSessionLocation(
+        workspace=resolved_worktree,
+        execution_mode="worktree",
+        base_workspace=str(base_path.resolve()),
+        worktree_path=resolved_worktree,
+        worktree_branch=branch_name,
+    )
+
+
+def remap_path_between_workspaces(raw_path: str | None, old_workspace: str, new_workspace: str) -> str | None:
+    if raw_path is None or not str(raw_path).strip():
+        return raw_path
+    candidate = Path(str(raw_path)).expanduser()
+    if not candidate.is_absolute():
+        return raw_path
+    try:
+        relative = candidate.resolve().relative_to(resolve_workspace_path(old_workspace))
+    except ValueError:
+        return raw_path
+    return str((resolve_workspace_path(new_workspace) / relative).resolve())
+
+
+def remap_open_files_between_workspaces(
+    open_files: list[str],
+    old_workspace: str,
+    new_workspace: str,
+) -> list[str]:
+    return [
+        remap_path_between_workspaces(path, old_workspace, new_workspace) or path
+        for path in open_files
+    ]
+
+
+def move_session_to_worktree(session: UISession) -> None:
+    if session.execution_mode == "worktree":
+        return
+
+    old_workspace = session.workspace
+    location = create_session_worktree(
+        session_id=session.session_id,
+        source_workspace=session.workspace,
+        base_workspace=session.base_workspace or session.workspace,
+    )
+    deploy_connection_manager = _clone_deploy_connection_manager(session, location.workspace)
+
+    stop_session_execution(session)
+    for runtime in session.terminal_runtimes.values():
+        runtime.close()
+    if session.interactive_command_session is not None:
+        session.interactive_command_session.close()
+
+    session.workspace = location.workspace
+    session.execution_mode = location.execution_mode
+    session.base_workspace = location.base_workspace
+    session.worktree_path = location.worktree_path
+    session.worktree_branch = location.worktree_branch
+    session.selected_file_path = remap_path_between_workspaces(
+        session.selected_file_path,
+        old_workspace,
+        location.workspace,
+    )
+    session.open_files = remap_open_files_between_workspaces(
+        session.open_files,
+        old_workspace,
+        location.workspace,
+    )
+    session.deploy_connection_manager = deploy_connection_manager
+    session.interactive_command_session = InteractiveCommandSession(
+        workspace=resolve_workspace_path(location.workspace)
+    )
+    session.terminal_runtimes.clear()
+    session.default_terminal_id = None
+    session.file_tree_loaded = False
+    session.file_tree_dirty = True
+    session.cached_file_tree = []
+    session._ensure_default_terminal(location.workspace)
+
+    rebuild_chat_session_for_agent_type(session, session.agent_type)
+    sync_session_runtime_state_for_agent(session)
+    session.touch()
 
 
 def _session_has_pending_context_interaction(session: UISession) -> bool:
@@ -5001,8 +5208,11 @@ def _session_has_pending_context_interaction(session: UISession) -> bool:
     )
 
 
-def _clone_deploy_connection_manager(session: UISession) -> DeployConnectionManager:
-    manager = DeployConnectionManager(workspace=resolve_workspace_path(session.workspace))
+def _clone_deploy_connection_manager(
+    session: UISession,
+    workspace: str | None = None,
+) -> DeployConnectionManager:
+    manager = DeployConnectionManager(workspace=resolve_workspace_path(workspace or session.workspace))
     for connection in session.deploy_connection_manager.export_state().values():
         if isinstance(connection, dict):
             manager.register_connection(deepcopy(connection))
@@ -5013,6 +5223,10 @@ def _rebuild_chat_session_for_existing_history(
     *,
     session_id: str,
     workspace: str,
+    execution_mode: str,
+    base_workspace: str | None,
+    worktree_path: str | None,
+    worktree_branch: str | None,
     env_file: str | None,
     agent_type: str,
     reasoning_effort: str | None,
@@ -5047,6 +5261,10 @@ def _rebuild_chat_session_for_existing_history(
         model=model_name if chat_session is not None else "Demo",
         reasoning_effort=resolved_reasoning_effort if chat_session is not None else reasoning_effort,
         workspace=workspace,
+        execution_mode=execution_mode,
+        base_workspace=base_workspace,
+        worktree_path=worktree_path,
+        worktree_branch=worktree_branch,
         mode="agent" if chat_session is not None else mode,
         agent_type=agent_type,
         phase=phase,
@@ -5086,10 +5304,20 @@ def _rebuild_chat_session_for_existing_history(
 
 def fork_session_from_current(session: UISession) -> UISession:
     new_session_id = uuid.uuid4().hex
-    deploy_connection_manager = _clone_deploy_connection_manager(session)
+    old_workspace = session.workspace
+    location = create_session_worktree(
+        session_id=new_session_id,
+        source_workspace=session.workspace,
+        base_workspace=session.base_workspace or session.workspace,
+    )
+    deploy_connection_manager = _clone_deploy_connection_manager(session, location.workspace)
     forked_session = _rebuild_chat_session_for_existing_history(
         session_id=new_session_id,
-        workspace=session.workspace,
+        workspace=location.workspace,
+        execution_mode=location.execution_mode,
+        base_workspace=location.base_workspace,
+        worktree_path=location.worktree_path,
+        worktree_branch=location.worktree_branch,
         env_file=session.env_file,
         agent_type=session.agent_type,
         reasoning_effort=session.reasoning_effort,
@@ -5097,8 +5325,16 @@ def fork_session_from_current(session: UISession) -> UISession:
         history_tools=session.history_tools,
         deploy_connection_manager=deploy_connection_manager,
         phase=session.phase,
-        selected_file_path=session.selected_file_path,
-        open_files=session.open_files,
+        selected_file_path=remap_path_between_workspaces(
+            session.selected_file_path,
+            old_workspace,
+            location.workspace,
+        ),
+        open_files=remap_open_files_between_workspaces(
+            session.open_files,
+            old_workspace,
+            location.workspace,
+        ),
         terminal_output=session.terminal_output,
         preview_url=session.preview_url,
         code_changes=session.code_changes,
@@ -5776,6 +6012,11 @@ def merge_session_token_usage(session: UISession, usage: dict[str, int] | None) 
 
 def build_session_state_payload(session: UISession) -> dict[str, Any]:
     return {
+        "workspace": session.workspace,
+        "executionMode": session.execution_mode,
+        "baseWorkspace": session.base_workspace,
+        "worktreePath": session.worktree_path,
+        "worktreeBranch": session.worktree_branch,
         "agentType": session.agent_type,
         "phase": session.phase,
         "routeState": session.route_state,

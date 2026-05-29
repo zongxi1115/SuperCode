@@ -234,12 +234,12 @@
 .streaming-tail-fade > :last-child::after {
   content: "";
   display: inline-block;
-  width: 4.5rem;
+  width: 4rem;
   max-width: 35%;
-  height: 1em;
-  margin-left: -3.25rem;
+  height: 1.15em;
+  margin-left: -4rem;
   pointer-events: none;
-  vertical-align: bottom;
+  vertical-align: -0.12em;
   background: linear-gradient(to right, transparent, var(--background) 72%);
 }
 
