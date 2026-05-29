@@ -45,6 +45,12 @@ class UnsupportedToolCallingError(RuntimeError):
     """模型服务不支持 tools / tool_choice 参数。"""
 
 
+def _format_retry_delay(seconds: float) -> str:
+    if seconds.is_integer():
+        return f"{int(seconds)} 秒"
+    return f"{seconds:.1f} 秒"
+
+
 class OpenAICompatibleClient:
     """支持 chat/completions 与 responses 两种接口模式的极简客户端。"""
 
@@ -212,6 +218,12 @@ class OpenAICompatibleClient:
                 )
                 if self._completion_has_content(completion) or attempt == attempts - 1:
                     return completion
+                self._emit_retry_notice(
+                    on_reasoning_delta,
+                    attempt=attempt,
+                    attempts=attempts,
+                    error_message="模型流式接口没有返回可用内容。",
+                )
                 self._sleep_before_retry(attempt)
             except error.HTTPError as exc:
                 error_body = exc.read().decode("utf-8", errors="replace")
@@ -224,11 +236,23 @@ class OpenAICompatibleClient:
                         tool_choice=tool_choice,
                     )
                 if not emitted_any_delta and self._should_retry_http(exc.code) and attempt < attempts - 1:
+                    self._emit_retry_notice(
+                        on_reasoning_delta,
+                        attempt=attempt,
+                        attempts=attempts,
+                        error_message=f"HTTP {exc.code} - {error_body}",
+                    )
                     self._sleep_before_retry(attempt)
                     continue
                 raise RuntimeError(f"模型接口请求失败: HTTP {exc.code} - {error_body}") from exc
             except self._transient_error_types() as exc:
                 if not emitted_any_delta and attempt < attempts - 1:
+                    self._emit_retry_notice(
+                        on_reasoning_delta,
+                        attempt=attempt,
+                        attempts=attempts,
+                        error_message=self._format_connection_error(exc),
+                    )
                     self._sleep_before_retry(attempt)
                     continue
                 raise RuntimeError(f"模型接口连接失败: {self._format_connection_error(exc)}") from exc
@@ -407,17 +431,35 @@ class OpenAICompatibleClient:
                 )
                 if self._completion_has_content(completion) or attempt == attempts - 1:
                     return completion
+                self._emit_retry_notice(
+                    on_reasoning_delta,
+                    attempt=attempt,
+                    attempts=attempts,
+                    error_message="模型流式接口没有返回可用内容。",
+                )
                 self._sleep_before_retry(attempt)
             except error.HTTPError as exc:
                 error_body = exc.read().decode("utf-8", errors="replace")
                 if tools and self._should_fallback_to_non_tool_calling(exc.code, error_body):
                     raise UnsupportedToolCallingError(error_body) from exc
                 if not emitted_any_delta and self._should_retry_http(exc.code) and attempt < attempts - 1:
+                    self._emit_retry_notice(
+                        on_reasoning_delta,
+                        attempt=attempt,
+                        attempts=attempts,
+                        error_message=f"HTTP {exc.code} - {error_body}",
+                    )
                     self._sleep_before_retry(attempt)
                     continue
                 raise RuntimeError(f"模型接口请求失败: HTTP {exc.code} - {error_body}") from exc
             except self._transient_error_types() as exc:
                 if not emitted_any_delta and attempt < attempts - 1:
+                    self._emit_retry_notice(
+                        on_reasoning_delta,
+                        attempt=attempt,
+                        attempts=attempts,
+                        error_message=self._format_connection_error(exc),
+                    )
                     self._sleep_before_retry(attempt)
                     continue
                 raise RuntimeError(f"模型接口连接失败: {self._format_connection_error(exc)}") from exc
@@ -1291,10 +1333,38 @@ class OpenAICompatibleClient:
         return bool(completion.text.strip() or completion.tool_calls)
 
     def _max_attempts(self) -> int:
-        return max(1, int(getattr(self.config, "max_retries", 2)) + 1)
+        return max(1, int(getattr(self.config, "max_retries", 10)) + 1)
+
+    def _retry_delay_seconds(self, attempt: int) -> float:
+        return float(2**attempt)
 
     def _sleep_before_retry(self, attempt: int) -> None:
-        time.sleep(min(2.0, 0.25 * (2 ** attempt)))
+        time.sleep(self._retry_delay_seconds(attempt))
+
+    def _emit_retry_notice(
+        self,
+        on_reasoning_delta: Callable[[str], None] | None,
+        *,
+        attempt: int,
+        attempts: int,
+        error_message: str,
+    ) -> None:
+        if on_reasoning_delta is None:
+            return
+        retry_number = attempt + 1
+        max_retries = max(0, attempts - 1)
+        if retry_number > max_retries:
+            return
+        delay = self._retry_delay_seconds(attempt)
+        compact_error = " ".join(error_message.split())
+        if len(compact_error) > 800:
+            compact_error = f"{compact_error[:800].rstrip()}..."
+        on_reasoning_delta(
+            "\n\n"
+            f"请求出错：{compact_error}\n"
+            f"正在重试（{retry_number}/{max_retries}），等待 {_format_retry_delay(delay)}。"
+            "\n\n"
+        )
 
     def _should_retry_http(self, status_code: int) -> bool:
         return status_code in {408, 409, 425, 429, 500, 502, 503, 504}

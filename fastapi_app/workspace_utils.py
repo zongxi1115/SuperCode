@@ -10,6 +10,7 @@ FILE_TREE_IGNORED_DIR_NAMES = {
     ".next",
     ".nuxt",
     ".pytest_cache",
+    ".supercode",
     ".turbo",
     ".venv",
     "__pycache__",

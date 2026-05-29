@@ -4,6 +4,7 @@ import base64
 import codecs
 import re
 import subprocess
+import sys
 import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -14,6 +15,18 @@ from fastapi_app.api_models import TerminalSnapshotResponse
 MAX_TERMINAL_OUTPUT_CHARS = 300_000
 TERMINAL_CWD_TAIL_CHARS = 4096
 PIPE_READ_CHUNK_SIZE = 4096
+
+
+def _hidden_windows_process_kwargs() -> dict[str, Any]:
+    if sys.platform != "win32":
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = 0
+    return {
+        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        "startupinfo": startupinfo,
+    }
 
 
 TERMINAL_INTERRUPT_KEYS = {
@@ -128,6 +141,7 @@ class TerminalRuntimeBase:
             encoding="utf-8",
             errors="replace",
             bufsize=1,
+            **_hidden_windows_process_kwargs(),
         )
         self.backend = "subprocess"
         self.append_output(f"PowerShell started in {self.workspace}\n")

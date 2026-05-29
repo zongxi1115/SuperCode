@@ -9,9 +9,10 @@ import {
 } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
 import type { LucideIcon } from "lucide-react";
-import { BrainIcon, ChevronDownIcon, DotIcon } from "lucide-react";
+import { BrainIcon, ChevronDownIcon, DotIcon, AlertTriangleIcon, RefreshCwIcon, XCircleIcon } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
 import { createContext, memo, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { motion, AnimatePresence } from "motion/react";
 
 interface ChainOfThoughtContextValue {
   isOpen: boolean;
@@ -258,3 +259,142 @@ ChainOfThoughtSearchResults.displayName = "ChainOfThoughtSearchResults";
 ChainOfThoughtSearchResult.displayName = "ChainOfThoughtSearchResult";
 ChainOfThoughtContent.displayName = "ChainOfThoughtContent";
 ChainOfThoughtImage.displayName = "ChainOfThoughtImage";
+
+export type ErrorChainBlockProps = {
+  errors: string[];
+  retryCount?: number;
+  maxRetries?: number;
+  retrying?: boolean;
+};
+
+const RollingDigit = memo(function RollingDigit({
+  digit,
+  className,
+}: {
+  digit: string;
+  className?: string;
+}) {
+  const numericDigit = parseInt(digit, 10);
+  const isNumeric = !isNaN(numericDigit);
+
+  if (!isNumeric) {
+    return <span className={className}>{digit}</span>;
+  }
+
+  return (
+    <AnimatePresence mode="popLayout" initial={false}>
+      <motion.span
+        key={numericDigit}
+        className={cn("inline-block tabular-nums", className)}
+        layout
+        initial={{ y: 14, opacity: 0, filter: "blur(2px)" }}
+        animate={{ y: 0, opacity: 1, filter: "blur(0px)" }}
+        exit={{ y: -14, opacity: 0, filter: "blur(2px)" }}
+        transition={{ type: "spring", stiffness: 500, damping: 28 }}
+      >
+        {digit}
+      </motion.span>
+    </AnimatePresence>
+  );
+});
+
+const RollingNumber = memo(function RollingNumber({
+  value,
+  className,
+}: {
+  value: number;
+  className?: string;
+}) {
+  const digits = String(value).split("");
+  return (
+    <span className={cn("inline tabular-nums", className)}>
+      {digits.map((d, i) => (
+        <RollingDigit key={`${i}-${d}`} digit={d} />
+      ))}
+    </span>
+  );
+});
+
+export const ErrorChainBlock = memo(
+  ({ errors, retryCount, maxRetries, retrying }: ErrorChainBlockProps) => {
+    const isRetrying = retrying ?? (retryCount != null && maxRetries != null && retryCount < maxRetries);
+    const latestError = errors[errors.length - 1] ?? "";
+
+    return (
+      <motion.div
+        layout
+        className={cn(
+          "rounded-lg border overflow-hidden",
+          isRetrying
+            ? "border-amber-500/30 bg-amber-500/5"
+            : "border-destructive/30 bg-destructive/5",
+        )}
+        initial={false}
+      >
+        <div
+          className={cn(
+            "flex items-center gap-2 px-3 py-2 text-sm font-medium",
+            isRetrying
+              ? "text-amber-600 dark:text-amber-400 bg-amber-500/10"
+              : "text-destructive bg-destructive/10",
+          )}
+        >
+          {isRetrying ? (
+            <RefreshCwIcon className="size-4 animate-spin shrink-0" />
+          ) : (
+            <XCircleIcon className="size-4 shrink-0" />
+          )}
+          <span>
+            {isRetrying ? (
+              <>
+                请求出错，正在重试
+                {retryCount != null && maxRetries != null && (
+                  <>（<RollingNumber value={retryCount} />/<RollingNumber value={maxRetries} />）</>
+                )}
+              </>
+            ) : retryCount != null ? (
+              <>
+                已重试 <RollingNumber value={retryCount} /> 次仍未成功
+              </>
+            ) : (
+              "请求失败"
+            )}
+          </span>
+        </div>
+        <div className="px-3 py-2">
+          <pre className="whitespace-pre-wrap break-words text-xs text-muted-foreground font-mono">
+            {latestError}
+          </pre>
+          {errors.length > 1 && (
+            <details className="mt-1.5">
+              <summary className="text-[11px] text-muted-foreground/60 cursor-pointer hover:text-muted-foreground transition-colors">
+                查看全部 {errors.length} 条错误
+              </summary>
+              <div className="mt-1.5 space-y-1">
+                {errors.map((err, idx) => (
+                  <pre key={idx} className="whitespace-pre-wrap break-words text-[11px] text-muted-foreground/70 font-mono border-l-2 border-muted-foreground/20 pl-2">
+                    {err}
+                  </pre>
+                ))}
+              </div>
+            </details>
+          )}
+        </div>
+        {isRetrying && retryCount != null && maxRetries != null && (
+          <div className="px-3 pb-2">
+            <div className="h-1 rounded-full bg-amber-500/10 overflow-hidden">
+              <motion.div
+                className="h-full rounded-full bg-amber-500/40"
+                initial={false}
+                animate={{ width: `${Math.min((retryCount / maxRetries) * 100, 100)}%` }}
+                transition={{ type: "spring", stiffness: 300, damping: 25 }}
+              />
+            </div>
+          </div>
+        )}
+      </motion.div>
+    );
+  }
+);
+
+ErrorChainBlock.displayName = "ErrorChainBlock";

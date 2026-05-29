@@ -53,6 +53,7 @@ from fastapi_app.api_models import (
     CreateTaskRequest,
     CreateSessionRequest,
     CreateSessionResponse,
+    EmbeddingSettingsPayload,
     FinishTaskRequest,
     GitCommitRequest,
     GitTagRequest,
@@ -84,6 +85,7 @@ from fastapi_app.api_models import (
 )
 from fastapi_app.kanban_store import KanbanStore
 from fastapi_app.plugin_registry import list_builtin_plugins
+from fastapi_app.rag_index import schedule_workspace_rag_index, test_embedding_config
 from fastapi_app.settings_store import (
     load_settings,
     save_settings,
@@ -150,8 +152,38 @@ from fastapi_app.workspace_utils import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
+APP_DATA_ROOT = Path(os.environ.get("SUPERCODE_STATE_DIR", str(ROOT))).expanduser().resolve()
 DEFAULT_WORKSPACE = ROOT
-BACKEND_BASE_URL = "http://localhost:3001"
+
+
+def _hidden_windows_process_kwargs() -> dict[str, Any]:
+    if sys.platform != "win32":
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = 0
+    return {
+        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        "startupinfo": startupinfo,
+    }
+
+
+def _is_desktop_mode() -> bool:
+    return os.environ.get("SUPERCODE_DESKTOP", "").strip() == "1"
+
+
+def _resolve_backend_base_url() -> str:
+    explicit = os.environ.get("SUPERCODE_BACKEND_BASE_URL", "").strip()
+    if explicit:
+        return explicit.rstrip("/")
+    host = os.environ.get("SUPERCODE_HOST", "localhost").strip() or "localhost"
+    if host in {"0.0.0.0", "::"}:
+        host = "localhost"
+    port = os.environ.get("SUPERCODE_PORT", "3001").strip() or "3001"
+    return f"http://{host}:{port}"
+
+
+BACKEND_BASE_URL = _resolve_backend_base_url()
 DEFAULT_BROWSER_PREVIEW_URL = "http://localhost:8888"
 DEFAULT_SELECTED_FILE = None
 DEFAULT_OPEN_FILES = [
@@ -399,6 +431,9 @@ def _resolve_state_db_path() -> Path:
     explicit = os.environ.get("SUPERCODE_STATE_DB_PATH", "").strip()
     if explicit:
         return Path(explicit).expanduser().resolve()
+    state_dir = os.environ.get("SUPERCODE_STATE_DIR", "").strip()
+    if state_dir:
+        return Path(state_dir).expanduser().resolve() / "state.sqlite3"
     if "pytest" in sys.modules:
         return Path(tempfile.gettempdir()) / f"supercode-state-pytest-{os.getpid()}.sqlite3"
     return ROOT / ".supercode" / "state.sqlite3"
@@ -410,6 +445,8 @@ _kanban_store = KanbanStore(STATE_DB_PATH)
 
 class TerminalRuntime(TerminalRuntimeBase):
     def _get_pty_process_class(self) -> Any | None:
+        if _is_desktop_mode():
+            return None
         return PtyProcess
 
 
@@ -493,6 +530,8 @@ class UISession:
         return self.terminal_runtimes.get(tid) if tid else None
 
     def _ensure_default_terminal(self, workspace: str) -> None:
+        if _is_desktop_mode():
+            return
         if self.default_terminal_id is None or self.default_terminal_id not in self.terminal_runtimes:
             self.default_terminal_id = "main"
             self.terminal_runtimes["main"] = TerminalRuntime(workspace=workspace)
@@ -764,6 +803,11 @@ def scalar_docs():
   </body>
 </html>
 """)
+
+
+@app.get("/api/health")
+async def health_check() -> JSONResponse:
+    return JSONResponse({"ok": True})
 
 _sessions: dict[str, UISession] = {}
 
@@ -1743,7 +1787,7 @@ def decide_route_for_message(session: UISession, user_message: str) -> dict[str,
         return _fallback_route_decision(session, user_message, reason="真实模型运行时不可用，已使用规则兜底选择智能体。")
 
     try:
-        config, _model_ref = build_agent_config(ROOT, session.env_file)
+        config, _model_ref = build_agent_config(APP_DATA_ROOT, session.env_file)
         config.reasoning_effort = None
         return decide_agent_route_with_model(
             OpenAICompatibleClient(config),
@@ -2036,16 +2080,16 @@ async def delete_kanban_card(workspace_id: str, card_id: str) -> JSONResponse:
 
 @app.get("/api/models")
 async def get_models() -> JSONResponse:
-    return JSONResponse({"models": list_model_options(ROOT)})
+    return JSONResponse({"models": list_model_options(APP_DATA_ROOT)})
 
 
 @app.get("/api/model-configs")
 async def get_model_configs() -> JSONResponse:
     return JSONResponse(
         {
-            "providers": load_ui_model_providers(ROOT),
-            "envConfigs": scan_env_model_sources(ROOT),
-            "configPath": str(config_store_path(ROOT)),
+            "providers": load_ui_model_providers(APP_DATA_ROOT),
+            "envConfigs": scan_env_model_sources(APP_DATA_ROOT),
+            "configPath": str(config_store_path(APP_DATA_ROOT)),
         }
     )
 
@@ -2053,14 +2097,14 @@ async def get_model_configs() -> JSONResponse:
 @app.put("/api/model-configs")
 async def update_model_configs(payload: ModelConfigPayload) -> JSONResponse:
     providers = save_ui_model_providers(
-        ROOT,
+        APP_DATA_ROOT,
         [provider.model_dump(exclude_none=True) for provider in payload.providers],
     )
     return JSONResponse(
         {
             "providers": providers,
-            "envConfigs": scan_env_model_sources(ROOT),
-            "configPath": str(config_store_path(ROOT)),
+            "envConfigs": scan_env_model_sources(APP_DATA_ROOT),
+            "configPath": str(config_store_path(APP_DATA_ROOT)),
         }
     )
 
@@ -2079,13 +2123,25 @@ async def discover_models(payload: UIModelProviderPayload) -> JSONResponse:
 
 @app.get("/api/settings")
 async def get_settings() -> JSONResponse:
-    return JSONResponse(load_settings(ROOT))
+    return JSONResponse(load_settings(APP_DATA_ROOT))
 
 
 @app.put("/api/settings")
 async def update_settings(payload: SettingsPayload) -> JSONResponse:
-    merged = save_settings(ROOT, payload.model_dump())
+    merged = save_settings(APP_DATA_ROOT, payload.model_dump())
     return JSONResponse(merged)
+
+
+@app.post("/api/settings/embedding/test")
+async def test_embedding_settings(payload: EmbeddingSettingsPayload) -> JSONResponse:
+    try:
+        result = await asyncio.to_thread(
+            test_embedding_config,
+            payload.model_dump(exclude_none=True),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(result)
 
 
 @app.put("/api/sessions/{session_id}/model")
@@ -2104,7 +2160,7 @@ async def switch_session_model(session_id: str, request: SwitchModelRequest) -> 
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     try:
-        config, normalized_model_ref = build_agent_config(ROOT, model_ref)
+        config, normalized_model_ref = build_agent_config(APP_DATA_ROOT, model_ref)
         config.reasoning_effort = reasoning_effort
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2128,6 +2184,7 @@ async def switch_session_model(session_id: str, request: SwitchModelRequest) -> 
     interactive_command_session = session.interactive_command_session
 
     session.chat_session = ChatSession(agent=agent)
+    schedule_workspace_rag_index(APP_DATA_ROOT, session.workspace)
     seed_chat_session_history(session.chat_session, session.history_messages, session.history_tools)
     if isinstance(session.chat_session.agent, Agent):
         attach_agent_runtime_metadata(
@@ -2677,6 +2734,7 @@ async def git_log(session_id: str, count: int = Query(20)) -> JSONResponse:
             encoding="utf-8",
             errors="replace",
             timeout=15,
+            **_hidden_windows_process_kwargs(),
         )
         if result.returncode != 0:
             return JSONResponse({"commits": [], "isRepo": True, "error": result.stderr.strip()})
@@ -2701,6 +2759,7 @@ async def git_log(session_id: str, count: int = Query(20)) -> JSONResponse:
             encoding="utf-8",
             errors="replace",
             timeout=10,
+            **_hidden_windows_process_kwargs(),
         )
         changed_files = [l.strip() for l in status_result.stdout.strip().splitlines() if l.strip()] if status_result.stdout.strip() else []
 
@@ -2713,6 +2772,7 @@ async def git_log(session_id: str, count: int = Query(20)) -> JSONResponse:
             encoding="utf-8",
             errors="replace",
             timeout=5,
+            **_hidden_windows_process_kwargs(),
         )
         branch = branch_result.stdout.strip() if branch_result.returncode == 0 else "main"
 
@@ -2774,6 +2834,7 @@ async def git_tags(session_id: str) -> JSONResponse:
             encoding="utf-8",
             errors="replace",
             timeout=10,
+            **_hidden_windows_process_kwargs(),
         )
         tags = []
         for line in result.stdout.strip().splitlines():
@@ -2804,6 +2865,7 @@ async def git_status(session_id: str) -> JSONResponse:
             encoding="utf-8",
             errors="replace",
             timeout=10,
+            **_hidden_windows_process_kwargs(),
         )
         changed_files = [l.strip() for l in status_result.stdout.strip().splitlines() if l.strip()] if status_result.stdout.strip() else []
 
@@ -2816,6 +2878,7 @@ async def git_status(session_id: str) -> JSONResponse:
             encoding="utf-8",
             errors="replace",
             timeout=5,
+            **_hidden_windows_process_kwargs(),
         )
         branch = branch_result.stdout.strip() if branch_result.returncode == 0 else "main"
 
@@ -3757,6 +3820,8 @@ async def create_session_terminal(
     request: CreateTerminalRequest,
 ) -> JSONResponse:
     session = require_session(session_id)
+    if _is_desktop_mode():
+        raise HTTPException(status_code=400, detail="桌面模式暂不启用交互终端")
     if len(session.terminal_runtimes) >= 8:
         raise HTTPException(status_code=400, detail="终端数量已达上限（8 个）")
     terminal_id = f"term_{uuid.uuid4().hex[:6]}"
@@ -4130,7 +4195,7 @@ def require_session(session_id: str) -> UISession:
 
 def resolve_model_option(model_name: str | None, env_file: str | None = None) -> dict[str, str]:
     try:
-        return resolve_stored_model_option(ROOT, model_name, env_file)
+        return resolve_stored_model_option(APP_DATA_ROOT, model_name, env_file)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -4185,7 +4250,7 @@ def build_chat_session(
     reasoning_effort: str | None = None,
 ) -> tuple[ChatSession | None, str, str | None, str | None, str | None]:
     try:
-        config, normalized_model_ref = build_agent_config(ROOT, env_file)
+        config, normalized_model_ref = build_agent_config(APP_DATA_ROOT, env_file)
         if reasoning_effort is not None:
             config.reasoning_effort = normalize_reasoning_effort(reasoning_effort)
         client = OpenAICompatibleClient(config)
@@ -4209,6 +4274,7 @@ def build_chat_session(
                 "llm_client": client,
             },
         )
+        schedule_workspace_rag_index(APP_DATA_ROOT, resolved_workspace)
         return ChatSession(agent=agent), config.model, None, normalized_model_ref, config.reasoning_effort
     except Exception as exc:  # noqa: BLE001 - 需要把启动失败原因回传给前端
         return None, "Demo", str(exc), None, None
@@ -4458,7 +4524,7 @@ async def run_agent_stream(
                 and isinstance(output, dict)
                 and output.get("requires_confirmation") is True
             )
-            auto_approve_enabled = bool(load_settings(ROOT).get("autoApprove"))
+            auto_approve_enabled = bool(load_settings(APP_DATA_ROOT).get("autoApprove"))
             if raw_requires_confirmation and auto_approve_enabled:
                 approval = {"id": tool_id, "approved": True}
                 tool_success = True
@@ -5069,6 +5135,7 @@ class WorktreeSessionLocation:
 
 
 def run_git_command(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+    popen_kwargs = _hidden_windows_process_kwargs()
     try:
         return subprocess.run(
             ["git", *args],
@@ -5076,6 +5143,7 @@ def run_git_command(args: list[str], cwd: Path) -> subprocess.CompletedProcess[s
             text=True,
             capture_output=True,
             check=False,
+            **popen_kwargs,
         )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=500, detail="未找到 git 命令，无法创建 worktree") from exc
@@ -5753,7 +5821,7 @@ def _summarize_context_with_model(
             model_ref = resolve_model_option(session.model, None)["envFile"]
         except HTTPException:
             model_ref = None
-    config, _normalized_model_ref = build_agent_config(ROOT, model_ref)
+    config, _normalized_model_ref = build_agent_config(APP_DATA_ROOT, model_ref)
     if session.reasoning_effort:
         config.reasoning_effort = normalize_reasoning_effort(session.reasoning_effort)
     client = OpenAICompatibleClient(config)

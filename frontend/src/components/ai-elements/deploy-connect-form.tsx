@@ -3,6 +3,7 @@
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { apiFetch } from "@/lib/api-client";
 import { EyeIcon, EyeOffIcon, SaveIcon, RotateCcwIcon } from "lucide-react";
 import type { HTMLAttributes } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -109,8 +110,8 @@ export function DeployConnectForm({
         return;
       }
       if (!sessionId) return;
-      const res = await fetch(
-        `http://localhost:3001/api/sessions/${sessionId}/tools/${inputRequest.id}/connect`,
+      const res = await apiFetch(
+        `/api/sessions/${sessionId}/tools/${inputRequest.id}/connect`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },

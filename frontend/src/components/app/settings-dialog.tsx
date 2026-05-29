@@ -73,6 +73,7 @@ type SettingsDialogProps = {
   settings: AppSettings;
   onSaveProviders: (providers: UIModelProvider[]) => Promise<void>;
   onDiscoverModels: (provider: UIModelProvider) => Promise<string[]>;
+  onTestEmbedding: (embedding: AppSettings['embedding']) => Promise<string>;
   onSaveSettings: (settings: AppSettings) => Promise<void>;
 };
 
@@ -109,6 +110,7 @@ export function SettingsDialog({
   settings,
   onSaveProviders,
   onDiscoverModels,
+  onTestEmbedding,
   onSaveSettings,
 }: SettingsDialogProps) {
   const [draftProviders, setDraftProviders] = useState<EditableProvider[]>(
@@ -118,6 +120,7 @@ export function SettingsDialog({
   const [activeTab, setActiveTab] = useState('providers');
   const [isSaving, setIsSaving] = useState(false);
   const [refreshingId, setRefreshingId] = useState<string | null>(null);
+  const [isTestingEmbedding, setIsTestingEmbedding] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [visibleKeys, setVisibleKeys] = useState<Set<string>>(new Set());
@@ -129,6 +132,8 @@ export function SettingsDialog({
         option.fontSize === draftSettings.bodyFontSize &&
         option.lineHeight === draftSettings.bodyLineHeight,
     ) ?? BODY_TEXT_SIZE_OPTIONS[1];
+  const embeddingKey = 'embedding-api-key';
+  const isEmbeddingKeyVisible = visibleKeys.has(embeddingKey);
 
   const toggleKeyVisibility = (key: string) => {
     setVisibleKeys((prev) => {
@@ -193,6 +198,25 @@ export function SettingsDialog({
       setError(e instanceof Error ? e.message : '拉取模型失败');
     } finally {
       setRefreshingId(null);
+    }
+  };
+
+  const handleTestEmbedding = async () => {
+    setError(null);
+    setFeedback(null);
+    setIsTestingEmbedding(true);
+    try {
+      const message = await onTestEmbedding({
+        enabled: draftSettings.embedding?.enabled ?? false,
+        baseUrl: draftSettings.embedding?.baseUrl ?? '',
+        apiKey: draftSettings.embedding?.apiKey ?? '',
+        model: draftSettings.embedding?.model ?? '',
+      });
+      setFeedback(message);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Embedding 测试失败');
+    } finally {
+      setIsTestingEmbedding(false);
     }
   };
 
@@ -581,6 +605,138 @@ export function SettingsDialog({
                         预览：SuperCode 正在使用这套正文风格。
                       </div>
                     </div>
+                  </div>
+                </div>
+              </div>
+
+              <Separator />
+
+              <div>
+                <h3 className="mb-3 text-sm font-semibold">代码 RAG 索引</h3>
+                <div className="space-y-4 rounded-lg border bg-card p-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="flex items-start gap-3">
+                      <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-emerald-500/10">
+                        <Brain className="size-4 text-emerald-600 dark:text-emerald-400" />
+                      </div>
+                      <div className="space-y-1">
+                        <div className="text-sm font-medium">启用预索引语义检索</div>
+                        <div className="text-xs text-muted-foreground">
+                          启用后，后端会为工作区建立 embedding 索引，并把语义候选混入 grep_file 结果
+                        </div>
+                      </div>
+                    </div>
+                    <Switch
+                      checked={draftSettings.embedding?.enabled ?? false}
+                      onCheckedChange={(enabled) =>
+                        setDraftSettings((prev) => ({
+                          ...prev,
+                          embedding: {
+                            enabled,
+                            baseUrl: prev.embedding?.baseUrl ?? '',
+                            apiKey: prev.embedding?.apiKey ?? '',
+                            model: prev.embedding?.model ?? '',
+                          },
+                        }))
+                      }
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1.5">
+                      <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+                        <Globe className="size-2.5" />
+                        Embedding Base URL
+                      </label>
+                      <Input
+                        value={draftSettings.embedding?.baseUrl ?? ''}
+                        onChange={(e) =>
+                          setDraftSettings((prev) => ({
+                            ...prev,
+                            embedding: {
+                              enabled: prev.embedding?.enabled ?? false,
+                              baseUrl: e.target.value,
+                              apiKey: prev.embedding?.apiKey ?? '',
+                              model: prev.embedding?.model ?? '',
+                            },
+                          }))
+                        }
+                        placeholder="https://api.openai.com/v1"
+                        className="h-8 text-xs"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+                        <Server className="size-2.5" />
+                        Embedding Model
+                      </label>
+                      <Input
+                        value={draftSettings.embedding?.model ?? ''}
+                        onChange={(e) =>
+                          setDraftSettings((prev) => ({
+                            ...prev,
+                            embedding: {
+                              enabled: prev.embedding?.enabled ?? false,
+                              baseUrl: prev.embedding?.baseUrl ?? '',
+                              apiKey: prev.embedding?.apiKey ?? '',
+                              model: e.target.value,
+                            },
+                          }))
+                        }
+                        placeholder="text-embedding-3-small"
+                        className="h-8 text-xs"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+                      <Key className="size-2.5" />
+                      Embedding API Key
+                    </label>
+                    <div className="relative">
+                      <Input
+                        type={isEmbeddingKeyVisible ? 'text' : 'password'}
+                        value={draftSettings.embedding?.apiKey ?? ''}
+                        onChange={(e) =>
+                          setDraftSettings((prev) => ({
+                            ...prev,
+                            embedding: {
+                              enabled: prev.embedding?.enabled ?? false,
+                              baseUrl: prev.embedding?.baseUrl ?? '',
+                              apiKey: e.target.value,
+                              model: prev.embedding?.model ?? '',
+                            },
+                          }))
+                        }
+                        placeholder="sk-..."
+                        className="h-8 pr-8 text-xs"
+                      />
+                      <Button
+                        variant="ghost"
+                        size="icon-xs"
+                        className="absolute top-1/2 right-1 size-5 -translate-y-1/2"
+                        onClick={() => toggleKeyVisibility(embeddingKey)}
+                      >
+                        {isEmbeddingKeyVisible ? <EyeOff className="size-3" /> : <Eye className="size-3" />}
+                      </Button>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-3 rounded-md border bg-background/60 px-3 py-2">
+                    <div className="text-xs text-muted-foreground">
+                      测试会请求一次 embeddings 接口，不会写入索引
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 gap-1.5 text-xs"
+                      onClick={() => void handleTestEmbedding()}
+                      disabled={isTestingEmbedding}
+                    >
+                      <RefreshCcw className={`size-3 ${isTestingEmbedding ? 'animate-spin' : ''}`} />
+                      {isTestingEmbedding ? '测试中...' : '测试配置'}
+                    </Button>
                   </div>
                 </div>
               </div>

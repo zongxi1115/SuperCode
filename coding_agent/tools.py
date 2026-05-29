@@ -34,6 +34,7 @@ DEFAULT_IGNORED_DIR_NAMES = {
     ".next",
     ".nuxt",
     ".pytest_cache",
+    ".supercode",
     ".turbo",
     ".venv",
     "__pycache__",
@@ -68,6 +69,21 @@ def _build_powershell_utf8_command(command: str) -> list[str]:
         "chcp 65001 > $null; "
     )
     return ["powershell", "-NoProfile", "-Command", f"{bootstrap}{command}"]
+
+
+def _hidden_windows_process_kwargs(*, new_process_group: bool = False) -> dict[str, Any]:
+    if sys.platform != "win32":
+        return {}
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    if new_process_group:
+        creationflags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = 0
+    return {
+        "creationflags": creationflags,
+        "startupinfo": startupinfo,
+    }
 
 
 def _parse_bool_argument(value: object) -> bool:
@@ -133,6 +149,7 @@ def _kill_process_tree(process: subprocess.Popen[str]) -> None:
             encoding="utf-8",
             timeout=5,
             check=False,
+            **_hidden_windows_process_kwargs(),
         )
         return
 
@@ -156,6 +173,7 @@ def _kill_processes_by_pid(pids: list[int]) -> None:
                     encoding="utf-8",
                     timeout=5,
                     check=False,
+                    **_hidden_windows_process_kwargs(),
                 )
             except Exception:
                 continue
@@ -170,6 +188,7 @@ def _kill_processes_by_pid(pids: list[int]) -> None:
                 encoding="utf-8",
                 timeout=5,
                 check=False,
+                **_hidden_windows_process_kwargs(),
             )
         except Exception:
             continue
@@ -266,6 +285,7 @@ def _query_process_table() -> list[dict[str, Any]]:
                 errors="replace",
                 timeout=5,
                 check=False,
+                **_hidden_windows_process_kwargs(),
             )
         except Exception:
             return []
@@ -715,6 +735,7 @@ class InteractiveCommandSession:
             encoding="utf-8",
             errors="replace",
             bufsize=1,
+            **_hidden_windows_process_kwargs(new_process_group=True),
         )
 
     def _await_progress(
@@ -1550,9 +1571,15 @@ class GrepFileTool(CodingBaseTool):
         if not target.exists():
             raise FileNotFoundError(f"搜索路径不存在: {search_path}")
 
+        semantic_output = self._run_semantic_search(
+            regex=regex,
+            search_path=search_path,
+            context=context,
+            limit=min(limit, 8),
+        )
         respect_ignored = _should_respect_ignored_dirs(target, include_ignored)
         if shutil.which("rg"):
-            return self._run_with_ripgrep(
+            exact_output = self._run_with_ripgrep(
                 regex=regex,
                 target=target,
                 search_path=search_path,
@@ -1563,16 +1590,18 @@ class GrepFileTool(CodingBaseTool):
                 respect_ignored=respect_ignored,
                 limit=limit,
             )
-        return self._run_python_fallback(
-            regex=regex,
-            target=target,
-            context=context,
-            output_mode=output_mode,
-            glob_pattern=glob_pattern,
-            file_type=file_type,
-            respect_ignored=respect_ignored,
-            limit=limit,
-        )
+        else:
+            exact_output = self._run_python_fallback(
+                regex=regex,
+                target=target,
+                context=context,
+                output_mode=output_mode,
+                glob_pattern=glob_pattern,
+                file_type=file_type,
+                respect_ignored=respect_ignored,
+                limit=limit,
+            )
+        return self._merge_semantic_and_exact(semantic_output, exact_output)
 
     def _normalize_output_mode(self, raw_mode: object) -> str:
         mode = str(raw_mode or "content").strip().lower()
@@ -1580,6 +1609,73 @@ class GrepFileTool(CodingBaseTool):
         if mode not in allowed_modes:
             raise ValueError(f"output_mode 只支持: {', '.join(sorted(allowed_modes))}")
         return mode
+
+    def _run_semantic_search(
+        self,
+        *,
+        regex: str,
+        search_path: str,
+        context: ToolContext,
+        limit: int,
+    ) -> str:
+        try:
+            from fastapi_app.rag_index import (
+                schedule_workspace_rag_index,
+                search_workspace_rag,
+            )
+        except Exception:
+            return ""
+
+        project_root = context.metadata.get("project_root")
+        app_root = Path(str(project_root)).resolve() if project_root else Path(__file__).resolve().parents[1]
+        try:
+            schedule_workspace_rag_index(app_root, context.workspace)
+            matches = search_workspace_rag(
+                app_root,
+                context.workspace,
+                regex,
+                search_path=search_path,
+                limit=limit,
+            )
+        except Exception:
+            return ""
+        if not matches:
+            return ""
+
+        rendered = [
+            "# Semantic candidates (RAG)",
+            "# These are semantic candidates from the prebuilt workspace index. Read files before editing.",
+            f"# Query: {regex}",
+            f"# Search path: {search_path}",
+            f"# Returned: {len(matches)}",
+        ]
+        for match in matches:
+            snippet = _compact_text(match.content, 420)
+            symbol = str(getattr(match, "symbol", "") or "")
+            kind = str(getattr(match, "kind", "") or "text")
+            language = str(getattr(match, "language", "") or "")
+            metadata = [part for part in [kind, symbol, language] if part]
+            rendered.extend(
+                [
+                    f"# File: {match.path}",
+                    f"# Lines: {match.start_line}-{match.end_line}",
+                    f"# Chunk: {' | '.join(metadata)}",
+                    f"# Score: {match.score:.3f}",
+                    snippet,
+                ]
+            )
+        return "\n".join(rendered)
+
+    def _merge_semantic_and_exact(self, semantic_output: str, exact_output: str) -> str:
+        if not semantic_output.strip():
+            return exact_output
+        return "\n\n".join(
+            [
+                semantic_output.strip(),
+                "# Exact grep results",
+                exact_output.strip(),
+            ]
+        )
 
     def _run_with_ripgrep(
         self,
@@ -1633,6 +1729,7 @@ class GrepFileTool(CodingBaseTool):
             errors="replace",
             timeout=20,
             check=False,
+            **_hidden_windows_process_kwargs(),
         )
         if result.returncode not in {0, 1}:
             stderr = result.stderr.strip() or result.stdout.strip()
@@ -2526,6 +2623,7 @@ class ExecuteTool(CodingBaseTool):
             text=True,
             encoding="utf-8",
             errors="replace",
+            **_hidden_windows_process_kwargs(),
         )
 
         try:
@@ -3024,6 +3122,7 @@ class GitCommitTool(CodingBaseTool):
             encoding="utf-8",
             errors="replace",
             timeout=10,
+            **_hidden_windows_process_kwargs(),
         )
         if not status_result.stdout.strip():
             return {
@@ -3058,6 +3157,7 @@ def execute_git_commit(message: str, workspace: Path) -> str:
         encoding="utf-8",
         errors="replace",
         timeout=30,
+        **_hidden_windows_process_kwargs(),
     )
     if add_result.returncode != 0:
         raise RuntimeError(f"git add 失败：{add_result.stderr.strip()}")
@@ -3071,6 +3171,7 @@ def execute_git_commit(message: str, workspace: Path) -> str:
         encoding="utf-8",
         errors="replace",
         timeout=30,
+        **_hidden_windows_process_kwargs(),
     )
     if commit_result.returncode != 0:
         stderr = commit_result.stderr.strip()
@@ -3111,6 +3212,7 @@ class GitLogTool(CodingBaseTool):
             encoding="utf-8",
             errors="replace",
             timeout=15,
+            **_hidden_windows_process_kwargs(),
         )
         if result.returncode != 0:
             raise RuntimeError(f"git log 失败：{result.stderr.strip()}")
@@ -3165,6 +3267,7 @@ class GitTagTool(CodingBaseTool):
                 encoding="utf-8",
                 errors="replace",
                 timeout=10,
+                **_hidden_windows_process_kwargs(),
             )
             tags = [t.strip() for t in result.stdout.strip().splitlines() if t.strip()]
             return {"tags": tags, "count": len(tags)}
@@ -3194,6 +3297,7 @@ def execute_git_tag(tag_name: str, tag_message: str, workspace: Path) -> str:
         encoding="utf-8",
         errors="replace",
         timeout=15,
+        **_hidden_windows_process_kwargs(),
     )
     if result.returncode != 0:
         stderr = result.stderr.strip()
@@ -3217,6 +3321,7 @@ def init_git_repo(workspace: Path) -> str:
         encoding="utf-8",
         errors="replace",
         timeout=15,
+        **_hidden_windows_process_kwargs(),
     )
     if init_result.returncode != 0:
         raise RuntimeError(f"git init 失败：{init_result.stderr.strip()}")
@@ -3258,6 +3363,7 @@ def init_git_repo(workspace: Path) -> str:
         encoding="utf-8",
         errors="replace",
         timeout=30,
+        **_hidden_windows_process_kwargs(),
     )
 
     commit_result = subprocess.run(
@@ -3268,6 +3374,7 @@ def init_git_repo(workspace: Path) -> str:
         encoding="utf-8",
         errors="replace",
         timeout=30,
+        **_hidden_windows_process_kwargs(),
     )
 
     return f"已初始化 git 仓库并创建 .gitignore。"

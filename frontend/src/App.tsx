@@ -54,14 +54,18 @@ import {
   parseStreamingPlanDraft,
   resolvePlanDraftTitle,
 } from '@/lib/plan-draft';
+import { apiFetch, apiUrl } from '@/lib/api-client';
 
-import { Moon, PanelRightOpen, PanelRightClose, Settings2, Sun } from 'lucide-react';
+import { Info, Minus, Moon, PanelRightOpen, PanelRightClose, Settings2, Square, Sun, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { AnimatePresence } from 'motion/react';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
+import { AnimatePresence, motion } from 'motion/react';
 import { SplashScreen } from '@/components/app/splash-screen';
 
 const DEFAULT_WEB_PREVIEW_URL = 'http://localhost:8888';
 const CONTEXT_COMPRESSION_USAGE_THRESHOLD = 0.8;
+const STREAM_RETRY_LIMIT = 10;
+const RETRYABLE_STREAM_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
 
 function getPreviewUrlFromToolPayload(payload: { preview_url?: unknown; output?: unknown }) {
   if (typeof payload.preview_url === 'string' && payload.preview_url.trim()) {
@@ -337,6 +341,59 @@ async function readApiError(response: Response, fallback: string) {
   return fallback;
 }
 
+class StreamHttpError extends Error {
+  status: number;
+  retryable: boolean;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'StreamHttpError';
+    this.status = status;
+    this.retryable = RETRYABLE_STREAM_STATUS.has(status);
+  }
+}
+
+function isAbortError(error: unknown) {
+  return error instanceof DOMException && error.name === 'AbortError';
+}
+
+function getRetryDelayMs(retryIndex: number) {
+  return 1000 * 2 ** retryIndex;
+}
+
+function formatRetryDelay(ms: number) {
+  const seconds = ms / 1000;
+  return Number.isInteger(seconds) ? `${seconds} 秒` : `${seconds.toFixed(1)} 秒`;
+}
+
+function getErrorMessage(error: unknown, fallback: string) {
+  return error instanceof Error && error.message ? error.message : fallback;
+}
+
+function waitForRetryDelay(ms: number, signal: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new DOMException('Aborted', 'AbortError'));
+      return;
+    }
+
+    let timer: number;
+    function cleanup() {
+      signal.removeEventListener('abort', abort);
+    }
+    function abort() {
+      window.clearTimeout(timer);
+      cleanup();
+      reject(new DOMException('Aborted', 'AbortError'));
+    }
+    timer = window.setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', abort, { once: true });
+  });
+}
+
 async function copyTextToClipboard(text: string) {
   const value = text.trim();
   if (!value) {
@@ -410,6 +467,7 @@ export default function App() {
   const [availablePlugins, setAvailablePlugins] = useState<PluginSummary[]>([]);
   const [availableSkills, setAvailableSkills] = useState<SkillSummary[]>([]);
   const [isModelConfigOpen, setIsModelConfigOpen] = useState(false);
+  const [isAboutOpen, setIsAboutOpen] = useState(false);
   const [appSettings, setAppSettings] = useState<AppSettings>({
     autoApprove: false,
     thinkingRendering: 'text',
@@ -417,6 +475,12 @@ export default function App() {
       'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
     bodyFontSize: 14,
     bodyLineHeight: 22,
+    embedding: {
+      enabled: false,
+      baseUrl: '',
+      apiKey: '',
+      model: '',
+    },
   });
   const [visualModelProviders, setVisualModelProviders] = useState<UIModelProvider[]>([]);
   const [envModelConfigs, setEnvModelConfigs] = useState<ModelOption[]>([]);
@@ -565,8 +629,8 @@ export default function App() {
 
       try {
         if (options?.includeTerminals) {
-          const terminalsRes = await fetch(
-            `http://localhost:3001/api/sessions/${currentSessionId}/terminals`
+          const terminalsRes = await apiFetch(
+            `/api/sessions/${currentSessionId}/terminals`
           );
           if (terminalsRes.ok) {
             const terminalsData = await terminalsRes.json();
@@ -602,8 +666,8 @@ export default function App() {
         if (options?.includeProcesses) {
           query.set('include_processes', 'true');
         }
-        const res = await fetch(
-          `http://localhost:3001/api/sessions/${currentSessionId}/terminal${query.size ? `?${query.toString()}` : ''}`
+        const res = await apiFetch(
+          `/api/sessions/${currentSessionId}/terminal${query.size ? `?${query.toString()}` : ''}`
         );
         if (!res.ok) {
           throw new Error('读取终端状态失败');
@@ -648,7 +712,7 @@ export default function App() {
       }
 
       try {
-        const res = await fetch(`http://localhost:3001/api/sessions/${targetSessionId}/context`);
+        const res = await apiFetch(`/api/sessions/${targetSessionId}/context`);
         if (!res.ok) {
           throw new Error('读取上下文失败');
         }
@@ -692,7 +756,7 @@ export default function App() {
   });
 
   const loadModels = useCallback(async () => {
-    const res = await fetch('http://localhost:3001/api/models');
+    const res = await apiFetch('/api/models');
     const data: { models: ModelOption[] } = await res.json();
     const nextOptions = data.models ?? [];
     setModelOptions(nextOptions);
@@ -706,14 +770,14 @@ export default function App() {
   }, []);
 
   const loadAppSettings = useCallback(async () => {
-    const res = await fetch('http://localhost:3001/api/settings');
+    const res = await apiFetch('/api/settings');
     const data = await res.json();
     setAppSettings(data);
     return data;
   }, []);
 
   const saveAppSettings = useCallback(async (settings: AppSettings) => {
-    const res = await fetch('http://localhost:3001/api/settings', {
+    const res = await apiFetch('/api/settings', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(settings),
@@ -726,7 +790,7 @@ export default function App() {
   }, []);
 
   const loadModelConfigs = useCallback(async () => {
-    const res = await fetch('http://localhost:3001/api/model-configs');
+    const res = await apiFetch('/api/model-configs');
     const data: ModelConfigPayload = await res.json();
     setVisualModelProviders(data.providers ?? []);
     setEnvModelConfigs(data.envConfigs ?? []);
@@ -736,7 +800,7 @@ export default function App() {
   }, [loadAppSettings]);
 
   useEffect(() => {
-    fetch('http://localhost:3001/api/workspaces')
+    apiFetch('/api/workspaces')
       .then((res) => res.json())
       .then((data: { workspaces: WorkspaceOption[] }) => {
         const options = data.workspaces ?? [];
@@ -747,7 +811,7 @@ export default function App() {
       })
       .catch(console.error);
 
-    fetch('http://localhost:3001/api/models')
+    apiFetch('/api/models')
       .then((res) => res.json())
       .then((data: { models: ModelOption[] }) => {
         const nextOptions = data.models ?? [];
@@ -761,7 +825,7 @@ export default function App() {
       })
       .catch(console.error);
 
-    fetch('http://localhost:3001/api/model-configs')
+    apiFetch('/api/model-configs')
       .then((res) => res.json())
       .then((data: ModelConfigPayload) => {
         setVisualModelProviders(data.providers ?? []);
@@ -770,7 +834,7 @@ export default function App() {
       })
       .catch(console.error);
 
-    fetch('http://localhost:3001/api/plugins')
+    apiFetch('/api/plugins')
       .then((res) => res.json())
       .then((data: { plugins?: PluginSummary[] }) => {
         setAvailablePlugins(data.plugins ?? []);
@@ -805,7 +869,7 @@ export default function App() {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 30000);
     try {
-      const res = await fetch(`http://localhost:3001/api/sessions/${targetSessionId}`, {
+      const res = await apiFetch(`/api/sessions/${targetSessionId}`, {
         signal: controller.signal,
       });
       if (!res.ok) {
@@ -849,7 +913,7 @@ export default function App() {
   const loadSessionHistory = useCallback(async () => {
     setIsHistoryLoading(true);
     try {
-      const res = await fetch('http://localhost:3001/api/sessions/history');
+      const res = await apiFetch('/api/sessions/history');
       if (!res.ok) {
         throw new Error('读取历史会话失败');
       }
@@ -866,8 +930,8 @@ export default function App() {
     async (cardId: string, aiState: KanbanAiState | null) => {
       if (!selectedWorkspace || !cardId) return;
       try {
-        const response = await fetch(
-          `http://localhost:3001/api/workspaces/${encodeURIComponent(selectedWorkspace)}/kanban/cards/${cardId}`,
+        const response = await apiFetch(
+          `/api/workspaces/${encodeURIComponent(selectedWorkspace)}/kanban/cards/${cardId}`,
           {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
@@ -895,7 +959,7 @@ export default function App() {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 60000);
 
-      const res = await fetch('http://localhost:3001/api/sessions', {
+      const res = await apiFetch('/api/sessions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1001,7 +1065,7 @@ export default function App() {
 
     try {
       const query = new URLSearchParams({ path });
-      const res = await fetch(`http://localhost:3001/api/directories?${query.toString()}`);
+      const res = await apiFetch(`/api/directories?${query.toString()}`);
       const data = await res.json();
       const children = workspaceOptionsToDirectoryNodes(data.children ?? []);
       setDirectoryTree((prev) =>
@@ -1032,7 +1096,7 @@ export default function App() {
     setSelectedFilePath(path);
     try {
       const query = new URLSearchParams({ session_id: sessionId, path });
-      const res = await fetch(`http://localhost:3001/api/files?${query.toString()}`);
+      const res = await apiFetch(`/api/files?${query.toString()}`);
       const data = await res.json();
       setSelectedFilePath(data.selectedFilePath ?? path);
       setSelectedFileContent(data.selectedFileContent ?? '');
@@ -1046,7 +1110,7 @@ export default function App() {
       if (!sessionId) return;
 
       const query = new URLSearchParams({ session_id: sessionId, path });
-      const res = await fetch(`http://localhost:3001/api/files?${query.toString()}`, {
+      const res = await apiFetch(`/api/files?${query.toString()}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content }),
@@ -1093,7 +1157,7 @@ export default function App() {
 
     const syncSnapshot = async () => {
       try {
-        const res = await fetch(`http://localhost:3001/api/sessions/${sessionId}`);
+        const res = await apiFetch(`/api/sessions/${sessionId}`);
         if (!res.ok) {
           throw new Error('同步会话状态失败');
         }
@@ -1129,7 +1193,7 @@ export default function App() {
   const createTerminal = useCallback(async (cwd?: string) => {
     if (!sessionId) return null;
     try {
-      const res = await fetch(`http://localhost:3001/api/sessions/${sessionId}/terminals`, {
+      const res = await apiFetch(`/api/sessions/${sessionId}/terminals`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ cwd: cwd || undefined }),
@@ -1148,7 +1212,7 @@ export default function App() {
   const closeTerminal = useCallback(async (terminalId: string) => {
     if (!sessionId) return;
     try {
-      const res = await fetch(`http://localhost:3001/api/sessions/${sessionId}/terminals/${terminalId}`, {
+      const res = await apiFetch(`/api/sessions/${sessionId}/terminals/${terminalId}`, {
         method: 'DELETE',
       });
       if (!res.ok) throw new Error('关闭终端失败');
@@ -1167,7 +1231,7 @@ export default function App() {
       if (!sessionId || !terminalId) return;
       setIsStoppingProcesses(true);
       try {
-        const res = await fetch(`http://localhost:3001/api/sessions/${sessionId}/processes/${terminalId}/terminate`, {
+        const res = await apiFetch(`/api/sessions/${sessionId}/processes/${terminalId}/terminate`, {
           method: 'POST',
         });
         if (!res.ok) {
@@ -1192,7 +1256,7 @@ export default function App() {
       if (!currentSessionId) return;
       setIsStoppingProcesses(true);
       try {
-        const res = await fetch(`http://localhost:3001/api/sessions/${currentSessionId}/stop`, {
+        const res = await apiFetch(`/api/sessions/${currentSessionId}/stop`, {
           method: 'POST',
         });
         if (!res.ok) {
@@ -1248,7 +1312,7 @@ export default function App() {
     async (modelId: string) => {
       if (!sessionId) return;
       try {
-        const res = await fetch(`http://localhost:3001/api/sessions/${sessionId}/model`, {
+        const res = await apiFetch(`/api/sessions/${sessionId}/model`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -1294,7 +1358,7 @@ export default function App() {
         return;
       }
       try {
-        const res = await fetch(`http://localhost:3001/api/sessions/${sessionId}/model`, {
+        const res = await apiFetch(`/api/sessions/${sessionId}/model`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -1337,7 +1401,7 @@ export default function App() {
 
   const saveModelProviders = useCallback(
     async (providers: UIModelProvider[]) => {
-      const res = await fetch('http://localhost:3001/api/model-configs', {
+      const res = await apiFetch('/api/model-configs', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ providers }),
@@ -1355,7 +1419,7 @@ export default function App() {
   );
 
   const discoverProviderModels = useCallback(async (provider: UIModelProvider) => {
-    const res = await fetch('http://localhost:3001/api/model-configs/discover-models', {
+    const res = await apiFetch('/api/model-configs/discover-models', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(provider),
@@ -1367,6 +1431,22 @@ export default function App() {
     return Array.isArray(data.models) ? (data.models as string[]) : [];
   }, []);
 
+  const testEmbeddingSettings = useCallback(async (embedding: AppSettings['embedding']) => {
+    const res = await apiFetch('/api/settings/embedding/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(embedding),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(String(data.detail ?? 'Embedding 测试失败'));
+    }
+    const dimension = typeof data.dimension === 'number' ? data.dimension : null;
+    return dimension
+      ? `Embedding 测试成功，向量维度 ${dimension}`
+      : 'Embedding 测试成功';
+  }, []);
+
   const handleDeleteHistory = useCallback(
     async (targetSessionId: string) => {
       const deletedItem = sessionHistory.find((item) => item.sessionId === targetSessionId);
@@ -1375,7 +1455,7 @@ export default function App() {
       const remainingItems = sessionHistory.filter((item) => item.sessionId !== targetSessionId);
       setSessionHistory(remainingItems);
 
-      fetch(`http://localhost:3001/api/sessions/${targetSessionId}`, { method: 'DELETE' }).catch(
+      apiFetch(`/api/sessions/${targetSessionId}`, { method: 'DELETE' }).catch(
         () => {
           setSessionHistory((prev) => {
             const insertIdx = prev.findIndex(
@@ -1465,24 +1545,73 @@ export default function App() {
     activeStreamSessionIdRef.current = streamSessionId;
 
     try {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-        signal: abortController.signal,
-      });
-
-      if (!res.body) return;
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let currentAssistantId = initialAssistantId ?? '';
-      const toolNamesById = new Map<string, string>();
-      const toolInputBuffersById = new Map<string, string>();
-      const assistantTextById = new Map<string, string>();
-      let hadStreamError = false;
+      const retryAssistantId = `retry-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      let retryThoughtText = '';
+      let retryCount = 0;
+      let completed = false;
       const isVisibleStreamSession = () => currentSessionIdRef.current === streamSessionId;
+      const upsertRetryThought = (text: string) => {
+        if (!isVisibleStreamSession()) {
+          return;
+        }
+        retryThoughtText = retryThoughtText ? `${retryThoughtText}\n\n${text}` : text;
+        setMessages((prev) => {
+          let found = false;
+          const next = prev.map((message) => {
+            if (message.id !== retryAssistantId) {
+              return message;
+            }
+            found = true;
+            return {
+              ...message,
+              thoughts: retryThoughtText,
+              parts: [{ type: 'thinking' as const, text: retryThoughtText }],
+            };
+          });
+          if (found) {
+            return next;
+          }
+          return [
+            ...next,
+            {
+              id: retryAssistantId,
+              role: 'assistant' as const,
+              content: '',
+              thoughts: retryThoughtText,
+              toolCalls: [],
+              parts: [{ type: 'thinking' as const, text: retryThoughtText }],
+            },
+          ];
+        });
+      };
+
+      while (!completed) {
+        let sawStreamEvent = false;
+        try {
+          const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+            signal: abortController.signal,
+          });
+
+          if (!res.ok) {
+            const errorText = await readApiError(res, `请求失败：HTTP ${res.status}`);
+            throw new StreamHttpError(errorText, res.status);
+          }
+
+          if (!res.body) {
+            throw new Error('流式响应为空');
+          }
+
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = '';
+          let currentAssistantId = initialAssistantId ?? '';
+          const toolNamesById = new Map<string, string>();
+          const toolInputBuffersById = new Map<string, string>();
+          const assistantTextById = new Map<string, string>();
+          let hadStreamError = false;
 
       const pendingUpdates = new Map<string, ((message: ChatMessage) => ChatMessage)[]>();
       let rafHandle: number | null = null;
@@ -1568,6 +1697,7 @@ export default function App() {
             .join('\n');
           if (!rawData || rawData === '[DONE]') return;
 
+          sawStreamEvent = true;
           const data = JSON.parse(rawData);
           const appendToLastPart = (message: ChatMessage, partType: 'thinking' | 'text', delta: string): ContentBlock[] => {
             const parts = message.parts ?? [];
@@ -1605,7 +1735,7 @@ export default function App() {
               return;
             }
             try {
-              const res = await fetch(`http://localhost:3001/api/sessions/${streamSessionId}/git/status`);
+              const res = await apiFetch(`/api/sessions/${streamSessionId}/git/status`);
               if (!res.ok) {
                 return;
               }
@@ -2151,12 +2281,42 @@ export default function App() {
       if (!hadStreamError) {
         onStreamComplete?.();
       }
-    } catch (e) {
-      if (e instanceof DOMException && e.name === 'AbortError') {
-        return;
+          completed = true;
+        } catch (e) {
+          if (isAbortError(e)) {
+            return;
+          }
+
+          const errorMessage = getErrorMessage(e, 'AI 执行失败');
+          const retryable = e instanceof StreamHttpError ? e.retryable : true;
+          if (retryable && !sawStreamEvent && retryCount < STREAM_RETRY_LIMIT) {
+            const delayMs = getRetryDelayMs(retryCount);
+            const retryNumber = retryCount + 1;
+            upsertRetryThought(
+              `请求出错：${errorMessage}\n正在重试（${retryNumber}/${STREAM_RETRY_LIMIT}），等待 ${formatRetryDelay(delayMs)}。`,
+            );
+            retryCount += 1;
+            try {
+              await waitForRetryDelay(delayMs, abortController.signal);
+            } catch (delayError) {
+              if (isAbortError(delayError)) {
+                return;
+              }
+              throw delayError;
+            }
+            continue;
+          }
+
+          console.error(e);
+          if (!sawStreamEvent && retryCount >= STREAM_RETRY_LIMIT) {
+            upsertRetryThought(
+              `已重试 ${STREAM_RETRY_LIMIT} 次仍未成功，自动停止。\n最后错误：${errorMessage}`,
+            );
+          }
+          onStreamError?.(errorMessage);
+          return;
+        }
       }
-      console.error(e);
-      onStreamError?.(e instanceof Error ? e.message : 'AI 执行失败');
     } finally {
       if (activeRequestRef.current === abortController) {
         activeRequestRef.current = null;
@@ -2193,7 +2353,7 @@ export default function App() {
     }
 
     await streamAssistantResponse({
-      url: 'http://localhost:3001/api/chat/stream',
+      url: apiUrl('/api/chat/stream'),
       body: {
         session_id: sessionId,
         message: finalMsg,
@@ -2211,7 +2371,7 @@ export default function App() {
     if (!sessionId || !assistantId) return;
 
     await streamAssistantResponse({
-      url: 'http://localhost:3001/api/chat/continue',
+      url: apiUrl('/api/chat/continue'),
       body: { session_id: sessionId, assistant_id: assistantId },
       streamSessionId: sessionId,
       initialAssistantId: assistantId,
@@ -2257,7 +2417,7 @@ export default function App() {
       await persistState(initialState);
 
       void streamAssistantResponse({
-        url: 'http://localhost:3001/api/chat/stream',
+        url: apiUrl('/api/chat/stream'),
         body: {
           session_id: sessionId,
           message,
@@ -2336,7 +2496,7 @@ export default function App() {
       if (!sessionId) return;
 
       try {
-        const res = await fetch(`http://localhost:3001/api/sessions/${sessionId}/tools/${toolCallId}/confirm-delete`, {
+        const res = await apiFetch(`/api/sessions/${sessionId}/tools/${toolCallId}/confirm-delete`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ approved }),
@@ -2415,7 +2575,7 @@ export default function App() {
 
       try {
         const endpoint = type === 'commit' ? 'confirm-commit' : 'confirm-tag';
-        const res = await fetch(`http://localhost:3001/api/sessions/${sessionId}/tools/${toolCallId}/${endpoint}`, {
+        const res = await apiFetch(`/api/sessions/${sessionId}/tools/${toolCallId}/${endpoint}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ approved }),
@@ -2484,7 +2644,7 @@ export default function App() {
       if (!sessionId) return;
 
       try {
-        const res = await fetch(`http://localhost:3001/api/sessions/${sessionId}/tools/${toolCallId}/connect`, {
+        const res = await apiFetch(`/api/sessions/${sessionId}/tools/${toolCallId}/connect`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ values }),
@@ -2574,7 +2734,7 @@ export default function App() {
         };
       });
 
-      const res = await fetch(`http://localhost:3001/api/sessions/${sessionId}/tools/${toolCallId}/input`, {
+      const res = await apiFetch(`/api/sessions/${sessionId}/tools/${toolCallId}/input`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ answers: payloadAnswers }),
@@ -2655,7 +2815,7 @@ export default function App() {
 
       setCompletionActionState({ messageId: message.id, action: 'compress' });
       try {
-        const res = await fetch(`http://localhost:3001/api/sessions/${sessionId}/context/compress`, {
+        const res = await apiFetch(`/api/sessions/${sessionId}/context/compress`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -2695,7 +2855,7 @@ export default function App() {
 
       setCompletionActionState({ messageId: message.id, action: 'fork' });
       try {
-        const res = await fetch(`http://localhost:3001/api/sessions/${sessionId}/fork`, {
+        const res = await apiFetch(`/api/sessions/${sessionId}/fork`, {
           method: 'POST',
         });
         if (!res.ok) {
@@ -2722,7 +2882,7 @@ export default function App() {
 
       setCompletionActionState({ messageId: message.id, action: 'restore' });
       try {
-        const res = await fetch(`http://localhost:3001/api/sessions/${sessionId}/restore`, {
+        const res = await apiFetch(`/api/sessions/${sessionId}/restore`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ messageId: message.id }),
@@ -2832,8 +2992,11 @@ export default function App() {
         />
       ) : (
     <div className="flex flex-col h-screen bg-background text-foreground font-sans w-full overflow-hidden text-[var(--app-body-font-size)] leading-[var(--app-body-line-height)]">
-      <header className="flex items-center h-10 px-3 border-b bg-muted/30 flex-shrink-0 gap-2">
-        <div className="flex items-center gap-2">
+      <header
+        className="flex items-center h-10 px-3 border-b bg-muted/30 flex-shrink-0 gap-2"
+        {...(window.__TAURI__ ? { 'data-tauri-drag-region': '' } : {})}
+      >
+        <div className="flex items-center gap-2 select-none">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" className="text-primary">
             <path d="M8 4L2 12L8 20" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/>
             <path d="M16 4L22 12L16 20" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/>
@@ -2876,9 +3039,25 @@ export default function App() {
         >
           {isDarkMode ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
         </Button>
+        <Button variant="ghost" size="icon" className="h-7 w-7 rounded-full" onClick={() => setIsAboutOpen(true)} title="关于">
+          <Info className="w-4 h-4" />
+        </Button>
         <Button variant="ghost" size="icon" onClick={toggleRightPanel} className="h-7 w-7 ml-2" title={isRightPanelCollapsed ? '展开右侧面板' : '收起右侧面板'}>
           {isRightPanelCollapsed ? <PanelRightOpen className="w-4 h-4" /> : <PanelRightClose className="w-4 h-4" />}
         </Button>
+        {window.__TAURI__ && (
+          <div className="flex items-center ml-1">
+            <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md" title="最小化" onClick={() => window.__TAURI__?.core?.invoke('plugin:window|minimize').catch(() => {})}>
+              <Minus className="w-3.5 h-3.5" />
+            </Button>
+            <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md" title="最大化" onClick={() => window.__TAURI__?.core?.invoke('plugin:window|toggle_maximize').catch(() => {})}>
+              <Square className="w-3 h-3" />
+            </Button>
+            <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md hover:bg-destructive/80 hover:text-destructive-foreground" title="关闭" onClick={() => window.__TAURI__?.core?.invoke('plugin:window|close').catch(() => {})}>
+              <X className="w-4 h-4" />
+            </Button>
+          </div>
+        )}
       </header>
       <div className="flex flex-1 min-h-0">
       <Sidebar
@@ -2944,6 +3123,7 @@ export default function App() {
         }}
         onContextOpenChange={handleContextOpenChange}
         onInputChange={setInput}
+        onEditMessage={(content) => setInput(content)}
         onKeyDown={handleKeyDown}
         onSendMessage={() => void sendMessage(input, elementAttachments.length > 0 ? elementAttachments : undefined)}
         availableSkills={availableSkills}
@@ -3000,7 +3180,7 @@ export default function App() {
             if (!sessionId) return;
             try {
               const annotationPayload = formatPlanAnnotations(annotations);
-              const response = await fetch(`http://localhost:3001/api/sessions/${sessionId}/plan-draft`, {
+              const response = await apiFetch(`/api/sessions/${sessionId}/plan-draft`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -3037,7 +3217,7 @@ export default function App() {
             if (!sessionId) return;
 
             try {
-              const res = await fetch(`http://localhost:3001/api/sessions/${sessionId}/plan/submit`, {
+              const res = await apiFetch(`/api/sessions/${sessionId}/plan/submit`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -3078,7 +3258,7 @@ export default function App() {
               await loadSessionHistory();
 
               await streamAssistantResponse({
-                url: 'http://localhost:3001/api/chat/stream',
+                url: apiUrl('/api/chat/stream'),
                 body: {
                   session_id: sessionId,
                   message: codingInput,
@@ -3129,9 +3309,118 @@ export default function App() {
           settings={appSettings}
           onSaveProviders={saveModelProviders}
           onDiscoverModels={discoverProviderModels}
+          onTestEmbedding={testEmbeddingSettings}
           onSaveSettings={saveAppSettings}
         />
       ) : null}
+      <Dialog open={isAboutOpen} onOpenChange={setIsAboutOpen}>
+        <DialogContent className="sm:max-w-md overflow-hidden">
+          <div
+            className="absolute inset-0 pointer-events-none overflow-hidden"
+            aria-hidden
+            onContextMenu={(e) => e.preventDefault()}
+          >
+            {Array.from({ length: 6 }, (_, row) =>
+              Array.from({ length: 4 }, (_, col) => (
+                <span
+                  key={`${row}-${col}`}
+                  className="absolute text-foreground font-bold"
+                  style={{
+                    opacity: 0.03,
+                    fontSize: '0.7rem',
+                    letterSpacing: '0.2em',
+                    whiteSpace: 'nowrap',
+                    transform: 'rotate(-25deg)',
+                    left: `${-10 + col * 28}%`,
+                    top: `${-5 + row * 22}%`,
+                    userSelect: 'none',
+                    WebkitUserSelect: 'none',
+                  }}
+                >
+                  zongxi
+                </span>
+              ))
+            )}
+          </div>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <motion.svg
+                width="20" height="20" viewBox="0 0 24 24" fill="none" className="text-primary"
+                initial={{ scale: 0.3, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                transition={{ type: 'spring', stiffness: 200, damping: 15 }}
+              >
+                <motion.path
+                  d="M8 4L2 12L8 20" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
+                  initial={{ pathLength: 0, opacity: 0 }}
+                  animate={{ pathLength: 1, opacity: 1 }}
+                  transition={{ duration: 0.5, delay: 0.15, ease: 'easeOut' }}
+                />
+                <motion.path
+                  d="M16 4L22 12L16 20" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
+                  initial={{ pathLength: 0, opacity: 0 }}
+                  animate={{ pathLength: 1, opacity: 1 }}
+                  transition={{ duration: 0.5, delay: 0.3, ease: 'easeOut' }}
+                />
+                <motion.path
+                  d="M14 3L10 21" stroke="currentColor" strokeWidth="2" strokeLinecap="round"
+                  initial={{ pathLength: 0, opacity: 0 }}
+                  animate={{ pathLength: 1, opacity: 1 }}
+                  transition={{ duration: 0.4, delay: 0.45, ease: 'easeOut' }}
+                />
+              </motion.svg>
+              <motion.span
+                initial={{ opacity: 0, x: -8 }}
+                animate={{ opacity: 1, x: 0 }}
+                transition={{ delay: 0.4, duration: 0.4, ease: 'easeOut' }}
+              >
+                Super Code
+              </motion.span>
+            </DialogTitle>
+            <DialogDescription asChild>
+              <motion.p
+                initial={{ opacity: 0, y: 6 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.5, duration: 0.4, ease: 'easeOut' }}
+              >
+                一款 AI 驱动的智能编程助手，支持多种大模型，集代码编写、计划设计、部署发布于一体，让开发更高效。
+              </motion.p>
+            </DialogDescription>
+          </DialogHeader>
+          <motion.div
+            className="text-sm text-muted-foreground space-y-3"
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.6, duration: 0.4, ease: 'easeOut' }}
+          >
+            <p>作者：<span className="font-semibold text-foreground">zongxi</span></p>
+            <p>开源地址：
+              <a
+                href="https://github.com/zongxi1115/SuperCode"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-primary hover:underline"
+              >
+                https://github.com/zongxi1115/SuperCode
+              </a>
+            </p>
+          </motion.div>
+          <motion.div
+            className="relative h-1 mt-2 rounded-full overflow-hidden"
+            style={{ background: 'rgba(168, 85, 247, 0.1)' }}
+            initial={{ opacity: 0, scaleX: 0 }}
+            animate={{ opacity: 1, scaleX: 1 }}
+            transition={{ delay: 0.7, duration: 0.5, ease: [0.25, 0.1, 0.25, 1] }}
+          >
+            <motion.div
+              className="absolute inset-y-0 w-2/5 rounded-full"
+              style={{ background: 'linear-gradient(90deg, transparent, rgba(168, 85, 247, 0.6), rgba(200, 140, 255, 0.8), transparent)' }}
+              animate={{ x: ['-100%', '350%'] }}
+              transition={{ duration: 1.8, repeat: Infinity, ease: [0.4, 0, 0.2, 1], repeatDelay: 0.3 }}
+            />
+          </motion.div>
+        </DialogContent>
+      </Dialog>
     </div>
       )}
       <AnimatePresence>

@@ -408,6 +408,12 @@ export type AppSettings = {
   bodyFontFamily: string;
   bodyFontSize: number;
   bodyLineHeight: number;
+  embedding: {
+    enabled: boolean;
+    baseUrl: string;
+    apiKey: string;
+    model: string;
+  };
 };
 
 export type GitCommitInfo = {

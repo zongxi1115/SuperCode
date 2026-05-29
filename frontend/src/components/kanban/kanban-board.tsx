@@ -15,6 +15,7 @@ import { Button } from '@/components/ui/button';
 import { Filter, LayoutDashboard, Plus, RefreshCw, Search, Trash2 } from 'lucide-react';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
+import { apiUrl } from '@/lib/api-client';
 
 type KanbanBoardProps = {
   workspace: string;
@@ -29,7 +30,7 @@ type BoardPayload = {
 };
 
 function workspaceKanbanUrl(workspace: string, suffix: string) {
-  return `http://localhost:3001/api/workspaces/${encodeURIComponent(workspace)}/kanban${suffix}`;
+  return apiUrl(`/api/workspaces/${encodeURIComponent(workspace)}/kanban${suffix}`);
 }
 
 async function readApiError(response: Response, fallback: string) {

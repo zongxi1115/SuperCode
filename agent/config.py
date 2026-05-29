@@ -20,7 +20,7 @@ class AgentLLMConfig:
     api_mode: Literal["chat_completions", "responses"] = "chat_completions"
     reasoning_effort: str | None = None
     timeout: int = 60
-    max_retries: int = 2
+    max_retries: int = 10
     include_thoughts_in_context: bool = False
 
     @classmethod
@@ -45,7 +45,7 @@ class AgentLLMConfig:
             os.getenv("SC_AGENT_REASONING_EFFORT", ""),
         ).strip()
         timeout = int(env_values.get("SC_AGENT_TIMEOUT", os.getenv("SC_AGENT_TIMEOUT", "60")).strip())
-        max_retries = int(env_values.get("SC_AGENT_MAX_RETRIES", os.getenv("SC_AGENT_MAX_RETRIES", "2")).strip())
+        max_retries = int(env_values.get("SC_AGENT_MAX_RETRIES", os.getenv("SC_AGENT_MAX_RETRIES", "10")).strip())
         include_thoughts_in_context = _parse_bool(
             env_values.get(
                 "SC_AGENT_INCLUDE_THOUGHTS_IN_CONTEXT",

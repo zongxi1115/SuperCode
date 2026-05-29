@@ -3,6 +3,7 @@ import { TurnFileChangeList } from "@/components/ai-elements/file-change-list";
 import { SubagentTaskCard } from "@/components/ai-elements/subagent-task";
 import { ChatComposerEditor } from "@/components/app/chat-composer-editor";
 import { cn } from "@/lib/utils";
+import { apiFetch } from "@/lib/api-client";
 import {
   Conversation,
   ConversationContent,
@@ -14,6 +15,7 @@ import {
   ChainOfThoughtContent,
   ChainOfThoughtHeader,
   ChainOfThoughtStep,
+  ErrorChainBlock,
 } from "@/components/ai-elements/chain-of-thought";
 import { CodeBlock, CodeBlockDiff } from "@/components/ai-elements/code-block";
 import {
@@ -184,6 +186,7 @@ import {
   Code2Icon,
   RocketIcon,
   Copy,
+  Pencil,
   RotateCcw,
   Archive,
   Eye,
@@ -261,6 +264,7 @@ type ChatPanelProps = {
   } | null;
   elementAttachments?: ElementAttachment[];
   onRemoveElementAttachment?: (id: string) => void;
+  onEditMessage?: (content: string) => void;
   thinkingRendering?: "text" | "markdown";
 };
 
@@ -936,6 +940,97 @@ function normalizeThoughtText(value?: string | null) {
   return trimmed;
 }
 
+type ErrorSegment = {
+  errors: string[];
+  retryCount?: number;
+  maxRetries?: number;
+  retrying: boolean;
+};
+
+type ThoughtSegment =
+  | { type: "text"; value: string }
+  | { type: "error"; value: ErrorSegment };
+
+const ERROR_LINE_RE = /^请求出错[：:]\s*(.+)$/;
+const RETRY_LINE_RE = /^正在重试[（(](\d+)[/／](\d+)[)）]，等待/;
+const EXHAUSTED_LINE_RE = /^已重试\s*(\d+)\s*次仍未成功/;
+
+function parseThoughtErrorSegments(text: string): ThoughtSegment[] {
+  const segments: ThoughtSegment[] = [];
+  const lines = text.split("\n");
+  let textBuffer: string[] = [];
+  let currentError: ErrorSegment | null = null;
+
+  const flushText = () => {
+    const joined = textBuffer.join("\n").trim();
+    if (joined) {
+      segments.push({ type: "text", value: joined });
+    }
+    textBuffer = [];
+  };
+
+  const flushError = () => {
+    if (currentError) {
+      segments.push({ type: "error", value: currentError });
+      currentError = null;
+    }
+  };
+
+  for (const line of lines) {
+    const errorMatch = ERROR_LINE_RE.exec(line.trim());
+    const retryMatch = RETRY_LINE_RE.exec(line.trim());
+    const exhaustedMatch = EXHAUSTED_LINE_RE.exec(line.trim());
+
+    if (errorMatch) {
+      flushText();
+      if (currentError) {
+        currentError.errors.push(errorMatch[1].trim());
+      } else {
+        currentError = { errors: [errorMatch[1].trim()], retrying: false };
+      }
+      continue;
+    }
+
+    if (retryMatch && currentError) {
+      currentError.retryCount = Number(retryMatch[1]);
+      currentError.maxRetries = Number(retryMatch[2]);
+      currentError.retrying = true;
+      continue;
+    }
+
+    if (exhaustedMatch && currentError) {
+      currentError.retryCount = Number(exhaustedMatch[1]);
+      currentError.maxRetries = Number(exhaustedMatch[1]);
+      currentError.retrying = false;
+      const rest = line.trim().slice(exhaustedMatch[0].length).replace(/^[，,\s]+/, "").replace(/^最后错误[：:]\s*/, "").trim();
+      if (rest) {
+        currentError.errors.push(rest);
+      }
+      flushError();
+      continue;
+    }
+
+    if (currentError && line.trim().startsWith("自动停止")) {
+      currentError.retrying = false;
+      flushError();
+      continue;
+    }
+
+    if (currentError && !retryMatch && !errorMatch && !exhaustedMatch && line.trim()) {
+      flushError();
+      textBuffer.push(line);
+      continue;
+    }
+
+    textBuffer.push(line);
+  }
+
+  flushText();
+  flushError();
+
+  return segments;
+}
+
 function getThoughtTextKey(value: string) {
   return value.trim().replace(/\s+/g, " ");
 }
@@ -1037,7 +1132,7 @@ function GitCommitPreview({
     }
 
     let disposed = false;
-    void fetch(`http://localhost:3001/api/sessions/${sessionId}/git/status`)
+    void apiFetch(`/api/sessions/${sessionId}/git/status`)
       .then(async (res) => {
         if (!res.ok) {
           return;
@@ -2673,6 +2768,25 @@ const CanvasEdgeGlow = memo(function CanvasEdgeGlow({
   active: boolean;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [isDarkTheme, setIsDarkTheme] = useState(() =>
+    typeof document !== "undefined"
+      ? document.documentElement.classList.contains("dark")
+      : false,
+  );
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+
+    const root = document.documentElement;
+    const updateTheme = () => {
+      setIsDarkTheme(root.classList.contains("dark"));
+    };
+    const observer = new MutationObserver(updateTheme);
+    observer.observe(root, { attributes: true, attributeFilter: ["class"] });
+    updateTheme();
+
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -2682,35 +2796,74 @@ const CanvasEdgeGlow = memo(function CanvasEdgeGlow({
 
     let hue = 0;
     let raf: number;
+    const resize = () => {
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = Math.ceil(window.innerWidth * dpr);
+      canvas.height = Math.ceil(window.innerHeight * dpr);
+      canvas.style.width = `${window.innerWidth}px`;
+      canvas.style.height = `${window.innerHeight}px`;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    };
 
     const draw = () => {
-      const w = canvas.width;
-      const h = canvas.height;
+      const w = window.innerWidth;
+      const h = window.innerHeight;
       ctx.clearRect(0, 0, w, h);
-      hue = (hue + 0.5) % 360;
+      hue = (hue + (isDarkTheme ? 0.5 : 0.16)) % 360;
 
-      const edgeSize = 120;
+      const edgeSize = isDarkTheme ? 120 : 88;
+      const alpha = isDarkTheme ? 0.6 : 0.16;
+      const saturation = isDarkTheme ? 80 : 54;
+      const lightness = isDarkTheme ? 60 : 68;
 
       const topGrad = ctx.createLinearGradient(0, 0, 0, edgeSize);
-      topGrad.addColorStop(0, `hsla(${hue}, 80%, 60%, 0.6)`);
+      topGrad.addColorStop(
+        0,
+        `hsla(${hue}, ${saturation}%, ${lightness}%, ${alpha})`,
+      );
+      topGrad.addColorStop(
+        0.48,
+        `hsla(${hue}, ${saturation}%, ${lightness}%, ${alpha * 0.35})`,
+      );
       topGrad.addColorStop(1, "transparent");
       ctx.fillStyle = topGrad;
       ctx.fillRect(0, 0, w, edgeSize);
 
       const bottomGrad = ctx.createLinearGradient(0, h, 0, h - edgeSize);
-      bottomGrad.addColorStop(0, `hsla(${(hue + 90) % 360}, 80%, 60%, 0.6)`);
+      bottomGrad.addColorStop(
+        0,
+        `hsla(${(hue + 56) % 360}, ${saturation}%, ${lightness}%, ${alpha})`,
+      );
+      bottomGrad.addColorStop(
+        0.48,
+        `hsla(${(hue + 56) % 360}, ${saturation}%, ${lightness}%, ${alpha * 0.35})`,
+      );
       bottomGrad.addColorStop(1, "transparent");
       ctx.fillStyle = bottomGrad;
       ctx.fillRect(0, h - edgeSize, w, edgeSize);
 
       const leftGrad = ctx.createLinearGradient(0, 0, edgeSize, 0);
-      leftGrad.addColorStop(0, `hsla(${(hue + 180) % 360}, 80%, 60%, 0.6)`);
+      leftGrad.addColorStop(
+        0,
+        `hsla(${(hue + 112) % 360}, ${saturation}%, ${lightness}%, ${alpha})`,
+      );
+      leftGrad.addColorStop(
+        0.48,
+        `hsla(${(hue + 112) % 360}, ${saturation}%, ${lightness}%, ${alpha * 0.35})`,
+      );
       leftGrad.addColorStop(1, "transparent");
       ctx.fillStyle = leftGrad;
       ctx.fillRect(0, 0, edgeSize, h);
 
       const rightGrad = ctx.createLinearGradient(w, 0, w - edgeSize, 0);
-      rightGrad.addColorStop(0, `hsla(${(hue + 270) % 360}, 80%, 60%, 0.6)`);
+      rightGrad.addColorStop(
+        0,
+        `hsla(${(hue + 168) % 360}, ${saturation}%, ${lightness}%, ${alpha})`,
+      );
+      rightGrad.addColorStop(
+        0.48,
+        `hsla(${(hue + 168) % 360}, ${saturation}%, ${lightness}%, ${alpha * 0.35})`,
+      );
       rightGrad.addColorStop(1, "transparent");
       ctx.fillStyle = rightGrad;
       ctx.fillRect(w - edgeSize, 0, edgeSize, h);
@@ -2718,17 +2871,23 @@ const CanvasEdgeGlow = memo(function CanvasEdgeGlow({
       raf = requestAnimationFrame(draw);
     };
 
+    resize();
+    window.addEventListener("resize", resize);
     draw();
-    return () => cancelAnimationFrame(raf);
-  }, []);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener("resize", resize);
+    };
+  }, [isDarkTheme]);
 
   return (
     <canvas
       ref={canvasRef}
-      width={typeof window !== "undefined" ? window.innerWidth : 1920}
-      height={typeof window !== "undefined" ? window.innerHeight : 1080}
       className="fixed inset-0 pointer-events-none z-[60] transition-opacity duration-500"
-      style={{ opacity: active ? 1 : 0 }}
+      style={{
+        mixBlendMode: isDarkTheme ? "screen" : "multiply",
+        opacity: active ? 1 : 0,
+      }}
     />
   );
 });
@@ -2832,6 +2991,56 @@ const EmptyHeroState = memo(function EmptyHeroState({
   );
 });
 
+const UserMessageActions = memo(function UserMessageActions({
+  msg,
+  onEditMessage,
+}: {
+  msg: ChatMessage;
+  onEditMessage?: (content: string) => void;
+}) {
+  if (!msg.content) return null;
+  return (
+    <motion.div
+      className="absolute bottom-1.5 right-1.5 z-10 flex items-center gap-0.5 rounded-md bg-background/80 backdrop-blur-sm px-0.5 py-0.5 shadow-sm border border-border/40"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: 0.15 }}
+    >
+      <TooltipProvider>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors"
+              onClick={() => navigator.clipboard.writeText(msg.content)}
+            >
+              <Copy className="h-2.5 w-2.5" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom"><p>复制</p></TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+      {onEditMessage && (
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors"
+                onClick={() => onEditMessage(msg.content)}
+              >
+                <Pencil className="h-2.5 w-2.5" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom"><p>编辑并重新发送</p></TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      )}
+    </motion.div>
+  );
+});
+
 const MessageList = memo(function MessageList({
   sessionId,
   isLoading,
@@ -2846,6 +3055,7 @@ const MessageList = memo(function MessageList({
   activeCompletionAction,
   compressedMessageIds,
   canCompress,
+  onEditMessage,
   thinkingRendering = "text",
 }: {
   sessionId: string | null;
@@ -2877,11 +3087,13 @@ const MessageList = memo(function MessageList({
   } | null;
   compressedMessageIds: Set<string>;
   canCompress: boolean;
+  onEditMessage?: (content: string) => void;
   thinkingRendering?: "text" | "markdown";
 }) {
   const [taskOpenState, setTaskOpenState] = useState<Record<string, boolean>>(
     {},
   );
+  const [hoveredMsgId, setHoveredMsgId] = useState<string | null>(null);
 
   useEffect(() => {
     setTaskOpenState((prev) => {
@@ -3061,18 +3273,61 @@ const MessageList = memo(function MessageList({
       const hasThoughts = Boolean(thoughtText);
       const hasToolCalls = (msg.toolCalls?.length ?? 0) > 0;
 
+      const hasErrorInThoughts = hasThoughts && ERROR_LINE_RE.test(thoughtText);
+
       return (
         <>
           {hasThoughts ? (
-            <ChainOfThought defaultOpen={isLoading}>
+            <ChainOfThought defaultOpen={isLoading || hasErrorInThoughts}>
               <ChainOfThoughtHeader>
-                <span>思考过程</span>
+                <span className={hasErrorInThoughts ? "text-destructive" : ""}>
+                  {hasErrorInThoughts ? "请求出错" : "思考过程"}
+                </span>
               </ChainOfThoughtHeader>
               <ChainOfThoughtContent>
-                <ChainOfThoughtStep
-                  label={<MessageResponse>{thoughtText}</MessageResponse>}
-                  status={isLoading ? "active" : "complete"}
-                />
+                {(() => {
+                  const segments = parseThoughtErrorSegments(thoughtText);
+                  const hasError = segments.some((s) => s.type === "error");
+                  if (hasError) {
+                    return (
+                      <AnimatePresence>
+                        {segments.map((seg, si) => {
+                          if (seg.type === "error") {
+                            return (
+                              <motion.div
+                                key={`legacy-error-block`}
+                                layout
+                                initial={{ opacity: 1, height: "auto" }}
+                                exit={{ opacity: 0, height: 0, scale: 0.95, filter: "blur(4px)" }}
+                                transition={{ duration: 0.4, ease: [0.4, 0, 0.2, 1] }}
+                              >
+                                <ErrorChainBlock
+                                  errors={seg.value.errors}
+                                  retryCount={seg.value.retryCount}
+                                  maxRetries={seg.value.maxRetries}
+                                  retrying={seg.value.retrying}
+                                />
+                              </motion.div>
+                            );
+                          }
+                          return (
+                            <ChainOfThoughtStep
+                              key={`legacy-thinking-${si}`}
+                              label={<MessageResponse>{seg.value}</MessageResponse>}
+                              status={isLoading ? "active" : "complete"}
+                            />
+                          );
+                        })}
+                      </AnimatePresence>
+                    );
+                  }
+                  return (
+                    <ChainOfThoughtStep
+                      label={<MessageResponse>{thoughtText}</MessageResponse>}
+                      status={isLoading ? "active" : "complete"}
+                    />
+                  );
+                })()}
                 {hasToolCalls ? (
                   <div className="space-y-2">
                     {(() => {
@@ -3357,26 +3612,35 @@ const MessageList = memo(function MessageList({
           block.toolCall.name === "save_plan" &&
           block.toolCall.state === "running",
       );
+      const hasErrorThinking = group.blocks.some(
+        (block) =>
+          block.type === "thinking" &&
+          ERROR_LINE_RE.test(normalizeThoughtText(block.text)),
+      );
       const activeLabel = lastRunningTool
         ? getToolTitle(
             lastRunningTool.toolCall.name,
             lastRunningTool.toolCall.arguments ?? {},
           )
-        : isActive
-          ? "正在思考..."
-          : "思考过程";
+        : hasErrorThinking
+          ? "请求出错"
+          : isActive
+            ? "正在思考..."
+            : "思考过程";
       return (
         <ChainOfThought
           key={`cot-${gi}`}
-          defaultOpen={isActive || hasContent}
-          autoOpen={isActive || hasAutoOpenTool}
+          defaultOpen={isActive || hasContent || hasErrorThinking}
+          autoOpen={isActive || hasAutoOpenTool || hasErrorThinking}
           autoCloseDelay={autoCloseDelay}
         >
           <ChainOfThoughtHeader>
-            {isActive ? (
+            {isActive && !hasErrorThinking ? (
               <Shimmer duration={1}>{activeLabel}</Shimmer>
             ) : (
-              <span>思考过程</span>
+              <span className={hasErrorThinking ? "text-destructive" : ""}>
+                {activeLabel}
+              </span>
             )}
           </ChainOfThoughtHeader>
           <ChainOfThoughtContent>
@@ -3399,25 +3663,67 @@ const MessageList = memo(function MessageList({
                   const thoughtKey = getThoughtTextKey(thoughtText);
                   if (thoughtText && thoughtKey !== lastRenderedThinkingKey) {
                     lastRenderedThinkingKey = thoughtKey;
-                    const thinkingLabel =
-                      thinkingRendering === "markdown" ? (
-                        renderCitationMessage(thoughtText, citations)
-                      ) : (
-                        <span className="whitespace-pre-wrap break-words">
-                          {thoughtText}
-                        </span>
-                      );
-                    rendered.push(
-                      <ChainOfThoughtStep
-                        key={`thinking-${gi}-${i}`}
-                        label={thinkingLabel}
-                        status={
-                          i === lastRunningIdx && isActive
-                            ? "active"
-                            : "complete"
+                    const segments = parseThoughtErrorSegments(thoughtText);
+                    const hasError = segments.some((s) => s.type === "error");
+                    if (hasError) {
+                      for (let si = 0; si < segments.length; si++) {
+                        const seg = segments[si];
+                        if (seg.type === "error") {
+                          rendered.push(
+                            <motion.div
+                              key={`error-wrapper-${gi}-${i}`}
+                              layout
+                              initial={{ opacity: 1, height: "auto" }}
+                              exit={{ opacity: 0, height: 0, scale: 0.95, filter: "blur(4px)" }}
+                              transition={{ duration: 0.4, ease: [0.4, 0, 0.2, 1] }}
+                            >
+                              <ErrorChainBlock
+                                errors={seg.value.errors}
+                                retryCount={seg.value.retryCount}
+                                maxRetries={seg.value.maxRetries}
+                                retrying={seg.value.retrying}
+                              />
+                            </motion.div>,
+                          );
+                        } else {
+                          rendered.push(
+                            <ChainOfThoughtStep
+                              key={`thinking-${gi}-${i}-${si}`}
+                              label={
+                                thinkingRendering === "markdown" ? (
+                                  renderCitationMessage(seg.value, citations)
+                                ) : (
+                                  <span className="whitespace-pre-wrap break-words">
+                                    {seg.value}
+                                  </span>
+                                )
+                              }
+                              status={i === lastRunningIdx && isActive ? "active" : "complete"}
+                            />,
+                          );
                         }
-                      />,
-                    );
+                      }
+                    } else {
+                      const thinkingLabel =
+                        thinkingRendering === "markdown" ? (
+                          renderCitationMessage(thoughtText, citations)
+                        ) : (
+                          <span className="whitespace-pre-wrap break-words">
+                            {thoughtText}
+                          </span>
+                        );
+                      rendered.push(
+                        <ChainOfThoughtStep
+                          key={`thinking-${gi}-${i}`}
+                          label={thinkingLabel}
+                          status={
+                            i === lastRunningIdx && isActive
+                              ? "active"
+                              : "complete"
+                          }
+                        />,
+                      );
+                    }
                   }
                   i++;
                 } else if (
@@ -3532,7 +3838,6 @@ const MessageList = memo(function MessageList({
                   );
                   i++;
                 } else if (
-                  block.type === "data" &&
                   block.dataType === "data-session-state"
                 ) {
                   rendered.push(
@@ -3545,7 +3850,7 @@ const MessageList = memo(function MessageList({
                   i++;
                 }
               }
-              return rendered;
+              return <AnimatePresence>{rendered}</AnimatePresence>;
             })()}
           </ChainOfThoughtContent>
         </ChainOfThought>
@@ -3586,7 +3891,13 @@ const MessageList = memo(function MessageList({
           (c) => c.toolCallId && msgToolCallIds.has(c.toolCallId),
         );
         return (
-          <Message key={msg.id || idx} from={msg.role} data-message-id={msg.id}>
+          <Message
+            key={msg.id || idx}
+            from={msg.role}
+            data-message-id={msg.id}
+            onMouseEnter={() => msg.id && setHoveredMsgId(msg.id)}
+            onMouseLeave={() => setHoveredMsgId(null)}
+          >
             <MessageContent>
               {msg.role === "assistant" &&
                 (msg.parts
@@ -3600,6 +3911,13 @@ const MessageList = memo(function MessageList({
                   })
                 : null}
             </MessageContent>
+            {msg.role === "user" && (
+              <AnimatePresence>
+                {hoveredMsgId === msg.id && (
+                  <UserMessageActions key="actions" msg={msg} onEditMessage={onEditMessage} />
+                )}
+              </AnimatePresence>
+            )}
             {msg.role === "assistant" &&
               msgCodeChanges.length > 0 &&
               !(isLastAssistant && isLoading) && (
@@ -3648,6 +3966,7 @@ const ChatStreamBody = memo(function ChatStreamBody({
   onCompletionAction,
   activeCompletionAction,
   canCompress,
+  onEditMessage,
   thinkingRendering = "text",
 }: {
   sessionId: string | null;
@@ -3679,6 +3998,7 @@ const ChatStreamBody = memo(function ChatStreamBody({
     action: CompletionActionKey;
   } | null;
   canCompress: boolean;
+  onEditMessage?: (content: string) => void;
   thinkingRendering?: "text" | "markdown";
 }) {
   const [compressedMessageIds, setCompressedMessageIds] = useState<Set<string>>(
@@ -3728,6 +4048,7 @@ const ChatStreamBody = memo(function ChatStreamBody({
         activeCompletionAction={activeCompletionAction}
         compressedMessageIds={compressedMessageIds}
         canCompress={canCompress}
+        onEditMessage={onEditMessage}
         thinkingRendering={thinkingRendering}
       />
       <PersonaRail
@@ -4300,6 +4621,7 @@ export function ChatPanel({
   activeCompletionAction,
   elementAttachments = [],
   onRemoveElementAttachment,
+  onEditMessage,
   thinkingRendering = "text",
 }: ChatPanelProps) {
   const planSteps = contextData?.planSteps ?? [];
@@ -4317,6 +4639,14 @@ export function ChatPanel({
     setIsHandling(true);
     onSendMessage();
   }, [isHandling, onSendMessage]);
+
+  const handleEditMessage = useCallback(
+    (content: string) => {
+      onInputChange(content);
+      composerInputRef.current?.focus();
+    },
+    [onInputChange],
+  );
 
   useEffect(() => {
     if (!isHandling || isLoading) return;
@@ -5095,6 +5425,7 @@ export function ChatPanel({
                     onCompletionAction={onCompletionAction}
                     activeCompletionAction={activeCompletionAction}
                     canCompress={canCompress}
+                    onEditMessage={onEditMessage}
                     thinkingRendering={thinkingRendering}
                   />
                 </ConversationContent>

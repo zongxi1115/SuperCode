@@ -19,6 +19,7 @@ from coding_agent.tools import (
     DEFAULT_IGNORED_DIR_NAMES,
     READ_FILE_MAX_OUTPUT_CHARS,
     _build_powershell_utf8_command,
+    _hidden_windows_process_kwargs,
     _kill_process_tree,
 )
 
@@ -772,6 +773,7 @@ class DeployExecuteTool(DeployBaseTool):
             text=True,
             encoding="utf-8",
             errors="replace",
+            **_hidden_windows_process_kwargs(),
         )
         try:
             stdout, stderr = process.communicate(timeout=timeout)

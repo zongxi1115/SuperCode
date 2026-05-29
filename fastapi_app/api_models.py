@@ -184,12 +184,20 @@ class ModelConfigPayload(BaseModel):
     providers: list[UIModelProviderPayload] = Field(default_factory=list)
 
 
+class EmbeddingSettingsPayload(BaseModel):
+    enabled: bool = False
+    baseUrl: str = ""
+    apiKey: str = ""
+    model: str = ""
+
+
 class SettingsPayload(BaseModel):
     autoApprove: bool = False
     thinkingRendering: Literal["text", "markdown"] = "text"
     bodyFontFamily: str = 'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
     bodyFontSize: int = 14
     bodyLineHeight: int = 22
+    embedding: EmbeddingSettingsPayload = Field(default_factory=EmbeddingSettingsPayload)
 
 
 class SessionHistoryItem(BaseModel):

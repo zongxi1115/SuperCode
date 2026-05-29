@@ -5,6 +5,9 @@ __pycache__/
 examples/demo_workspace/
 !examples/demo_workspace/plan.md
 node_modules/
+src-tauri/target/
 .agents
 skills-lock.json
 .supercode/
+plans.md
+src-tauri/binaries

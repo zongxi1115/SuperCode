@@ -11,6 +11,7 @@ import type {
   TerminalSocketClientMessage,
   TerminalSocketServerMessage,
 } from "@/lib/app-types";
+import { apiWebSocketUrl } from "@/lib/api-client";
 import { AnimatePresence, motion } from "motion/react";
 import {
   ChevronDown,
@@ -86,10 +87,10 @@ const XTERM_THEME = {
 };
 
 function buildTerminalWebSocketUrl(sessionId: string, terminalId?: string | null) {
-  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  const base = `${protocol}//localhost:3001/api/sessions/${sessionId}/terminal/ws`;
+  const base = apiWebSocketUrl(`/api/sessions/${sessionId}/terminal/ws`);
   if (terminalId) {
-    return `${base}?terminal_id=${encodeURIComponent(terminalId)}`;
+    const separator = base.includes("?") ? "&" : "?";
+    return `${base}${separator}terminal_id=${encodeURIComponent(terminalId)}`;
   }
   return base;
 }

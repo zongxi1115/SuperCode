@@ -1,6 +1,9 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
+import { initializeBackendBaseUrl } from "@/lib/api-client";
 import "./index.css";
 import Router from "./router";
 
-ReactDOM.createRoot(document.getElementById("root")!).render(<Router />);
+initializeBackendBaseUrl().finally(() => {
+  ReactDOM.createRoot(document.getElementById("root")!).render(<Router />);
+});

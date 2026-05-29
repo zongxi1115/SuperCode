@@ -10,8 +10,9 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { getFileLanguage } from '@/lib/app-utils';
+import { apiFetch } from '@/lib/api-client';
 import type { FileTreeNode } from '@/lib/app-types';
-import { CircleAlert, FileCode, FolderTree, PanelsTopLeft, Sparkles, SquareTerminal } from 'lucide-react';
+import { CircleAlert, FileCode, FolderTree, Maximize2, Minimize2, PanelsTopLeft, Sparkles, SquareTerminal } from 'lucide-react';
 import type { editor as MonacoEditor } from 'monaco-editor';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
@@ -80,6 +81,7 @@ export function EditorPanel({
   const [isFileTreeResizing, setIsFileTreeResizing] = useState(false);
   const [editorLaunchError, setEditorLaunchError] = useState<string | null>(null);
   const [planEditContent, setPlanEditContent] = useState('');
+  const [isEditorFullscreen, setIsEditorFullscreen] = useState(false);
   const monacoRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null);
   const isEditingRef = useRef(false);
   const editContentRef = useRef('');
@@ -150,7 +152,7 @@ export function EditorPanel({
           session_id: sessionId,
           path: selectedFilePath,
         });
-        const res = await fetch(`http://localhost:3001/api/files?${query.toString()}`, {
+        const res = await apiFetch(`/api/files?${query.toString()}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ content: editContentRef.current }),
@@ -216,7 +218,7 @@ export function EditorPanel({
     if (!sessionId || !selectedFilePath) return;
 
     try {
-      const res = await fetch('http://localhost:3001/api/files/open', {
+      const res = await apiFetch('/api/files/open', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -304,18 +306,29 @@ export function EditorPanel({
                         <span className="truncate">{selectedFilePath || '未选择文件'}</span>
                       </div>
 
-                      <EditorTools
-                        canEdit={hasSelectedFile}
-                        isEditing={isEditing}
-                        isSaving={isSaving}
-                        isWebPreviewOpen={isWebPreviewOpen}
-                        editorTargets={EDITORS}
-                        onStartEdit={handleStartEdit}
-                        onCancelEdit={handleCancelEdit}
-                        onSave={() => void handleSave()}
-                        onOpenInEditor={(command) => void openInEditor(command)}
-                        onToggleWebPreview={onToggleWebPreview}
-                      />
+                      <div className="flex items-center gap-1">
+                        <EditorTools
+                          canEdit={hasSelectedFile}
+                          isEditing={isEditing}
+                          isSaving={isSaving}
+                          isWebPreviewOpen={isWebPreviewOpen}
+                          editorTargets={EDITORS}
+                          onStartEdit={handleStartEdit}
+                          onCancelEdit={handleCancelEdit}
+                          onSave={() => void handleSave()}
+                          onOpenInEditor={(command) => void openInEditor(command)}
+                          onToggleWebPreview={onToggleWebPreview}
+                        />
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7"
+                          onClick={() => setIsEditorFullscreen((prev) => !prev)}
+                          title={isEditorFullscreen ? '退出全屏' : '全屏编辑'}
+                        >
+                          {isEditorFullscreen ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
+                        </Button>
+                      </div>
                     </div>
 
                     <div className="flex-1 min-w-0 min-h-0 overflow-hidden">
@@ -427,6 +440,109 @@ export function EditorPanel({
                     onUrlChange={onWebPreviewUrlChange}
                     onSelectElement={onSelectPreviewElement}
                   />
+
+                  {isEditorFullscreen && (
+                    <div className="fixed inset-0 z-50 flex flex-col bg-background">
+                      <div className="flex items-center justify-between border-b bg-muted/30 px-4 py-2 shrink-0">
+                        <div className="flex min-w-0 items-center gap-2 text-muted-foreground font-mono text-xs">
+                          <FileCode className="w-3.5 h-3.5 shrink-0" />
+                          <span className="truncate">{selectedFilePath || '未选择文件'}</span>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <EditorTools
+                            canEdit={hasSelectedFile}
+                            isEditing={isEditing}
+                            isSaving={isSaving}
+                            isWebPreviewOpen={isWebPreviewOpen}
+                            editorTargets={EDITORS}
+                            onStartEdit={handleStartEdit}
+                            onCancelEdit={handleCancelEdit}
+                            onSave={() => void handleSave()}
+                            onOpenInEditor={(command) => void openInEditor(command)}
+                            onToggleWebPreview={onToggleWebPreview}
+                          />
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7"
+                            onClick={() => setIsEditorFullscreen(false)}
+                            title="退出全屏"
+                          >
+                            <Minimize2 className="h-3.5 w-3.5" />
+                          </Button>
+                        </div>
+                      </div>
+                      <div className="flex flex-1 min-h-0 overflow-hidden">
+                        <div className="flex flex-1 min-w-0 min-h-0 overflow-hidden">
+                          <Editor
+                            height="100%"
+                            language={getFileLanguage(selectedFilePath)}
+                            value={isEditing ? editContent : selectedFileContent}
+                            onChange={isEditing ? ((value) => setEditContent(value ?? '')) : undefined}
+                            theme={isDarkMode ? "vs-dark" : "vs"}
+                            path={`fullscreen-${selectedFilePath}`}
+                            options={{
+                              readOnly: !isEditing,
+                              minimap: { enabled: false },
+                              fontSize: 13,
+                              lineNumbers: 'on',
+                              scrollBeyondLastLine: false,
+                              automaticLayout: true,
+                              padding: { top: 16 },
+                              renderLineHighlight: isEditing ? 'line' : 'none',
+                              overviewRulerBorder: false,
+                              hideCursorInOverviewRuler: true,
+                              overviewRulerLanes: 0,
+                              scrollbar: { verticalScrollbarSize: 8, horizontalScrollbarSize: 8 },
+                              domReadOnly: !isEditing,
+                            }}
+                          />
+                        </div>
+
+                        {shouldShowFileTree && (
+                          <>
+                            <ResizableHandle
+                              side="right"
+                              onResize={handleFileTreeResize}
+                              onResizeStateChange={setIsFileTreeResizing}
+                              className="border-l border-border/60 bg-background/40 hover:bg-primary/15"
+                            />
+                            <div
+                              style={{
+                                width: fileTreeWidth,
+                                transition: isFileTreeResizing ? 'none' : 'width 0.2s cubic-bezier(0.25, 0.1, 0.25, 1)',
+                              }}
+                              className="flex shrink-0 flex-col overflow-hidden border-l bg-muted/10"
+                            >
+                              <div className="flex items-center border-b px-3 py-2">
+                                <span className="flex-1 text-xs font-semibold text-muted-foreground">项目结构</span>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-7 w-7"
+                                  onClick={() => setIsFileTreeVisible(false)}
+                                  title="收起文件树"
+                                >
+                                  <FolderTree className="h-3.5 w-3.5" />
+                                </Button>
+                              </div>
+                              <div className="flex-1 overflow-auto">
+                                <div className="p-2">
+                                  {fileTree.length > 0 ? (
+                                    <FileTree selectedPath={selectedFilePath} onSelect={onLoadFile}>
+                                      {renderFileTreeNodes(fileTree)}
+                                    </FileTree>
+                                  ) : (
+                                    <div className="py-4 text-center text-xs text-muted-foreground">暂无文件结构</div>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  )}
                 </>
               )}
             </div>
