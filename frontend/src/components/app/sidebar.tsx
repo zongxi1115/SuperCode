@@ -51,7 +51,6 @@ export function Sidebar({
   selectedWorkspace,
   selectedBaseWorkspace,
   backendMode,
-  startupError,
   isGitPanelOpen,
   onGitPanelToggle,
   onNewSession,
@@ -143,11 +142,6 @@ export function Sidebar({
                 <FileCode className="w-3 h-3 shrink-0" />
                 <span className="truncate">{backendMode === 'agent' ? 'Agent' : 'Demo'} · {selectedWorkspace}</span>
               </div>
-              {startupError && (
-                <div className="mt-1.5 rounded-md border border-amber-300 bg-amber-50 px-2 py-1 text-[10px] text-amber-900">
-                  {startupError}
-                </div>
-              )}
             </div>
 
             <ScrollArea className="flex-1 px-2 py-1">

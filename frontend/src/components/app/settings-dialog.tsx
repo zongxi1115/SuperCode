@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { type DragEvent, useCallback, useEffect, useState } from 'react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -23,6 +23,7 @@ import {
   Eye,
   EyeOff,
   Globe,
+  GripVertical,
   Key,
   List,
   Lock,
@@ -155,6 +156,7 @@ export function SettingsDialog({
   const [visibleKeys, setVisibleKeys] = useState<Set<string>>(new Set());
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [selectedProviderIndex, setSelectedProviderIndex] = useState(0);
+  const [draggingProviderIndex, setDraggingProviderIndex] = useState<number | null>(null);
   const activeTextSize =
     BODY_TEXT_SIZE_OPTIONS.find(
       (option) =>
@@ -222,6 +224,40 @@ export function SettingsDialog({
       return prev;
     });
     setDeleteConfirmId(null);
+  };
+
+  const handleProviderDragStart = (event: DragEvent<HTMLButtonElement>, index: number) => {
+    setDraggingProviderIndex(index);
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', String(index));
+  };
+
+  const handleProviderDragOver = (event: DragEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+  };
+
+  const handleProviderDrop = (event: DragEvent<HTMLButtonElement>, targetIndex: number) => {
+    event.preventDefault();
+    const sourceIndex = Number(event.dataTransfer.getData('text/plain'));
+    setDraggingProviderIndex(null);
+    if (!Number.isInteger(sourceIndex) || sourceIndex === targetIndex) return;
+
+    setDraftProviders((prev) => {
+      if (sourceIndex < 0 || sourceIndex >= prev.length || targetIndex < 0 || targetIndex >= prev.length) {
+        return prev;
+      }
+      const next = [...prev];
+      const [moved] = next.splice(sourceIndex, 1);
+      next.splice(targetIndex, 0, moved);
+      return next;
+    });
+    setSelectedProviderIndex((prev) => {
+      if (prev === sourceIndex) return targetIndex;
+      if (sourceIndex < prev && prev <= targetIndex) return prev - 1;
+      if (targetIndex <= prev && prev < sourceIndex) return prev + 1;
+      return prev;
+    });
   };
 
   const handleDiscoverModels = async (provider: EditableProvider, index: number) => {
@@ -457,13 +493,20 @@ export function SettingsDialog({
                     return (
                       <button
                         key={key}
+                        type="button"
+                        draggable
+                        onDragStart={(event) => handleProviderDragStart(event, index)}
+                        onDragOver={handleProviderDragOver}
+                        onDrop={(event) => handleProviderDrop(event, index)}
+                        onDragEnd={() => setDraggingProviderIndex(null)}
                         onClick={() => setSelectedProviderIndex(index)}
-                        className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors ${
+                        className={`flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-xs transition-colors ${
                           isSelected
                             ? 'bg-primary/10 font-medium text-primary'
                             : 'text-muted-foreground hover:bg-muted hover:text-foreground'
-                        }`}
+                        } ${draggingProviderIndex === index ? 'opacity-50 ring-1 ring-primary/30' : ''}`}
                       >
+                        <GripVertical className="size-3 shrink-0 cursor-grab text-muted-foreground/70 active:cursor-grabbing" />
                         <Globe className="size-3 shrink-0" />
                         <span className="truncate">{provider.name || `供应商 ${index + 1}`}</span>
                         <Badge variant="secondary" className="ml-auto shrink-0 px-1 py-0 text-[10px]">
