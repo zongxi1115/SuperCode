@@ -7,6 +7,9 @@ declare global {
       core?: {
         invoke<T>(command: string, args?: Record<string, unknown>): Promise<T>;
       };
+      shell?: {
+        open(url: string): Promise<void>;
+      };
     };
   }
 }
@@ -71,4 +74,14 @@ export function apiFetch(input: string | URL | Request, init?: RequestInit) {
     return fetch(apiUrl(input.toString()), init);
   }
   return fetch(input, init);
+}
+
+export async function openExternalUrl(url: string) {
+  if (window.__TAURI__?.shell) {
+    try {
+      await window.__TAURI__.shell.open(url);
+      return;
+    } catch {}
+  }
+  window.open(url, '_blank', 'noopener,noreferrer');
 }

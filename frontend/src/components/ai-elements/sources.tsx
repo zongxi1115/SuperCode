@@ -1,6 +1,7 @@
 "use client";
 
 import { cn } from "@/lib/utils";
+import { openExternalUrl } from "@/lib/api-client";
 import { GlobeIcon } from "lucide-react";
 import { motion } from "motion/react";
 import type { ComponentProps, ReactNode } from "react";
@@ -88,8 +89,7 @@ export const SourceTag = ({
   return (
     <a
       href={href}
-      target="_blank"
-      rel="noreferrer"
+      onClick={(e) => { e.preventDefault(); openExternalUrl(href); }}
       className={cn(
         "inline-flex items-center gap-1.5 rounded-md bg-secondary px-2 py-0.5 font-normal text-xs text-secondary-foreground max-w-[220px] truncate no-underline hover:bg-secondary/80 transition-colors",
         className

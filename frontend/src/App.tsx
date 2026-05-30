@@ -54,7 +54,7 @@ import {
   parseStreamingPlanDraft,
   resolvePlanDraftTitle,
 } from '@/lib/plan-draft';
-import { apiFetch, apiUrl } from '@/lib/api-client';
+import { apiFetch, apiUrl, openExternalUrl } from '@/lib/api-client';
 
 import { Info, Minus, Moon, PanelRightOpen, PanelRightClose, Settings2, Square, Sun, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -66,6 +66,93 @@ const DEFAULT_WEB_PREVIEW_URL = 'http://localhost:8888';
 const CONTEXT_COMPRESSION_USAGE_THRESHOLD = 0.8;
 const STREAM_RETRY_LIMIT = 10;
 const RETRYABLE_STREAM_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
+
+type UrlAppState = {
+  sessionId: string | null;
+  activePlugin: string | null;
+  filePath: string | null;
+  isEditorOpen: boolean;
+  isTerminalOpen: boolean;
+  isWebPreviewOpen: boolean;
+  isGitPanelOpen: boolean;
+  isContextOpen: boolean;
+};
+
+const DEFAULT_URL_APP_STATE: UrlAppState = {
+  sessionId: null,
+  activePlugin: null,
+  filePath: null,
+  isEditorOpen: false,
+  isTerminalOpen: false,
+  isWebPreviewOpen: false,
+  isGitPanelOpen: false,
+  isContextOpen: false,
+};
+
+function readBooleanParam(searchParams: URLSearchParams, key: string) {
+  const value = searchParams.get(key);
+  return value === '1' || value === 'true';
+}
+
+function getUrlAppState(): UrlAppState {
+  if (typeof window === 'undefined') {
+    return DEFAULT_URL_APP_STATE;
+  }
+
+  const pathname = window.location.pathname.replace(/\/+$/, '') || '/';
+  const searchParams = new URLSearchParams(window.location.search);
+  const legacyHash = window.location.hash.slice(1);
+  const sessionMatch = pathname.match(/^\/sessions\/([^/]+)(?:\/([^/]+))?$/);
+  const pluginFromPath =
+    sessionMatch?.[2] === 'kanban' || pathname === '/kanban' ? 'kanban' : null;
+  const pluginFromHash = legacyHash.startsWith('/plugin/')
+    ? legacyHash.replace('/plugin/', '')
+    : null;
+  const filePath = searchParams.get('file');
+
+  return {
+    sessionId: sessionMatch?.[1] ? decodeURIComponent(sessionMatch[1]) : null,
+    activePlugin: pluginFromPath ?? pluginFromHash,
+    filePath: filePath && filePath.trim() ? filePath : null,
+    isEditorOpen: searchParams.get('panel') === 'editor' || Boolean(filePath),
+    isTerminalOpen: readBooleanParam(searchParams, 'terminal'),
+    isWebPreviewOpen: readBooleanParam(searchParams, 'preview'),
+    isGitPanelOpen: readBooleanParam(searchParams, 'git'),
+    isContextOpen: readBooleanParam(searchParams, 'context'),
+  };
+}
+
+function buildUrlForAppState(state: UrlAppState) {
+  const searchParams = new URLSearchParams();
+  const pathBase = state.sessionId
+    ? `/sessions/${encodeURIComponent(state.sessionId)}`
+    : '/app';
+  const pathname = state.activePlugin === 'kanban'
+    ? state.sessionId ? `${pathBase}/kanban` : '/kanban'
+    : pathBase;
+
+  if (state.isEditorOpen) {
+    searchParams.set('panel', 'editor');
+  }
+  if (state.filePath) {
+    searchParams.set('file', state.filePath);
+  }
+  if (state.isTerminalOpen) {
+    searchParams.set('terminal', '1');
+  }
+  if (state.isWebPreviewOpen) {
+    searchParams.set('preview', '1');
+  }
+  if (state.isGitPanelOpen) {
+    searchParams.set('git', '1');
+  }
+  if (state.isContextOpen) {
+    searchParams.set('context', '1');
+  }
+
+  const query = searchParams.toString();
+  return `${pathname}${query ? `?${query}` : ''}`;
+}
 
 function getPreviewUrlFromToolPayload(payload: { preview_url?: unknown; output?: unknown }) {
   if (typeof payload.preview_url === 'string' && payload.preview_url.trim()) {
@@ -417,12 +504,13 @@ async function copyTextToClipboard(text: string) {
 }
 
 export default function App() {
+  const [initialUrlState] = useState(getUrlAppState);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [codeChanges, setCodeChanges] = useState<CodeChangeRecord[]>([]);
   const [input, setInput] = useState('');
   const [fileTree, setFileTree] = useState<FileTreeNode[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
-  const [activePlugin, setActivePlugin] = useState<string | null>(null);
+  const [activePlugin, setActivePlugin] = useState<string | null>(initialUrlState.activePlugin);
   const [terminalCwd, setTerminalCwd] = useState('');
   const [terminalBackend, setTerminalBackend] = useState('subprocess');
   const [managedProcesses, setManagedProcesses] = useState<ManagedProcessPayload[]>([]);
@@ -441,15 +529,16 @@ export default function App() {
   const [isSessionBooting, setIsSessionBooting] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
-  const [isRightPanelCollapsed, setIsRightPanelCollapsed] = useState(true);
+  const [isRightPanelCollapsed, setIsRightPanelCollapsed] = useState(!initialUrlState.isEditorOpen);
   const [sidebarWidth, setSidebarWidth] = useState(280);
   const [isSidebarResizing, setIsSidebarResizing] = useState(false);
-  const [isGitPanelOpen, setIsGitPanelOpen] = useState(false);  const [isContextOpen, setIsContextOpen] = useState(false);
+  const [isGitPanelOpen, setIsGitPanelOpen] = useState(initialUrlState.isGitPanelOpen);
+  const [isContextOpen, setIsContextOpen] = useState(initialUrlState.isContextOpen);
   const [isContextLoading, setIsContextLoading] = useState(false);
   const [sessionContext, setSessionContext] = useState<SessionContextPayload | null>(null);
-  const [isTerminalOpen, setIsTerminalOpen] = useState(false);
-  const [hasTerminalBeenOpened, setHasTerminalBeenOpened] = useState(false);
-  const [isWebPreviewOpen, setIsWebPreviewOpen] = useState(false);
+  const [isTerminalOpen, setIsTerminalOpen] = useState(initialUrlState.isTerminalOpen);
+  const [hasTerminalBeenOpened, setHasTerminalBeenOpened] = useState(initialUrlState.isTerminalOpen);
+  const [isWebPreviewOpen, setIsWebPreviewOpen] = useState(initialUrlState.isWebPreviewOpen);
   const [webPreviewUrl, setWebPreviewUrl] = useState(DEFAULT_WEB_PREVIEW_URL);
   const [elementAttachments, setElementAttachments] = useState<{ id: string; selector: string; html: string; sourceUrl?: string }[]>([]);
   const [chatPanelWidth, setChatPanelWidth] = useState(920);
@@ -503,6 +592,10 @@ export default function App() {
   const activeRequestRef = useRef<AbortController | null>(null);
   const activeStreamSessionIdRef = useRef<string | null>(null);
   const currentSessionIdRef = useRef<string | null>(null);
+  const isApplyingUrlStateRef = useRef(false);
+  const shouldDeferInitialUrlSyncRef = useRef(
+    Boolean(initialUrlState.sessionId || initialUrlState.filePath || initialUrlState.isContextOpen),
+  );
 
   useEffect(() => {
     currentSessionIdRef.current = sessionId;
@@ -520,33 +613,37 @@ export default function App() {
   }, [appSettings.bodyFontFamily, appSettings.bodyFontSize, appSettings.bodyLineHeight]);
 
   useEffect(() => {
-    const handleHashChange = () => {
-      const hash = window.location.hash.slice(1);
-      if (hash.startsWith('/plugin/')) {
-        setActivePlugin(hash.replace('/plugin/', ''));
-      } else {
-        setActivePlugin(null);
-      }
-    };
-    
-    handleHashChange();
-    window.addEventListener('hashchange', handleHashChange);
-    return () => window.removeEventListener('hashchange', handleHashChange);
-  }, []);
-
-  useEffect(() => {
-    const currentHash = window.location.hash.slice(1);
-    if (activePlugin) {
-      const targetHash = `/plugin/${activePlugin}`;
-      if (currentHash !== targetHash) {
-        window.location.hash = targetHash;
-      }
-    } else {
-      if (currentHash.startsWith('/plugin/')) {
-        window.history.pushState(null, '', window.location.pathname + window.location.search);
-      }
+    if (shouldDeferInitialUrlSyncRef.current) {
+      return;
     }
-  }, [activePlugin]);
+    if (isApplyingUrlStateRef.current) {
+      return;
+    }
+
+    const nextUrl = buildUrlForAppState({
+      sessionId,
+      activePlugin,
+      filePath: !isRightPanelCollapsed && selectedFilePath ? selectedFilePath : null,
+      isEditorOpen: !isRightPanelCollapsed,
+      isTerminalOpen,
+      isWebPreviewOpen,
+      isGitPanelOpen,
+      isContextOpen,
+    });
+    const currentUrl = `${window.location.pathname}${window.location.search}`;
+    if (currentUrl !== nextUrl || window.location.hash) {
+      window.history.replaceState(null, '', nextUrl);
+    }
+  }, [
+    activePlugin,
+    isContextOpen,
+    isGitPanelOpen,
+    isRightPanelCollapsed,
+    isTerminalOpen,
+    isWebPreviewOpen,
+    selectedFilePath,
+    sessionId,
+  ]);
 
   const openPlanDraftPanel = useCallback((title: string, markdown: string) => {
     setPlanData({ title, markdown });
@@ -738,7 +835,7 @@ export default function App() {
 
   const [shouldRestoreSession, setShouldRestoreSession] = useState(() => {
     const lastSession = getLastSession();
-    return !!(lastSession && lastSession.workspace);
+    return !initialUrlState.sessionId && !!(lastSession && lastSession.workspace);
   });
 
   const [initialWorkspace] = useState(() => {
@@ -748,7 +845,7 @@ export default function App() {
 
   const [showWorkspacePicker, setShowWorkspacePicker] = useState(() => {
     const lastSession = getLastSession();
-    return !(lastSession && lastSession.workspace);
+    return !initialUrlState.sessionId && !(lastSession && lastSession.workspace);
   });
 
   const [customWorkspace, setCustomWorkspace] = useState(() => {
@@ -1096,12 +1193,10 @@ export default function App() {
     }
   };
 
-  const loadFile = async (path: string) => {
-    if (!sessionId) return;
-
+  const loadFileForSession = useCallback(async (targetSessionId: string, path: string) => {
     setSelectedFilePath(path);
     try {
-      const query = new URLSearchParams({ session_id: sessionId, path });
+      const query = new URLSearchParams({ session_id: targetSessionId, path });
       const res = await apiFetch(`/api/files?${query.toString()}`);
       const data = await res.json();
       setSelectedFilePath(data.selectedFilePath ?? path);
@@ -1109,7 +1204,13 @@ export default function App() {
     } catch (error) {
       console.error(error);
     }
-  };
+  }, []);
+
+  const loadFile = useCallback(async (path: string) => {
+    if (!sessionId) return;
+
+    await loadFileForSession(sessionId, path);
+  }, [loadFileForSession, sessionId]);
 
   const saveFile = useCallback(
     async (path: string, content: string) => {
@@ -1313,6 +1414,68 @@ export default function App() {
     },
     [applySessionPayload, fetchSessionSnapshot, sessionId]
   );
+
+  const applyUrlState = useCallback(
+    async (nextState: UrlAppState) => {
+      isApplyingUrlStateRef.current = true;
+      setActivePlugin(nextState.activePlugin);
+      setIsRightPanelCollapsed(!nextState.isEditorOpen);
+      setIsGitPanelOpen(nextState.isGitPanelOpen);
+      setIsContextOpen(nextState.isContextOpen);
+      setIsTerminalOpen(nextState.isTerminalOpen);
+      setHasTerminalBeenOpened((prev) => prev || nextState.isTerminalOpen);
+      setIsWebPreviewOpen(nextState.isWebPreviewOpen);
+
+      try {
+        if (nextState.sessionId && nextState.sessionId !== currentSessionIdRef.current) {
+          await restoreSession(nextState.sessionId);
+        }
+        if (nextState.filePath) {
+          const targetSessionId = nextState.sessionId ?? currentSessionIdRef.current;
+          if (targetSessionId) {
+            await loadFileForSession(targetSessionId, nextState.filePath);
+          }
+        } else if (nextState.isEditorOpen) {
+          setSelectedFilePath('');
+          setSelectedFileContent('');
+        }
+        if (nextState.isContextOpen) {
+          void loadSessionContext({ silent: true, targetSessionId: nextState.sessionId ?? undefined });
+        }
+      } finally {
+        window.setTimeout(() => {
+          isApplyingUrlStateRef.current = false;
+          shouldDeferInitialUrlSyncRef.current = false;
+        }, 0);
+      }
+    },
+    [loadFileForSession, loadSessionContext, restoreSession],
+  );
+
+  const hasAppliedInitialUrlStateRef = useRef(false);
+
+  useEffect(() => {
+    if (hasAppliedInitialUrlStateRef.current) {
+      return;
+    }
+    if (!initialUrlState.sessionId && !initialUrlState.filePath && !initialUrlState.isContextOpen) {
+      return;
+    }
+
+    hasAppliedInitialUrlStateRef.current = true;
+    window.setTimeout(() => {
+      void applyUrlState(initialUrlState);
+    }, 0);
+  }, [applyUrlState, initialUrlState]);
+
+  useEffect(() => {
+    const handlePopState = () => {
+      void applyUrlState(getUrlAppState());
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [applyUrlState]);
 
   const handleModelChange = useCallback(
     async (modelId: string) => {
@@ -2990,7 +3153,7 @@ export default function App() {
           onCustomWorkspaceChange={setCustomWorkspace}
           onSelectWorkspace={(path) => {
             setSelectedWorkspace(path);
-            setCustomWorkspace('');
+            setCustomWorkspace(path);
           }}
           onCreateSession={createSession}
           onOpenRecentProject={handleOpenRecentProject}
@@ -2999,7 +3162,7 @@ export default function App() {
       ) : (
     <div className="flex flex-col h-screen bg-background text-foreground font-sans w-full overflow-hidden text-[var(--app-body-font-size)] leading-[var(--app-body-line-height)]">
       <header
-        className="flex items-center h-10 px-3 border-b bg-muted/30 flex-shrink-0 gap-2"
+        className="relative flex items-center h-10 px-3 border-b bg-muted/30 flex-shrink-0 gap-2"
         {...(window.__TAURI__ ? { 'data-tauri-drag-region': '' } : {})}
       >
         <div className="flex items-center gap-2 select-none">
@@ -3010,8 +3173,8 @@ export default function App() {
           </svg>
           <span className="text-sm font-bold tracking-tight">Super Code</span>
         </div>
-        <div className="flex-1" />
-        <div className="flex max-w-[420px] items-center gap-2 text-[11px] text-muted-foreground">
+        <div className="flex-1 min-w-0" />
+        <div className="absolute left-1/2 -translate-x-1/2 flex max-w-[420px] items-center gap-2 text-[11px] text-muted-foreground">
           {currentSessionExecutionMode === 'worktree' ? (
             <span className="shrink-0 rounded border border-primary/20 bg-primary/10 px-1.5 py-0.5 text-primary">
               Worktree{currentWorktreeBranch ? ` · ${currentWorktreeBranch.replace('supercode/session-', '')}` : ''}
@@ -3404,8 +3567,7 @@ export default function App() {
             <p>开源地址：
               <a
                 href="https://github.com/zongxi1115/SuperCode"
-                target="_blank"
-                rel="noopener noreferrer"
+                onClick={(e) => { e.preventDefault(); openExternalUrl('https://github.com/zongxi1115/SuperCode'); }}
                 className="text-primary hover:underline"
               >
                 https://github.com/zongxi1115/SuperCode

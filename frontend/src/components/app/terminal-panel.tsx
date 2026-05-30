@@ -11,7 +11,7 @@ import type {
   TerminalSocketClientMessage,
   TerminalSocketServerMessage,
 } from "@/lib/app-types";
-import { apiWebSocketUrl } from "@/lib/api-client";
+import { apiWebSocketUrl, openExternalUrl } from "@/lib/api-client";
 import { AnimatePresence, motion } from "motion/react";
 import {
   ChevronDown,
@@ -119,7 +119,7 @@ function createXtermInstance(): { terminal: Terminal; fitAddon: FitAddon } {
   const fitAddon = new FitAddon();
   const webLinksAddon = new WebLinksAddon((event, uri) => {
     event.preventDefault();
-    window.open(uri, "_blank", "noopener,noreferrer");
+    openExternalUrl(uri);
   });
   terminal.loadAddon(fitAddon);
   terminal.loadAddon(webLinksAddon);

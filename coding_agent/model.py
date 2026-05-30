@@ -67,6 +67,7 @@ class CodingPromptModel(OpenAICompatibleModel):
                 "11. 当回复内容引用了 search_web 或 fetch_url_content 返回的来源时，必须在引用处使用 [[url]] 标注来源，url 填写工具返回的原始链接。例如：「该 API 支持流式响应[[https://docs.example.com/streaming]]」。不要对未经过工具验证的信息使用此标注。",
                 "12. 你会在上下文里看到 [技能目录]，必要时应主动使用其中相关 skill 的描述与约束，不要等用户先显式 @ skill。",
                 "13. 当用户明确表达可长期复用的偏好、工作流约束、交互风格或项目约定时，调用 remember_preference 记录；不要记录普通任务过程或临时事实。",
+                "14. 当命令不存在、运行时/SDK/系统包缺失、PATH 未配置，或需要用 winget 搜索/安装系统包时，先调用 get_docs，参数 type=environment_setup，读取集中流程文档后再给用户渐进式提示。安装会改变用户机器环境，除非用户已明确要求执行，否则先展示将执行的命令并等待确认。",
             ]
         else:
             protocol_lines = [
@@ -95,6 +96,7 @@ class CodingPromptModel(OpenAICompatibleModel):
                 "11. 已成功完成的工具调用会出现在内部工具调用记录里，不要重复同一工具调用；刚刚 write_file 创建的新文件内容以调用参数为准，不要立刻 read_file 回读。",
                 "12. 你会在上下文里看到 [技能目录]，必要时应主动使用其中相关 skill 的描述与约束，不要等用户先显式 @ skill。",
                 "13. 当用户明确表达可长期复用的偏好、工作流约束、交互风格或项目约定时，调用 remember_preference 记录；不要记录普通任务过程或临时事实。",
+                "14. 当命令不存在、运行时/SDK/系统包缺失、PATH 未配置，或需要用 winget 搜索/安装系统包时，先调用 get_docs，参数 type=environment_setup，读取集中流程文档后再给用户渐进式提示。安装会改变用户机器环境，除非用户已明确要求执行，否则先展示将执行的命令并等待确认。",
             ]
 
         return "\n\n".join(

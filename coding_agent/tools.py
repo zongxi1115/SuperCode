@@ -1182,6 +1182,73 @@ class RememberPreferenceTool(CodingBaseTool):
         }
 
 
+class GetDocsTool(CodingBaseTool):
+    """返回内置流程文档。"""
+
+    name = "get_docs"
+    description = (
+        "按文档类型获取内置教程/流程文档。"
+        "当前用于用户缺少本机环境、命令、SDK、系统包或需要 winget 搜索安装包等场景。"
+        "参数：type 必填，必须是枚举值。"
+    )
+    parameters_schema = {
+        "type": "object",
+        "properties": {
+            "type": {
+                "type": "string",
+                "enum": ["environment_setup"],
+                "description": "文档类型。environment_setup 表示缺少环境/命令/SDK/系统包时的集中处理流程。",
+            },
+        },
+        "required": ["type"],
+        "additionalProperties": False,
+    }
+
+    def run(
+        self, arguments: dict[str, object], context: ToolContext
+    ) -> dict[str, object]:
+        doc_type = str(arguments.get("type") or "").strip()
+        if doc_type != "environment_setup":
+            raise ValueError("未知文档类型。可选值：environment_setup。")
+
+        return {
+            "type": "environment_setup",
+            "title": "用户缺少环境时的渐进式处理流程",
+            "content": "\n".join(
+                [
+                    "适用场景：用户机器缺少命令、运行时、SDK、系统包，命令未加入 PATH，或当前任务需要先找到并安装本机依赖。",
+                    "",
+                    "核心原则：少量、分层、可执行。先告诉用户当前卡在哪里，再只暴露下一步必要操作；不要一开始把安装、配置、验证和故障排查全部倒给用户。",
+                    "",
+                    "1. 说明阻塞",
+                    "- 用一句话说明缺少什么，以及它为什么阻止当前任务继续。",
+                    "- 示例：当前缺少 ffmpeg，所以不能继续处理视频转码。",
+                    "",
+                    "2. 先确认缺失",
+                    "- 优先检查命令是否存在和版本是否可用，例如 `<command> --version`。",
+                    "- Windows 上如果怀疑 PATH 未生效，可提示用户重新打开终端，或检查 `where <command>`。",
+                    "- 不要仅凭一次报错就直接安装；先区分未安装、PATH 未配置、当前 shell 未刷新三种情况。",
+                    "",
+                    "3. 搜索安装候选",
+                    "- Windows 系统包优先使用 winget 搜索：`winget search \"<包名>\"`。",
+                    "- 向用户解释搜索结果里的 Name、Id、Version、Source，重点确认 Id 和 Source。",
+                    "- 包名不确定时先搜索宽泛关键词；拿到结果后优先选择官方或可信发布者的精确 Id。",
+                    "",
+                    "4. 安装前确认",
+                    "- 安装会改变用户机器环境，除非用户已经明确要求安装，否则先展示将执行的命令并等待确认。",
+                    "- winget 安装优先使用精确 Id：`winget install --id <Package.Id> --exact --source winget`。",
+                    "- 不要安装来源不明的包，不要用未经审查的 curl pipe shell。",
+                    "",
+                    "5. 安装后验证",
+                    "- 安装完成后重新打开终端或刷新 PATH，再运行版本命令验证。",
+                    "- 如果仍不可用，再检查 PATH、安装位置、shell 环境和权限。",
+                    "",
+                    "交互风格：用户只问下一步时只给下一步；用户要求你操作时再调用命令工具。需要搜索包时，先执行 winget search，把候选说清楚，再决定安装命令。",
+                ]
+            ),
+        }
+
+
 class GlobFileTool(CodingBaseTool):
     """按 glob 模式查找文件。"""
 
@@ -3466,6 +3533,7 @@ def build_coding_tools() -> list[BaseTool]:
     return [
         ListFileTool(),
         RememberPreferenceTool(),
+        GetDocsTool(),
         GlobFileTool(),
         ReadFileTool(),
         GrepFileTool(),

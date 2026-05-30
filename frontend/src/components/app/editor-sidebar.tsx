@@ -8,6 +8,7 @@ import {
 } from '@/components/ai-elements/web-preview';
 import { Button } from '@/components/ui/button';
 import { canUsePreviewSelectBridge } from '@/lib/preview-select-bridge';
+import { openExternalUrl } from '@/lib/api-client';
 import { AnimatePresence, motion } from 'motion/react';
 import { ExternalLink, FolderTree, Globe, MousePointerClick, PanelRightClose, RefreshCw, X } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -213,7 +214,7 @@ export function EditorSidebar({
 
   const handleOpenInNewTab = useCallback(() => {
     if (url) {
-      window.open(url, '_blank');
+      openExternalUrl(url);
     }
   }, [url]);
 

@@ -13,6 +13,7 @@ import {
   HoverCardTrigger,
 } from "@/components/ui/hover-card";
 import { cn } from "@/lib/utils";
+import { openExternalUrl } from "@/lib/api-client";
 import { ArrowLeftIcon, ArrowRightIcon } from "lucide-react";
 import type { ComponentProps } from "react";
 import {
@@ -96,8 +97,7 @@ export const InlineCitationCardTrigger = ({
         {href ? (
           <a
             href={href}
-            rel="noreferrer"
-            target="_blank"
+            onClick={(e) => { e.preventDefault(); openExternalUrl(href); }}
             className="inline-flex min-w-0 items-center"
           >
             {content}
@@ -296,8 +296,7 @@ export const InlineCitationSource = ({
       url ? (
         <a
           href={url}
-          rel="noreferrer"
-          target="_blank"
+          onClick={(e) => { e.preventDefault(); openExternalUrl(url); }}
           className="block truncate font-medium text-sm leading-tight hover:underline"
         >
           {title}
@@ -309,8 +308,7 @@ export const InlineCitationSource = ({
     {url && (
       <a
         href={url}
-        rel="noreferrer"
-        target="_blank"
+        onClick={(e) => { e.preventDefault(); openExternalUrl(url); }}
         className="block truncate break-all text-muted-foreground text-xs hover:underline"
       >
         {url}

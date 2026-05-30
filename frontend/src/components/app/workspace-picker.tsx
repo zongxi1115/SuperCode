@@ -75,30 +75,40 @@ export function WorkspacePicker({
 
   return (
     <div className="min-h-screen bg-background text-foreground flex items-center justify-center p-6">
-      <div className="w-full max-w-xl rounded-2xl border bg-card p-6 shadow-sm space-y-5">
-        <div className="space-y-2">
-          <div className="text-sm font-medium text-muted-foreground">初始化工作区</div>
-          <h1 className="text-2xl font-semibold">先打开一个工作区</h1>
+      <div className="w-full max-w-2xl rounded-2xl border bg-card p-8 shadow-lg space-y-6">
+        <div className="space-y-1">
+          <h1 className="text-3xl font-semibold tracking-tight">选择工作区</h1>
           <p className="text-sm text-muted-foreground">
-            选定后，文件树、代码预览和后端 agent 都会围绕这个目录工作。
+            选择一个项目目录开始工作
           </p>
         </div>
 
+        <div className="space-y-3">
+          <label className="text-sm font-medium">工作区路径</label>
+          <Input
+            value={customWorkspace}
+            onChange={(e) => onCustomWorkspaceChange(e.target.value)}
+            placeholder="D:\vibe_projs\SuperCode 或 D:\vibe_projs\SuperCode\new-folder"
+            className="font-mono text-sm"
+          />
+          <p className="text-xs text-muted-foreground">可以在现有路径后追加新文件夹名称，将自动创建</p>
+        </div>
+
         {recentProjects.length > 0 && (
-          <div className="space-y-2">
-            <label className="text-sm font-medium flex items-center gap-1.5">
-              <Clock className="h-3.5 w-3.5" />
+          <div className="space-y-3">
+            <label className="text-sm font-medium flex items-center gap-2">
+              <Clock className="h-4 w-4" />
               最近打开
             </label>
-            <ScrollArea className="max-h-44 rounded-lg border">
-              <div className="p-1.5 space-y-0.5">
+            <ScrollArea className="max-h-48 rounded-lg border bg-muted/30">
+              <div className="p-2 space-y-1">
                 {recentProjects.map((project) => (
                   <div
                     key={project.workspace}
-                    className="group flex items-center gap-2 rounded-md px-2.5 py-2 cursor-pointer hover:bg-accent transition-colors"
+                    className="group flex items-center gap-3 rounded-lg px-3 py-2.5 cursor-pointer hover:bg-accent/80 transition-colors"
                     onClick={() => onOpenRecentProject(project.workspace)}
                   >
-                    <Folder className="h-4 w-4 shrink-0 text-muted-foreground" />
+                    <Folder className="h-5 w-5 shrink-0 text-primary" />
                     <div className="flex-1 min-w-0">
                       <div className="text-sm font-medium truncate">{getFolderName(project.workspace)}</div>
                       <div className="text-xs text-muted-foreground truncate">{project.workspace}</div>
@@ -107,13 +117,14 @@ export function WorkspacePicker({
                       {formatRelativeTime(project.timestamp)}
                     </span>
                     <button
-                      className="opacity-0 group-hover:opacity-100 shrink-0 p-0.5 rounded hover:bg-destructive/10 hover:text-destructive transition-all"
+                      className="opacity-0 group-hover:opacity-100 shrink-0 p-1 rounded hover:bg-destructive/10 hover:text-destructive transition-all"
                       onClick={(e) => {
                         e.stopPropagation();
                         onRemoveRecentProject(project.workspace);
                       }}
+                      aria-label="移除"
                     >
-                      <X className="h-3 w-3" />
+                      <X className="h-3.5 w-3.5" />
                     </button>
                   </div>
                 ))}
@@ -123,8 +134,8 @@ export function WorkspacePicker({
         )}
 
         <div className="space-y-3">
-          <label className="text-sm font-medium">树形选择目录</label>
-          <ScrollArea className="h-72 rounded-lg border">
+          <label className="text-sm font-medium">浏览目录</label>
+          <ScrollArea className="h-80 rounded-lg border bg-muted/30">
             <div className="p-3">
               <FileTree
                 expanded={directoryExpanded}
@@ -136,27 +147,16 @@ export function WorkspacePicker({
               </FileTree>
             </div>
           </ScrollArea>
-          <p className="text-xs text-muted-foreground">点击目录名即可选中并展开/收起，左侧箭头也仍可单独控制展开。</p>
-        </div>
-
-        <div className="space-y-3">
-          <label className="text-sm font-medium">或直接输入系统绝对路径</label>
-          <Input
-            value={customWorkspace}
-            onChange={(e) => onCustomWorkspaceChange(e.target.value)}
-            placeholder="例如 D:\\vibe_projs\\SuperCode 或 C:\\Users\\32980\\Desktop"
-          />
-          <p className="text-xs text-muted-foreground">留空时使用上面的选项；输入系统绝对路径时会覆盖下拉选择。</p>
         </div>
 
         {sessionError && (
-          <div className="rounded border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
             {sessionError}
           </div>
         )}
 
-        <Button className="w-full" onClick={onCreateSession} disabled={isSessionBooting}>
-          {isSessionBooting ? '正在打开工作区...' : '打开工作区'}
+        <Button className="w-full h-11 text-base" onClick={onCreateSession} disabled={isSessionBooting}>
+          {isSessionBooting ? '正在打开...' : '打开工作区'}
         </Button>
       </div>
     </div>
