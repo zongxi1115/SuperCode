@@ -193,6 +193,7 @@ import {
   Loader2,
   Check,
   MessageSquareIcon,
+  MemoryStick,
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import type React from "react";
@@ -313,6 +314,7 @@ const TOOL_ICONS: Record<string, React.ReactNode> = {
   create_task: <ListChecks className="size-4" />,
   get_task_status: <ListChecks className="size-4" />,
   finish_task: <ListChecks className="size-4" />,
+  remember_preference: <MemoryStick className="size-4" />,
 };
 
 const TOOL_TITLES: Record<string, (args: Record<string, unknown>) => string> = {
@@ -374,6 +376,7 @@ const TOOL_TITLES: Record<string, (args: Record<string, unknown>) => string> = {
   create_task: () => "正在创建任务",
   get_task_status: () => "正在读取任务状态",
   finish_task: () => "正在完成步骤",
+  remember_preference: () => "正在记录长期记忆",
 };
 
 function getToolTitle(name: string, args: Record<string, unknown>): string {
@@ -1598,6 +1601,75 @@ function ToolBody({
               : "当前 task 已完成。"}
           </p>
         ) : null}
+      </div>
+    );
+  }
+
+  if (toolCall.name === "remember_preference") {
+    const memoryPayload =
+      output && typeof output === "object" && !Array.isArray(output)
+        ? (output as Record<string, unknown>)
+        : undefined;
+    const memoryItem =
+      memoryPayload?.item &&
+      typeof memoryPayload.item === "object" &&
+      !Array.isArray(memoryPayload.item)
+        ? (memoryPayload.item as Record<string, unknown>)
+        : undefined;
+    const rememberedContent =
+      typeof memoryItem?.content === "string"
+        ? memoryItem.content
+        : typeof args.content === "string"
+          ? args.content
+          : "";
+    const scope =
+      typeof memoryPayload?.scope === "string"
+        ? memoryPayload.scope
+        : typeof args.scope === "string"
+          ? args.scope
+          : "global";
+    const saved = memoryPayload?.saved !== false && toolCall.state !== "error";
+    const created = memoryPayload?.created === true;
+    const disabledMessage =
+      memoryPayload?.message && typeof memoryPayload.message === "string"
+        ? memoryPayload.message
+        : undefined;
+    const statusText = errorText
+      ? "记录失败"
+      : isStreaming
+        ? "准备记录"
+        : saved
+          ? created
+            ? "已添加"
+            : "已更新"
+          : "未记录";
+    const scopeText = scope === "workspace" ? "当前工作区" : "全局";
+
+    return (
+      <div className="space-y-2 rounded-md border border-emerald-500/20 bg-emerald-500/5 p-3 text-xs">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2 font-medium text-emerald-700 dark:text-emerald-300">
+            <MemoryStick className="size-3.5" />
+            <span>{statusText}长期记忆</span>
+          </div>
+          <span className="shrink-0 rounded-full bg-background/80 px-2 py-0.5 text-[11px] text-muted-foreground">
+            {scopeText}
+          </span>
+        </div>
+        {rememberedContent ? (
+          <div className="rounded-md bg-background/70 px-3 py-2 leading-relaxed text-foreground">
+            {rememberedContent}
+          </div>
+        ) : null}
+        {disabledMessage || errorText ? (
+          <p className={cn("text-muted-foreground", errorText && "text-destructive")}>
+            {errorText || disabledMessage}
+          </p>
+        ) : (
+          <p className="text-muted-foreground">
+            以后对话会优先参考这条偏好；当前消息仍然拥有最高优先级。
+          </p>
+        )}
       </div>
     );
   }

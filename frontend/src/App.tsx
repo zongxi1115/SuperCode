@@ -481,6 +481,12 @@ export default function App() {
       apiKey: '',
       model: '',
     },
+    memory: {
+      enabled: true,
+      autoLearn: true,
+      global: [],
+      workspaces: {},
+    },
   });
   const [visualModelProviders, setVisualModelProviders] = useState<UIModelProvider[]>([]);
   const [envModelConfigs, setEnvModelConfigs] = useState<ModelOption[]>([]);
@@ -3307,6 +3313,7 @@ export default function App() {
           envConfigs={envModelConfigs}
           configPath={modelConfigPath}
           settings={appSettings}
+          currentWorkspace={selectedWorkspace}
           onSaveProviders={saveModelProviders}
           onDiscoverModels={discoverProviderModels}
           onTestEmbedding={testEmbeddingSettings}

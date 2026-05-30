@@ -23,6 +23,7 @@ from agent.rolling_text_buffer import RollingTextBuffer
 from agent.schema import AgentResponse, AgentState, StepRecord, ToolCall
 from agent.tools import BaseTool, ToolContext
 from coding_agent.model import CodeExplorationPromptModel
+from fastapi_app.memory_store import remember_preference
 
 INTERACTIVE_INPUT_PROMPT_IDLE_SECONDS = 0.2
 INTERACTIVE_POLL_SECONDS = 0.05
@@ -71,7 +72,9 @@ def _build_powershell_utf8_command(command: str) -> list[str]:
     return ["powershell", "-NoProfile", "-Command", f"{bootstrap}{command}"]
 
 
-def _hidden_windows_process_kwargs(*, new_process_group: bool = False) -> dict[str, Any]:
+def _hidden_windows_process_kwargs(
+    *, new_process_group: bool = False
+) -> dict[str, Any]:
     if sys.platform != "win32":
         return {}
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -624,9 +627,11 @@ class InteractiveCommandSession:
                 status="terminated",
                 exit_reason="interrupted",
             )
-            self.completed_commands[active_command.terminal_id] = CompletedCommandResult(
-                result=dict(result),
-                delivered=True,
+            self.completed_commands[active_command.terminal_id] = (
+                CompletedCommandResult(
+                    result=dict(result),
+                    delivered=True,
+                )
             )
         active_command.close_streams()
         return result
@@ -1019,7 +1024,9 @@ class InteractiveCommandSession:
         ]
         if any(marker in normalized_last_line for marker in explicit_prompt_markers):
             return last_line
-        if re.fullmatch(r"(press|hit)\s+(enter|return)(\s+to\s+\w+)?", normalized_last_line):
+        if re.fullmatch(
+            r"(press|hit)\s+(enter|return)(\s+to\s+\w+)?", normalized_last_line
+        ):
             return last_line
         return None
 
@@ -1112,6 +1119,67 @@ class CodingBaseTool(BaseTool):
         for index, line in enumerate(lines, start=start_line):
             rendered.append(f"{index} | {line}")
         return "\n".join(rendered)
+
+
+class RememberPreferenceTool(CodingBaseTool):
+    """把用户明确表达的长期偏好写入记忆。"""
+
+    name = "remember_preference"
+    description = (
+        "记录用户明确表达的长期偏好、工作流约束、交互风格或当前项目约定。"
+        "只在信息对后续对话有复用价值时调用；不要记录普通任务过程或临时事实。"
+        "参数：content 必填，scope 可选 global/workspace。"
+    )
+    parameters_schema = {
+        "type": "object",
+        "properties": {
+            "content": {
+                "type": "string",
+                "description": "要长期记住的偏好或约定，使用简洁中文陈述。",
+            },
+            "scope": {
+                "type": "string",
+                "enum": ["global", "workspace"],
+                "description": "global 表示跨项目偏好；workspace 表示仅当前工作区生效。",
+            },
+        },
+        "required": ["content"],
+        "additionalProperties": False,
+    }
+
+    def run(
+        self, arguments: dict[str, object], context: ToolContext
+    ) -> dict[str, object]:
+        content = str(arguments.get("content") or "").strip()
+        scope = str(arguments.get("scope") or "global").strip().lower()
+        app_data_root = Path(
+            context.metadata.get("app_data_root")
+            or context.metadata.get("project_root")
+            or "."
+        )
+        session_id = context.metadata.get("session_id")
+        result = remember_preference(
+            app_data_root,
+            context.workspace,
+            content,
+            scope=scope,
+            source_session_id=str(session_id) if session_id is not None else None,
+            source_preview="",
+        )
+        if not result.get("saved"):
+            reason = str(result.get("reason") or "unknown")
+            if reason == "memory_disabled":
+                return {"saved": False, "message": "长期记忆已关闭，未记录。"}
+            if reason == "auto_learn_disabled":
+                return {"saved": False, "message": "自动学习已关闭，未记录。"}
+            return {"saved": False, "message": f"未记录：{reason}"}
+        return {
+            "saved": True,
+            "created": bool(result.get("created")),
+            "scope": result.get("scope"),
+            "workspaceKey": result.get("workspaceKey"),
+            "item": result.get("item"),
+        }
 
 
 class GlobFileTool(CodingBaseTool):
@@ -1627,7 +1695,11 @@ class GrepFileTool(CodingBaseTool):
             return ""
 
         project_root = context.metadata.get("project_root")
-        app_root = Path(str(project_root)).resolve() if project_root else Path(__file__).resolve().parents[1]
+        app_root = (
+            Path(str(project_root)).resolve()
+            if project_root
+            else Path(__file__).resolve().parents[1]
+        )
         try:
             schedule_workspace_rag_index(app_root, context.workspace)
             matches = search_workspace_rag(
@@ -2179,10 +2251,16 @@ class DelegateCodeExplorationTool(CodingBaseTool):
         files_read = self._collect_files_read(response.steps)
         commands_run = self._collect_commands_run(response.steps)
         tool_names = self._collect_tool_names(response.steps)
-        final_output = _truncate_text(response.final_output.strip(), SUBAGENT_SUMMARY_MAX_CHARS)
+        final_output = _truncate_text(
+            response.final_output.strip(), SUBAGENT_SUMMARY_MAX_CHARS
+        )
         findings = self._extract_findings(final_output)
         recommended_files = self._extract_recommended_files(final_output, files_read)
-        status = "paused" if len(response.steps) >= max_steps and not final_output else "completed"
+        status = (
+            "paused"
+            if len(response.steps) >= max_steps and not final_output
+            else "completed"
+        )
         steps = self._snapshot_steps(response.steps)
         current_thought = next(
             (step.thought for step in reversed(response.steps) if step.thought.strip()),
@@ -2241,7 +2319,9 @@ class DelegateCodeExplorationTool(CodingBaseTool):
         snapshot_steps: list[dict[str, Any]] = []
         for step in steps:
             tool_calls = self._step_tool_calls(step)
-            name = ", ".join(tool.name for tool in tool_calls) if tool_calls else "final"
+            name = (
+                ", ".join(tool.name for tool in tool_calls) if tool_calls else "final"
+            )
             has_error = any(
                 result is not None and not result.success
                 for result in self._step_tool_results(step)
@@ -3385,6 +3465,7 @@ def build_coding_tools() -> list[BaseTool]:
 
     return [
         ListFileTool(),
+        RememberPreferenceTool(),
         GlobFileTool(),
         ReadFileTool(),
         GrepFileTool(),

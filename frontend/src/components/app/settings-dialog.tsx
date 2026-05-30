@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -26,6 +26,7 @@ import {
   Key,
   List,
   Lock,
+  MemoryStick,
   Plus,
   RefreshCcw,
   Server,
@@ -71,6 +72,7 @@ type SettingsDialogProps = {
   envConfigs: ModelOption[];
   configPath: string | null;
   settings: AppSettings;
+  currentWorkspace: string;
   onSaveProviders: (providers: UIModelProvider[]) => Promise<void>;
   onDiscoverModels: (provider: UIModelProvider) => Promise<string[]>;
   onTestEmbedding: (embedding: AppSettings['embedding']) => Promise<string>;
@@ -101,6 +103,32 @@ function toEditableProvider(provider?: UIModelProvider): EditableProvider {
   };
 }
 
+function withSettingsDefaults(settings: AppSettings): AppSettings {
+  return {
+    ...settings,
+    memory: {
+      enabled: settings.memory?.enabled ?? true,
+      autoLearn: settings.memory?.autoLearn ?? true,
+      global: settings.memory?.global ?? [],
+      workspaces: settings.memory?.workspaces ?? {},
+    },
+  };
+}
+
+function createMemoryItem(scope: 'global' | 'workspace'): AppSettings['memory']['global'][number] {
+  const now = Date.now();
+  return {
+    id: crypto.randomUUID(),
+    content: '',
+    scope,
+    enabled: true,
+    createdAt: now,
+    updatedAt: now,
+    sourceSessionId: null,
+    sourcePreview: '手动添加',
+  };
+}
+
 export function SettingsDialog({
   open,
   onOpenChange,
@@ -108,6 +136,7 @@ export function SettingsDialog({
   envConfigs,
   configPath,
   settings,
+  currentWorkspace,
   onSaveProviders,
   onDiscoverModels,
   onTestEmbedding,
@@ -116,7 +145,7 @@ export function SettingsDialog({
   const [draftProviders, setDraftProviders] = useState<EditableProvider[]>(
     providers.length > 0 ? providers.map((p) => toEditableProvider(p)) : [toEditableProvider()],
   );
-  const [draftSettings, setDraftSettings] = useState<AppSettings>(settings);
+  const [draftSettings, setDraftSettings] = useState<AppSettings>(() => withSettingsDefaults(settings));
   const [activeTab, setActiveTab] = useState('providers');
   const [isSaving, setIsSaving] = useState(false);
   const [refreshingId, setRefreshingId] = useState<string | null>(null);
@@ -134,6 +163,23 @@ export function SettingsDialog({
     ) ?? BODY_TEXT_SIZE_OPTIONS[1];
   const embeddingKey = 'embedding-api-key';
   const isEmbeddingKeyVisible = visibleKeys.has(embeddingKey);
+  const currentWorkspaceKey = currentWorkspace.trim();
+  const workspaceMemoryItems =
+    currentWorkspaceKey && draftSettings.memory?.workspaces
+      ? draftSettings.memory.workspaces[currentWorkspaceKey] ?? []
+      : [];
+
+  useEffect(() => {
+    if (!open) return;
+    setDraftProviders(
+      providers.length > 0 ? providers.map((p) => toEditableProvider(p)) : [toEditableProvider()],
+    );
+    setDraftSettings(withSettingsDefaults(settings));
+    setSelectedProviderIndex(0);
+    setDeleteConfirmId(null);
+    setFeedback(null);
+    setError(null);
+  }, [open, providers, settings]);
 
   const toggleKeyVisibility = (key: string) => {
     setVisibleKeys((prev) => {
@@ -220,6 +266,108 @@ export function SettingsDialog({
     }
   };
 
+  const updateMemoryItem = (
+    scope: 'global' | 'workspace',
+    id: string,
+    patch: Partial<AppSettings['memory']['global'][number]>,
+  ) => {
+    setDraftSettings((prev) => {
+      const memory = {
+        enabled: prev.memory?.enabled ?? true,
+        autoLearn: prev.memory?.autoLearn ?? true,
+        global: prev.memory?.global ?? [],
+        workspaces: prev.memory?.workspaces ?? {},
+      };
+      const applyPatch = (item: AppSettings['memory']['global'][number]) =>
+        item.id === id ? { ...item, ...patch, updatedAt: Date.now() } : item;
+      if (scope === 'global') {
+        return {
+          ...prev,
+          memory: {
+            ...memory,
+            global: memory.global.map(applyPatch),
+          },
+        };
+      }
+      if (!currentWorkspaceKey) return prev;
+      return {
+        ...prev,
+        memory: {
+          ...memory,
+          workspaces: {
+            ...memory.workspaces,
+            [currentWorkspaceKey]: (memory.workspaces[currentWorkspaceKey] ?? []).map(applyPatch),
+          },
+        },
+      };
+    });
+  };
+
+  const addMemoryItem = (scope: 'global' | 'workspace') => {
+    setDraftSettings((prev) => {
+      const memory = {
+        enabled: prev.memory?.enabled ?? true,
+        autoLearn: prev.memory?.autoLearn ?? true,
+        global: prev.memory?.global ?? [],
+        workspaces: prev.memory?.workspaces ?? {},
+      };
+      const nextItem = createMemoryItem(scope);
+      if (scope === 'global') {
+        return {
+          ...prev,
+          memory: {
+            ...memory,
+            global: [...memory.global, nextItem],
+          },
+        };
+      }
+      if (!currentWorkspaceKey) return prev;
+      return {
+        ...prev,
+        memory: {
+          ...memory,
+          workspaces: {
+            ...memory.workspaces,
+            [currentWorkspaceKey]: [...(memory.workspaces[currentWorkspaceKey] ?? []), nextItem],
+          },
+        },
+      };
+    });
+  };
+
+  const deleteMemoryItem = (scope: 'global' | 'workspace', id: string) => {
+    setDraftSettings((prev) => {
+      const memory = {
+        enabled: prev.memory?.enabled ?? true,
+        autoLearn: prev.memory?.autoLearn ?? true,
+        global: prev.memory?.global ?? [],
+        workspaces: prev.memory?.workspaces ?? {},
+      };
+      if (scope === 'global') {
+        return {
+          ...prev,
+          memory: {
+            ...memory,
+            global: memory.global.filter((item) => item.id !== id),
+          },
+        };
+      }
+      if (!currentWorkspaceKey) return prev;
+      return {
+        ...prev,
+        memory: {
+          ...memory,
+          workspaces: {
+            ...memory.workspaces,
+            [currentWorkspaceKey]: (memory.workspaces[currentWorkspaceKey] ?? []).filter(
+              (item) => item.id !== id,
+            ),
+          },
+        },
+      };
+    });
+  };
+
   const handleSave = async () => {
     setError(null);
     setFeedback(null);
@@ -281,6 +429,10 @@ export function SettingsDialog({
               <TabsTrigger value="env" className="flex-1 gap-1.5">
                 <Lock className="size-3.5" />
                 .env 来源
+              </TabsTrigger>
+              <TabsTrigger value="memory" className="flex-1 gap-1.5">
+                <MemoryStick className="size-3.5" />
+                记忆
               </TabsTrigger>
               <TabsTrigger value="general" className="flex-1 gap-1.5">
                 <Shield className="size-3.5" />
@@ -514,6 +666,203 @@ export function SettingsDialog({
                   ))}
                 </div>
               )}
+            </div>
+          </TabsContent>
+
+          <TabsContent value="memory" className="mt-0 min-h-0 flex-1 overflow-y-auto px-6 py-4">
+            <div className="space-y-5">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="flex items-start justify-between gap-3 rounded-lg border bg-card p-4">
+                  <div className="flex items-start gap-3">
+                    <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-cyan-500/10">
+                      <MemoryStick className="size-4 text-cyan-600 dark:text-cyan-400" />
+                    </div>
+                    <div className="space-y-1">
+                      <div className="text-sm font-medium">启用长期记忆</div>
+                      <div className="text-xs text-muted-foreground">
+                        开启后，智能体会在后续对话中参考启用的记忆
+                      </div>
+                    </div>
+                  </div>
+                  <Switch
+                    checked={draftSettings.memory?.enabled ?? true}
+                    onCheckedChange={(enabled) =>
+                      setDraftSettings((prev) => ({
+                        ...prev,
+                        memory: {
+                          enabled,
+                          autoLearn: prev.memory?.autoLearn ?? true,
+                          global: prev.memory?.global ?? [],
+                          workspaces: prev.memory?.workspaces ?? {},
+                        },
+                      }))
+                    }
+                  />
+                </div>
+
+                <div className="flex items-start justify-between gap-3 rounded-lg border bg-card p-4">
+                  <div className="flex items-start gap-3">
+                    <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-lime-500/10">
+                      <Brain className="size-4 text-lime-700 dark:text-lime-400" />
+                    </div>
+                    <div className="space-y-1">
+                      <div className="text-sm font-medium">自动学习偏好</div>
+                      <div className="text-xs text-muted-foreground">
+                        从“以后、记住、不要、尽量”等表达中提取偏好
+                      </div>
+                    </div>
+                  </div>
+                  <Switch
+                    checked={draftSettings.memory?.autoLearn ?? true}
+                    onCheckedChange={(autoLearn) =>
+                      setDraftSettings((prev) => ({
+                        ...prev,
+                        memory: {
+                          enabled: prev.memory?.enabled ?? true,
+                          autoLearn,
+                          global: prev.memory?.global ?? [],
+                          workspaces: prev.memory?.workspaces ?? {},
+                        },
+                      }))
+                    }
+                  />
+                </div>
+              </div>
+
+              <Separator />
+
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-sm font-semibold">全局记忆</h3>
+                    <p className="mt-0.5 text-xs text-muted-foreground">
+                      跨工作区生效的交互偏好和工作方式
+                    </p>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 gap-1.5 text-xs"
+                    onClick={() => addMemoryItem('global')}
+                  >
+                    <Plus className="size-3" />
+                    添加
+                  </Button>
+                </div>
+
+                {(draftSettings.memory?.global ?? []).length === 0 ? (
+                  <div className="rounded-lg border border-dashed bg-muted/20 px-4 py-5 text-center text-sm text-muted-foreground">
+                    暂无全局记忆
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {(draftSettings.memory?.global ?? []).map((item) => (
+                      <div key={item.id} className="rounded-lg border bg-card p-3">
+                        <div className="flex items-start gap-3">
+                          <Switch
+                            checked={item.enabled}
+                            onCheckedChange={(enabled) => updateMemoryItem('global', item.id, { enabled })}
+                            className="mt-1"
+                          />
+                          <div className="min-w-0 flex-1 space-y-2">
+                            <Textarea
+                              value={item.content}
+                              onChange={(e) => updateMemoryItem('global', item.id, { content: e.target.value })}
+                              placeholder="例如：除非明确允许，不要主动运行 pnpm build。"
+                              className="min-h-[62px] resize-y text-xs leading-relaxed"
+                            />
+                            <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
+                              <span className="truncate">
+                                {item.sourcePreview || '手动添加'}
+                              </span>
+                              <span className="shrink-0">
+                                {new Date(item.updatedAt).toLocaleString()}
+                              </span>
+                            </div>
+                          </div>
+                          <Button
+                            variant="ghost"
+                            size="icon-xs"
+                            className="mt-0.5 size-7 text-muted-foreground"
+                            onClick={() => deleteMemoryItem('global', item.id)}
+                            title="删除记忆"
+                          >
+                            <Trash2 className="size-3.5" />
+                          </Button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <Separator />
+
+              <div className="space-y-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <h3 className="text-sm font-semibold">当前工作区记忆</h3>
+                    <p className="mt-0.5 truncate text-xs text-muted-foreground" title={currentWorkspaceKey}>
+                      {currentWorkspaceKey || '尚未选择工作区'}
+                    </p>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 gap-1.5 text-xs"
+                    onClick={() => addMemoryItem('workspace')}
+                    disabled={!currentWorkspaceKey}
+                  >
+                    <Plus className="size-3" />
+                    添加
+                  </Button>
+                </div>
+
+                {workspaceMemoryItems.length === 0 ? (
+                  <div className="rounded-lg border border-dashed bg-muted/20 px-4 py-5 text-center text-sm text-muted-foreground">
+                    暂无当前工作区记忆
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {workspaceMemoryItems.map((item) => (
+                      <div key={item.id} className="rounded-lg border bg-card p-3">
+                        <div className="flex items-start gap-3">
+                          <Switch
+                            checked={item.enabled}
+                            onCheckedChange={(enabled) => updateMemoryItem('workspace', item.id, { enabled })}
+                            className="mt-1"
+                          />
+                          <div className="min-w-0 flex-1 space-y-2">
+                            <Textarea
+                              value={item.content}
+                              onChange={(e) => updateMemoryItem('workspace', item.id, { content: e.target.value })}
+                              placeholder="例如：这个项目里优先沿用现有 shadcn 风格。"
+                              className="min-h-[62px] resize-y text-xs leading-relaxed"
+                            />
+                            <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
+                              <span className="truncate">
+                                {item.sourcePreview || '手动添加'}
+                              </span>
+                              <span className="shrink-0">
+                                {new Date(item.updatedAt).toLocaleString()}
+                              </span>
+                            </div>
+                          </div>
+                          <Button
+                            variant="ghost"
+                            size="icon-xs"
+                            className="mt-0.5 size-7 text-muted-foreground"
+                            onClick={() => deleteMemoryItem('workspace', item.id)}
+                            title="删除记忆"
+                          >
+                            <Trash2 className="size-3.5" />
+                          </Button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
           </TabsContent>
 

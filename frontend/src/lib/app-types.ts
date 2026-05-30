@@ -402,6 +402,17 @@ export type ModelConfigPayload = {
   configPath: string;
 };
 
+export type MemoryItem = {
+  id: string;
+  content: string;
+  scope: 'global' | 'workspace';
+  enabled: boolean;
+  createdAt: number;
+  updatedAt: number;
+  sourceSessionId?: string | null;
+  sourcePreview?: string | null;
+};
+
 export type AppSettings = {
   autoApprove: boolean;
   thinkingRendering: "text" | "markdown";
@@ -413,6 +424,12 @@ export type AppSettings = {
     baseUrl: string;
     apiKey: string;
     model: string;
+  };
+  memory: {
+    enabled: boolean;
+    autoLearn: boolean;
+    global: MemoryItem[];
+    workspaces: Record<string, MemoryItem[]>;
   };
 };
 

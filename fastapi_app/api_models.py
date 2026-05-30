@@ -191,6 +191,24 @@ class EmbeddingSettingsPayload(BaseModel):
     model: str = ""
 
 
+class MemoryItemPayload(BaseModel):
+    id: str
+    content: str
+    scope: Literal["global", "workspace"] = "global"
+    enabled: bool = True
+    createdAt: int
+    updatedAt: int
+    sourceSessionId: str | None = None
+    sourcePreview: str | None = None
+
+
+class MemorySettingsPayload(BaseModel):
+    enabled: bool = True
+    autoLearn: bool = True
+    global_: list[MemoryItemPayload] = Field(default_factory=list, alias="global")
+    workspaces: dict[str, list[MemoryItemPayload]] = Field(default_factory=dict)
+
+
 class SettingsPayload(BaseModel):
     autoApprove: bool = False
     thinkingRendering: Literal["text", "markdown"] = "text"
@@ -198,6 +216,7 @@ class SettingsPayload(BaseModel):
     bodyFontSize: int = 14
     bodyLineHeight: int = 22
     embedding: EmbeddingSettingsPayload = Field(default_factory=EmbeddingSettingsPayload)
+    memory: MemorySettingsPayload = Field(default_factory=MemorySettingsPayload)
 
 
 class SessionHistoryItem(BaseModel):

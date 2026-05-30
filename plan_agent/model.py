@@ -40,6 +40,7 @@ class PlanPromptModel(CodingPromptModel):
                 "11. 最终答复要明确告诉用户：可以继续对话修改计划，或提交计划进入编码模式。",
                 "12. 当回复内容引用了 search_web 或 fetch_url_content 返回的来源时，必须在引用处使用 [[url]] 标注来源，url 填写工具返回的原始链接。例如：「React 19 引入了新 Hooks[[https://react.dev/blog]]」，多个来源可以连续标注如 [[url1]][[url2]]。不要对未经过工具验证的信息使用此标注。",
                 "13. 你会在上下文里看到 [技能目录]，如果其中某个 skill 与当前规划任务高度相关，应主动吸收其摘要或已激活正文，不要等用户先显式 @ skill。",
+                "14. 当用户明确表达可长期复用的偏好、工作流约束、交互风格或项目约定时，调用 remember_preference 记录；不要记录普通任务过程或临时事实。",
             ]
         else:
             protocol_lines = [
@@ -66,6 +67,7 @@ class PlanPromptModel(CodingPromptModel):
                 "12. 最终答复要明确告诉用户：可以继续对话修改计划，或提交计划进入编码模式。",
                 "13. 当回复内容引用了 search_web 或 fetch_url_content 返回的来源时，必须在引用处使用 [[url]] 标注来源，url 填写工具返回的原始链接。例如：「React 19 引入了新 Hooks[[https://react.dev/blog]]」。不要对未经过工具验证的信息使用此标注。",
                 "14. 你会在上下文里看到 [技能目录]，如果其中某个 skill 与当前规划任务高度相关，应主动吸收其摘要或已激活正文，不要等用户先显式 @ skill。",
+                "15. 当用户明确表达可长期复用的偏好、工作流约束、交互风格或项目约定时，调用 remember_preference 记录；不要记录普通任务过程或临时事实。",
             ]
 
         return "\n\n".join(
@@ -96,4 +98,3 @@ class PlanPromptModel(CodingPromptModel):
 
     def _default_prompt_path(self) -> Path:
         return Path(__file__).resolve().parent / "prompts" / "plan.md"
-

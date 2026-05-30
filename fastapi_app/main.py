@@ -84,6 +84,7 @@ from fastapi_app.api_models import (
     UIModelProviderPayload,
 )
 from fastapi_app.kanban_store import KanbanStore
+from fastapi_app.memory_store import build_long_term_memory_context
 from fastapi_app.plugin_registry import list_builtin_plugins
 from fastapi_app.rag_index import schedule_workspace_rag_index, test_embedding_config
 from fastapi_app.settings_store import (
@@ -1481,6 +1482,7 @@ def sync_session_runtime_state_for_agent(session: UISession) -> None:
         return
     data["runtime_state"] = build_agent_runtime_state(session)
     data["available_skills"] = list_available_skill_summaries(session.workspace)
+    data["long_term_memory"] = build_long_term_memory_context(APP_DATA_ROOT, session.workspace)
 
 
 def set_session_phase(session: UISession, phase: str) -> None:
@@ -2128,7 +2130,7 @@ async def get_settings() -> JSONResponse:
 
 @app.put("/api/settings")
 async def update_settings(payload: SettingsPayload) -> JSONResponse:
-    merged = save_settings(APP_DATA_ROOT, payload.model_dump())
+    merged = save_settings(APP_DATA_ROOT, payload.model_dump(by_alias=True))
     return JSONResponse(merged)
 
 
@@ -4233,6 +4235,7 @@ def attach_agent_runtime_metadata(
     agent.tool_context_metadata["session_id"] = session_id
     agent.tool_context_metadata["backend_base_url"] = BACKEND_BASE_URL
     agent.tool_context_metadata["project_root"] = str(ROOT)
+    agent.tool_context_metadata["app_data_root"] = str(APP_DATA_ROOT)
     if include_thoughts_in_context is not None:
         agent.tool_context_metadata["include_thoughts_in_context"] = include_thoughts_in_context
     if interactive_command_session is not None:
@@ -4271,6 +4274,7 @@ def build_chat_session(
             tool_context_metadata={
                 "include_thoughts_in_context": config.include_thoughts_in_context,
                 "project_root": str(ROOT),
+                "app_data_root": str(APP_DATA_ROOT),
                 "llm_client": client,
             },
         )

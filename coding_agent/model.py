@@ -66,6 +66,7 @@ class CodingPromptModel(OpenAICompatibleModel):
                 "10. 已成功完成的工具调用会出现在内部工具调用记录里，不要重复同一工具调用；刚刚 write_file 创建的新文件内容以调用参数为准，不要立刻 read_file 回读。",
                 "11. 当回复内容引用了 search_web 或 fetch_url_content 返回的来源时，必须在引用处使用 [[url]] 标注来源，url 填写工具返回的原始链接。例如：「该 API 支持流式响应[[https://docs.example.com/streaming]]」。不要对未经过工具验证的信息使用此标注。",
                 "12. 你会在上下文里看到 [技能目录]，必要时应主动使用其中相关 skill 的描述与约束，不要等用户先显式 @ skill。",
+                "13. 当用户明确表达可长期复用的偏好、工作流约束、交互风格或项目约定时，调用 remember_preference 记录；不要记录普通任务过程或临时事实。",
             ]
         else:
             protocol_lines = [
@@ -93,6 +94,7 @@ class CodingPromptModel(OpenAICompatibleModel):
                 "10. 如果用户目标已经完成，必须 action=final，不要为了“继续”而调用无必要工具。",
                 "11. 已成功完成的工具调用会出现在内部工具调用记录里，不要重复同一工具调用；刚刚 write_file 创建的新文件内容以调用参数为准，不要立刻 read_file 回读。",
                 "12. 你会在上下文里看到 [技能目录]，必要时应主动使用其中相关 skill 的描述与约束，不要等用户先显式 @ skill。",
+                "13. 当用户明确表达可长期复用的偏好、工作流约束、交互风格或项目约定时，调用 remember_preference 记录；不要记录普通任务过程或临时事实。",
             ]
 
         return "\n\n".join(
@@ -116,6 +118,10 @@ class CodingPromptModel(OpenAICompatibleModel):
         runtime_state_context = self._build_runtime_state_context(state)
         if runtime_state_context:
             system_content.append(runtime_state_context)
+
+        long_term_memory_context = self._build_long_term_memory_context(state)
+        if long_term_memory_context:
+            system_content.append(long_term_memory_context)
 
         planning_records_context = self._build_planning_records_context(state)
         if planning_records_context:
@@ -177,6 +183,12 @@ class CodingPromptModel(OpenAICompatibleModel):
                 serialized,
             ]
         )
+
+    def _build_long_term_memory_context(self, state: AgentState) -> str:
+        raw_memory = state.data.get("long_term_memory")
+        if not isinstance(raw_memory, str):
+            return ""
+        return raw_memory.strip()
 
     def _build_continuation_instruction(self, response_mode: str) -> str:
         if response_mode == "native_tools":
