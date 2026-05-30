@@ -1007,6 +1007,7 @@ export default function App() {
     setIsContextOpen(false);
     setIsTerminalOpen(false);
     setHasTerminalBeenOpened(false);
+    setActivePlugin(null);
     saveLastSession(baseWorkspace);
     addRecentProject(baseWorkspace);
     setRecentProjects(getRecentProjects());
@@ -3259,7 +3260,7 @@ export default function App() {
         />
       )}
       {activePlugin === 'kanban' ? (
-        <div className="flex-1 flex flex-col min-w-0 bg-background overflow-hidden relative z-10">
+        <div className="flex-1 flex flex-col min-w-0 bg-background overflow-hidden">
           <KanbanBoard
             workspace={selectedWorkspace}
             fileTree={fileTree}

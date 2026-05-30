@@ -948,6 +948,7 @@ type ErrorSegment = {
   retryCount?: number;
   maxRetries?: number;
   retrying: boolean;
+  resolved?: boolean;
 };
 
 type ThoughtSegment =
@@ -1030,6 +1031,17 @@ function parseThoughtErrorSegments(text: string): ThoughtSegment[] {
 
   flushText();
   flushError();
+
+  for (let si = 0; si < segments.length; si++) {
+    const segment = segments[si];
+    if (segment.type !== "error") {
+      continue;
+    }
+
+    segment.value.resolved = segments
+      .slice(si + 1)
+      .some((nextSegment) => nextSegment.type === "text");
+  }
 
   return segments;
 }
@@ -3345,7 +3357,7 @@ const MessageList = memo(function MessageList({
       const hasThoughts = Boolean(thoughtText);
       const hasToolCalls = (msg.toolCalls?.length ?? 0) > 0;
 
-      const hasErrorInThoughts = hasThoughts && ERROR_LINE_RE.test(thoughtText);
+      const hasErrorInThoughts = isLoading && hasThoughts && ERROR_LINE_RE.test(thoughtText);
 
       return (
         <>
@@ -3366,20 +3378,17 @@ const MessageList = memo(function MessageList({
                         {segments.map((seg, si) => {
                           if (seg.type === "error") {
                             return (
-                              <motion.div
+                              <ErrorChainBlock
                                 key={`legacy-error-block`}
-                                layout
-                                initial={{ opacity: 1, height: "auto" }}
-                                exit={{ opacity: 0, height: 0, scale: 0.95, filter: "blur(4px)" }}
-                                transition={{ duration: 0.4, ease: [0.4, 0, 0.2, 1] }}
-                              >
-                                <ErrorChainBlock
-                                  errors={seg.value.errors}
-                                  retryCount={seg.value.retryCount}
-                                  maxRetries={seg.value.maxRetries}
-                                  retrying={seg.value.retrying}
-                                />
-                              </motion.div>
+                                errors={seg.value.errors}
+                                retryCount={seg.value.retryCount}
+                                maxRetries={seg.value.maxRetries}
+                                retrying={seg.value.retrying}
+                                resolved={
+                                  seg.value.resolved ||
+                                  (!isLoading && seg.value.retrying)
+                                }
+                              />
                             );
                           }
                           return (
@@ -3684,7 +3693,7 @@ const MessageList = memo(function MessageList({
           block.toolCall.name === "save_plan" &&
           block.toolCall.state === "running",
       );
-      const hasErrorThinking = group.blocks.some(
+      const hasErrorThinking = isActive && group.blocks.some(
         (block) =>
           block.type === "thinking" &&
           ERROR_LINE_RE.test(normalizeThoughtText(block.text)),
@@ -3741,21 +3750,18 @@ const MessageList = memo(function MessageList({
                       for (let si = 0; si < segments.length; si++) {
                         const seg = segments[si];
                         if (seg.type === "error") {
+                          const resolved =
+                            seg.value.resolved ||
+                            (!isActive && seg.value.retrying);
                           rendered.push(
-                            <motion.div
+                            <ErrorChainBlock
                               key={`error-wrapper-${gi}-${i}`}
-                              layout
-                              initial={{ opacity: 1, height: "auto" }}
-                              exit={{ opacity: 0, height: 0, scale: 0.95, filter: "blur(4px)" }}
-                              transition={{ duration: 0.4, ease: [0.4, 0, 0.2, 1] }}
-                            >
-                              <ErrorChainBlock
-                                errors={seg.value.errors}
-                                retryCount={seg.value.retryCount}
-                                maxRetries={seg.value.maxRetries}
-                                retrying={seg.value.retrying}
-                              />
-                            </motion.div>,
+                              errors={seg.value.errors}
+                              retryCount={seg.value.retryCount}
+                              maxRetries={seg.value.maxRetries}
+                              retrying={seg.value.retrying}
+                              resolved={resolved}
+                            />,
                           );
                         } else {
                           rendered.push(

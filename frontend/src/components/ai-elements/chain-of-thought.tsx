@@ -265,6 +265,7 @@ export type ErrorChainBlockProps = {
   retryCount?: number;
   maxRetries?: number;
   retrying?: boolean;
+  resolved?: boolean;
 };
 
 const RollingDigit = memo(function RollingDigit({
@@ -316,83 +317,90 @@ const RollingNumber = memo(function RollingNumber({
 });
 
 export const ErrorChainBlock = memo(
-  ({ errors, retryCount, maxRetries, retrying }: ErrorChainBlockProps) => {
+  ({ errors, retryCount, maxRetries, retrying, resolved }: ErrorChainBlockProps) => {
     const isRetrying = retrying ?? (retryCount != null && maxRetries != null && retryCount < maxRetries);
     const latestError = errors[errors.length - 1] ?? "";
 
     return (
-      <motion.div
-        layout
-        className={cn(
-          "rounded-lg border overflow-hidden",
-          isRetrying
-            ? "border-amber-500/30 bg-amber-500/5"
-            : "border-destructive/30 bg-destructive/5",
-        )}
-        initial={false}
-      >
-        <div
-          className={cn(
-            "flex items-center gap-2 px-3 py-2 text-sm font-medium",
-            isRetrying
-              ? "text-amber-600 dark:text-amber-400 bg-amber-500/10"
-              : "text-destructive bg-destructive/10",
-          )}
-        >
-          {isRetrying ? (
-            <RefreshCwIcon className="size-4 animate-spin shrink-0" />
-          ) : (
-            <XCircleIcon className="size-4 shrink-0" />
-          )}
-          <span>
-            {isRetrying ? (
-              <>
-                请求出错，正在重试
-                {retryCount != null && maxRetries != null && (
-                  <>（<RollingNumber value={retryCount} />/<RollingNumber value={maxRetries} />）</>
-                )}
-              </>
-            ) : retryCount != null ? (
-              <>
-                已重试 <RollingNumber value={retryCount} /> 次仍未成功
-              </>
-            ) : (
-              "请求失败"
+      <AnimatePresence>
+        {!resolved && (
+          <motion.div
+            layout
+            className={cn(
+              "rounded-lg border overflow-hidden",
+              isRetrying
+                ? "border-amber-500/30 bg-amber-500/5"
+                : "border-destructive/30 bg-destructive/5",
             )}
-          </span>
-        </div>
-        <div className="px-3 py-2">
-          <pre className="whitespace-pre-wrap break-words text-xs text-muted-foreground font-mono">
-            {latestError}
-          </pre>
-          {errors.length > 1 && (
-            <details className="mt-1.5">
-              <summary className="text-[11px] text-muted-foreground/60 cursor-pointer hover:text-muted-foreground transition-colors">
-                查看全部 {errors.length} 条错误
-              </summary>
-              <div className="mt-1.5 space-y-1">
-                {errors.map((err, idx) => (
-                  <pre key={idx} className="whitespace-pre-wrap break-words text-[11px] text-muted-foreground/70 font-mono border-l-2 border-muted-foreground/20 pl-2">
-                    {err}
-                  </pre>
-                ))}
-              </div>
-            </details>
-          )}
-        </div>
-        {isRetrying && retryCount != null && maxRetries != null && (
-          <div className="px-3 pb-2">
-            <div className="h-1 rounded-full bg-amber-500/10 overflow-hidden">
-              <motion.div
-                className="h-full rounded-full bg-amber-500/40"
-                initial={false}
-                animate={{ width: `${Math.min((retryCount / maxRetries) * 100, 100)}%` }}
-                transition={{ type: "spring", stiffness: 300, damping: 25 }}
-              />
+            initial={{ opacity: 1, height: "auto" }}
+            animate={{ opacity: 1, height: "auto" }}
+            exit={{ opacity: 0, height: 0, scale: 0.95, filter: "blur(4px)" }}
+            transition={{ duration: 0.4, ease: [0.4, 0, 0.2, 1] }}
+          >
+            <div
+              className={cn(
+                "flex items-center gap-2 px-3 py-2 text-sm font-medium",
+                isRetrying
+                  ? "text-amber-600 dark:text-amber-400 bg-amber-500/10"
+                  : "text-destructive bg-destructive/10",
+              )}
+            >
+              {isRetrying ? (
+                <RefreshCwIcon className="size-4 animate-spin shrink-0" />
+              ) : (
+                <XCircleIcon className="size-4 shrink-0" />
+              )}
+              <span>
+                {isRetrying ? (
+                  <>
+                    请求出错，正在重试
+                    {retryCount != null && maxRetries != null && (
+                      <>（<RollingNumber value={retryCount} />/<RollingNumber value={maxRetries} />）</>
+                    )}
+                  </>
+                ) : retryCount != null ? (
+                  <>
+                    已重试 <RollingNumber value={retryCount} /> 次仍未成功
+                  </>
+                ) : (
+                  "请求失败"
+                )}
+              </span>
             </div>
-          </div>
+            <div className="px-3 py-2">
+              <pre className="whitespace-pre-wrap break-words text-xs text-muted-foreground font-mono">
+                {latestError}
+              </pre>
+              {errors.length > 1 && (
+                <details className="mt-1.5">
+                  <summary className="text-[11px] text-muted-foreground/60 cursor-pointer hover:text-muted-foreground transition-colors">
+                    查看全部 {errors.length} 条错误
+                  </summary>
+                  <div className="mt-1.5 space-y-1">
+                    {errors.map((err, idx) => (
+                      <pre key={idx} className="whitespace-pre-wrap break-words text-[11px] text-muted-foreground/70 font-mono border-l-2 border-muted-foreground/20 pl-2">
+                        {err}
+                      </pre>
+                    ))}
+                  </div>
+                </details>
+              )}
+            </div>
+            {isRetrying && retryCount != null && maxRetries != null && (
+              <div className="px-3 pb-2">
+                <div className="h-1 rounded-full bg-amber-500/10 overflow-hidden">
+                  <motion.div
+                    className="h-full rounded-full bg-amber-500/40"
+                    initial={false}
+                    animate={{ width: `${Math.min((retryCount / maxRetries) * 100, 100)}%` }}
+                    transition={{ type: "spring", stiffness: 300, damping: 25 }}
+                  />
+                </div>
+              </div>
+            )}
+          </motion.div>
         )}
-      </motion.div>
+      </AnimatePresence>
     );
   }
 );
