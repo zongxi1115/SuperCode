@@ -7,9 +7,9 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { defineConfig } from 'vite'
 
-const PREVIEW_SELECT_PROXY_PREFIX = '/__sc_select_proxy'
+const PREVIEW_PROXY_PREFIX = '/__preview_proxy__'
 
-type SelectProxyTarget = {
+type PreviewProxyTarget = {
   protocol: 'http' | 'https'
   hostname: string
   port: string
@@ -17,60 +17,76 @@ type SelectProxyTarget = {
   targetUrl: URL
 }
 
-function isLoopbackHost(hostname: string): boolean {
-  const normalized = hostname.replace(/^\[|\]$/g, '').toLowerCase()
-  return normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '::1'
-}
-
-function parseSelectProxyTarget(rawUrl: string): SelectProxyTarget | null {
+function parsePreviewProxyTarget(rawUrl: string): PreviewProxyTarget | null {
   const requestUrl = new URL(rawUrl, 'http://localhost')
-  if (!requestUrl.pathname.startsWith(`${PREVIEW_SELECT_PROXY_PREFIX}/`)) {
+  if (!requestUrl.pathname.startsWith(`${PREVIEW_PROXY_PREFIX}/`)) {
     return null
   }
 
-  const remainder = requestUrl.pathname.slice(PREVIEW_SELECT_PROXY_PREFIX.length + 1)
-  const segments = remainder.split('/')
-  if (segments.length < 3) {
+  const rawTargetUrl = requestUrl.pathname.slice(PREVIEW_PROXY_PREFIX.length + 1)
+  let targetUrl: URL
+  try {
+    targetUrl = new URL(`${rawTargetUrl}${requestUrl.search}`)
+  } catch {
     return null
   }
 
-  const [protocolToken, encodedHost, encodedPort, ...pathSegments] = segments
-  if (protocolToken !== 'http' && protocolToken !== 'https') {
+  const protocol = targetUrl.protocol.replace(/:$/, '')
+  if (protocol !== 'http' && protocol !== 'https') {
     return null
   }
 
-  const hostname = decodeURIComponent(encodedHost)
-  const portToken = decodeURIComponent(encodedPort)
-  if (!isLoopbackHost(hostname)) {
-    return null
-  }
-
-  const port = portToken === '_' ? '' : portToken
-  const pathname = `/${pathSegments.join('/')}`.replace(/\/{2,}/g, '/')
-  const targetOrigin = `${protocolToken}://${hostname}${port ? `:${port}` : ''}`
-  const targetUrl = new URL(`${targetOrigin}${pathname}${requestUrl.search}`)
-
+  const hostname = targetUrl.hostname
   return {
-    protocol: protocolToken,
+    protocol,
     hostname,
-    port,
-    targetOrigin,
+    port: targetUrl.port,
+    targetOrigin: targetUrl.origin,
     targetUrl,
   }
 }
 
-function absolutizeHtmlReferences(html: string, targetOrigin: string): string {
+function buildProxyUrl(value: string, baseUrl: URL): string {
+  try {
+    return `${PREVIEW_PROXY_PREFIX}/${new URL(value, baseUrl).href}`
+  } catch {
+    return value
+  }
+}
+
+function rewriteCssReferences(css: string, baseUrl: URL): string {
+  return css.replace(/url\((['"]?)(?!data:|blob:|#|\/\/|https?:)([^'")]+)\1\)/gi, (_, quote: string, value: string) => {
+    return `url(${quote}${buildProxyUrl(value.trim(), baseUrl)}${quote})`
+  })
+}
+
+function rewriteHtmlReferences(html: string, targetUrl: URL): string {
   return html.replace(
-    /\b(src|href|action|poster)=("|')\/(?!\/)/gi,
-    (_, attr: string, quote: string) => `${attr}=${quote}${targetOrigin}/`,
+    /\b(src|href|action|poster)=("|')([^"']+)\2/gi,
+    (match: string, attr: string, quote: string, value: string) => {
+      const normalized = value.trim()
+      if (
+        !normalized ||
+        normalized.startsWith('#') ||
+        normalized.startsWith('data:') ||
+        normalized.startsWith('blob:') ||
+        normalized.startsWith('javascript:') ||
+        normalized.startsWith('//')
+      ) {
+        return match
+      }
+
+      return `${attr}=${quote}${buildProxyUrl(normalized, targetUrl)}${quote}`
+    },
   )
 }
 
-function injectBridgeScript(html: string, targetOrigin: string): string {
-  const bridgeScript = `<script>
+function injectPreviewProxyScript(html: string, targetUrl: URL): string {
+  const proxyScript = `<script>
 (() => {
-  const TARGET_ORIGIN = ${JSON.stringify(targetOrigin)};
-  const normalize = (value) => {
+  const PROXY_PREFIX = ${JSON.stringify(PREVIEW_PROXY_PREFIX + '/')};
+  const TARGET_URL = ${JSON.stringify(targetUrl.href)};
+  const toProxyUrl = (value) => {
     if (value == null) return value;
     if (typeof value !== 'string') value = String(value);
     if (!value || value.startsWith('#') || value.startsWith('data:') || value.startsWith('blob:') || value.startsWith('javascript:')) {
@@ -79,15 +95,15 @@ function injectBridgeScript(html: string, targetOrigin: string): string {
     if (value.startsWith('//')) {
       return value;
     }
-    if (value.startsWith('/')) {
-      return TARGET_ORIGIN + value;
-    }
     try {
-      const absolute = new URL(value, TARGET_ORIGIN + '/');
-      if (absolute.origin === window.location.origin) {
+      if (value.startsWith(PROXY_PREFIX)) {
         return value;
       }
-      return absolute.href;
+      const absolute = new URL(value, window.location.href);
+      if (absolute.origin === window.location.origin && absolute.pathname.startsWith(PROXY_PREFIX)) {
+        return absolute.pathname + absolute.search + absolute.hash;
+      }
+      return PROXY_PREFIX + new URL(value, TARGET_URL).href;
     } catch {
       return value;
     }
@@ -97,10 +113,10 @@ function injectBridgeScript(html: string, targetOrigin: string): string {
   if (typeof originalFetch === 'function') {
     window.fetch = function patchedFetch(input, init) {
       if (typeof input === 'string' || input instanceof URL) {
-        return originalFetch.call(this, normalize(String(input)), init);
+        return originalFetch.call(this, toProxyUrl(String(input)), init);
       }
       if (input instanceof Request) {
-        return originalFetch.call(this, new Request(normalize(input.url), input), init);
+        return originalFetch.call(this, new Request(toProxyUrl(input.url), input), init);
       }
       return originalFetch.call(this, input, init);
     };
@@ -108,13 +124,13 @@ function injectBridgeScript(html: string, targetOrigin: string): string {
 
   const nativeOpen = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function patchedOpen(method, url, ...rest) {
-    return nativeOpen.call(this, method, normalize(String(url)), ...rest);
+    return nativeOpen.call(this, method, toProxyUrl(String(url)), ...rest);
   };
 
   if (typeof window.EventSource === 'function') {
     const NativeEventSource = window.EventSource;
     window.EventSource = function PatchedEventSource(url, config) {
-      return new NativeEventSource(normalize(String(url)), config);
+      return new NativeEventSource(toProxyUrl(String(url)), config);
     };
     window.EventSource.prototype = NativeEventSource.prototype;
   }
@@ -122,18 +138,18 @@ function injectBridgeScript(html: string, targetOrigin: string): string {
   if (typeof window.open === 'function') {
     const nativeWindowOpen = window.open;
     window.open = function patchedWindowOpen(url, targetName, features) {
-      const nextUrl = typeof url === 'string' ? normalize(url) : url;
+      const nextUrl = typeof url === 'string' ? toProxyUrl(url) : url;
       return nativeWindowOpen.call(window, nextUrl, targetName, features);
     };
   }
 })();
 </script>`
 
-  const withAbsoluteRefs = absolutizeHtmlReferences(html, targetOrigin)
+  const withAbsoluteRefs = rewriteHtmlReferences(html, targetUrl)
   if (/<head[^>]*>/i.test(withAbsoluteRefs)) {
-    return withAbsoluteRefs.replace(/<head([^>]*)>/i, `<head$1>${bridgeScript}`)
+    return withAbsoluteRefs.replace(/<head([^>]*)>/i, `<head$1>${proxyScript}`)
   }
-  return `${bridgeScript}${withAbsoluteRefs}`
+  return `${proxyScript}${withAbsoluteRefs}`
 }
 
 function applyProxyHeaders(
@@ -168,10 +184,10 @@ async function readStream(stream: IncomingMessage): Promise<Buffer> {
   return Buffer.concat(chunks)
 }
 
-async function handleSelectProxyRequest(
+async function handlePreviewProxyRequest(
   req: IncomingMessage,
   res: ServerResponse,
-  target: SelectProxyTarget,
+  target: PreviewProxyTarget,
 ): Promise<void> {
   const transport = target.protocol === 'https' ? https : http
   const headers = { ...req.headers }
@@ -198,7 +214,14 @@ async function handleSelectProxyRequest(
       try {
         if (contentType.includes('text/html')) {
           const body = (await readStream(upstreamResponse)).toString('utf8')
-          res.end(injectBridgeScript(body, target.targetOrigin))
+          res.end(injectPreviewProxyScript(body, target.targetUrl))
+          resolve()
+          return
+        }
+
+        if (contentType.includes('text/css')) {
+          const body = (await readStream(upstreamResponse)).toString('utf8')
+          res.end(rewriteCssReferences(body, target.targetUrl))
           resolve()
           return
         }
@@ -208,7 +231,7 @@ async function handleSelectProxyRequest(
       } catch (error) {
         res.statusCode = 502
         res.setHeader('content-type', 'text/plain; charset=utf-8')
-        res.end(`Preview select bridge failed: ${error instanceof Error ? error.message : String(error)}`)
+        res.end(`Preview proxy failed: ${error instanceof Error ? error.message : String(error)}`)
         resolve()
       }
     })
@@ -216,7 +239,7 @@ async function handleSelectProxyRequest(
     upstreamRequest.on('error', (error) => {
       res.statusCode = 502
       res.setHeader('content-type', 'text/plain; charset=utf-8')
-      res.end(`Preview select bridge failed: ${error.message}`)
+      res.end(`Preview proxy failed: ${error.message}`)
       resolve()
     })
 
@@ -234,17 +257,17 @@ export default defineConfig({
     react(),
     tailwindcss(),
     {
-      name: 'supercode-preview-select-bridge',
+      name: 'supercode-preview-proxy',
       configureServer(server) {
         server.middlewares.use((req, res, next) => {
           const requestUrl = req.url || ''
-          const target = parseSelectProxyTarget(requestUrl)
+          const target = parsePreviewProxyTarget(requestUrl)
           if (!target) {
             next()
             return
           }
 
-          void handleSelectProxyRequest(req, res, target)
+          void handlePreviewProxyRequest(req, res, target)
         })
       },
     },

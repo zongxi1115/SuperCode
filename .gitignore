@@ -11,3 +11,4 @@ skills-lock.json
 .supercode/
 plans.md
 src-tauri/binaries
+.useless/

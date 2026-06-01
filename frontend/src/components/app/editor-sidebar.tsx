@@ -7,7 +7,7 @@ import {
   WebPreviewUrl,
 } from '@/components/ai-elements/web-preview';
 import { Button } from '@/components/ui/button';
-import { canUsePreviewSelectBridge } from '@/lib/preview-select-bridge';
+import { buildPreviewProxySrc } from '@/lib/preview-proxy';
 import { openExternalUrl } from '@/lib/api-client';
 import { AnimatePresence, motion } from 'motion/react';
 import { ExternalLink, FolderTree, Globe, MousePointerClick, PanelRightClose, RefreshCw, X } from 'lucide-react';
@@ -31,14 +31,6 @@ type PreviewConsoleLog = {
 };
 
 type PreviewAccessState = 'unknown' | 'same-origin' | 'cross-origin';
-type PreviewSelectBridgeState = 'unknown' | 'ready' | 'selecting' | 'unavailable';
-
-const BRIDGE_READY = 'SC_SELECT_BRIDGE_READY';
-const BRIDGE_PING = 'SC_SELECT_BRIDGE_PING';
-const BRIDGE_START = 'SC_SELECT_START';
-const BRIDGE_CANCEL = 'SC_SELECT_CANCEL';
-const BRIDGE_RESULT = 'SC_SELECT_RESULT';
-const BRIDGE_ERROR = 'SC_SELECT_ERROR';
 
 function getElementSelector(el: HTMLElement): string {
   const parts: string[] = [];
@@ -75,24 +67,6 @@ function getElementSelector(el: HTMLElement): string {
   return parts.slice(0, 4).join(' > ');
 }
 
-function getPostMessageTargetOrigin(url: string): string {
-  try {
-    return new URL(url).origin;
-  } catch {
-    return '*';
-  }
-}
-
-function isBridgeMessage(value: unknown): value is {
-  type: string;
-  selector?: unknown;
-  html?: unknown;
-  message?: unknown;
-  sourceUrl?: unknown;
-} {
-  return typeof value === 'object' && value !== null && 'type' in value;
-}
-
 export function EditorSidebar({
   isOpen,
   isFileTreeVisible,
@@ -109,14 +83,9 @@ export function EditorSidebar({
   const detachConsoleRef = useRef<(() => void) | null>(null);
   const [consoleLogs, setConsoleLogs] = useState<PreviewConsoleLog[]>([]);
   const [previewAccessState, setPreviewAccessState] = useState<PreviewAccessState>('unknown');
-  const [previewSelectBridgeState, setPreviewSelectBridgeState] =
-    useState<PreviewSelectBridgeState>('unknown');
   const previewAccessStateRef = useRef<PreviewAccessState>('unknown');
-  const previewSelectBridgeStateRef = useRef<PreviewSelectBridgeState>('unknown');
   const crossOriginNoticeShownRef = useRef(false);
-  const bridgeUnavailableNoticeShownRef = useRef(false);
-
-  const canBridgeCurrentPreview = canUsePreviewSelectBridge(url);
+  const previewSrc = buildPreviewProxySrc(url);
 
   const pushConsoleLog = useCallback((level: PreviewConsoleLog['level'], message: string) => {
     setConsoleLogs((prev) => [
@@ -141,26 +110,10 @@ export function EditorSidebar({
     setPreviewAccessState(next);
   }, []);
 
-  const setBridgeState = useCallback((next: PreviewSelectBridgeState) => {
-    if (previewSelectBridgeStateRef.current === next) {
-      return;
-    }
-    previewSelectBridgeStateRef.current = next;
-    setPreviewSelectBridgeState(next);
-  }, []);
-
   const resetSelectModeState = useCallback(() => {
     setIsSelectMode(false);
     cleanupRef.current = null;
   }, []);
-
-  const postBridgeMessage = useCallback((type: string) => {
-    const iframeWindow = iframeRef.current?.contentWindow;
-    if (!iframeWindow) {
-      return;
-    }
-    iframeWindow.postMessage({ type }, getPostMessageTargetOrigin(url));
-  }, [url]);
 
   const markCrossOrigin = useCallback((error?: unknown) => {
     setPreviewAccess('cross-origin');
@@ -204,13 +157,11 @@ export function EditorSidebar({
     if (iframeRef.current) {
       resetConsoleLogs();
       crossOriginNoticeShownRef.current = false;
-      bridgeUnavailableNoticeShownRef.current = false;
       setPreviewAccess('unknown');
-      setBridgeState('unknown');
       resetSelectModeState();
-      iframeRef.current.src = url;
+      iframeRef.current.src = previewSrc;
     }
-  }, [resetConsoleLogs, resetSelectModeState, setBridgeState, setPreviewAccess, url]);
+  }, [previewSrc, resetConsoleLogs, resetSelectModeState, setPreviewAccess]);
 
   const handleOpenInNewTab = useCallback(() => {
     if (url) {
@@ -219,13 +170,6 @@ export function EditorSidebar({
   }, [url]);
 
   const cancelSelectMode = useCallback(() => {
-    if (previewSelectBridgeStateRef.current === 'selecting') {
-      postBridgeMessage(BRIDGE_CANCEL);
-      setBridgeState('ready');
-      resetSelectModeState();
-      return;
-    }
-
     const doc = resolveIframeDocument();
     if (!doc) {
       resetSelectModeState();
@@ -235,7 +179,7 @@ export function EditorSidebar({
     doc.querySelectorAll('.__highlight-selected').forEach((el) => el.classList.remove('__highlight-selected'));
     cleanupRef.current?.();
     cleanupRef.current = null;
-  }, [postBridgeMessage, resetSelectModeState, resolveIframeDocument, setBridgeState]);
+  }, [resetSelectModeState, resolveIframeDocument]);
 
   const attachConsoleCapture = useCallback(() => {
     detachConsoleRef.current?.();
@@ -330,137 +274,38 @@ export function EditorSidebar({
       return;
     }
 
-    let unavailableTimer: number | undefined;
-
     const handleLoad = () => {
       crossOriginNoticeShownRef.current = false;
-      bridgeUnavailableNoticeShownRef.current = false;
       setPreviewAccess('unknown');
-      setBridgeState('unknown');
       resetSelectModeState();
       resetConsoleLogs();
       attachConsoleCapture();
-
-      if (canBridgeCurrentPreview) {
-        window.clearTimeout(unavailableTimer);
-        window.setTimeout(() => postBridgeMessage(BRIDGE_PING), 0);
-        unavailableTimer = window.setTimeout(() => {
-          if (
-            previewAccessStateRef.current === 'cross-origin' &&
-            previewSelectBridgeStateRef.current === 'unknown'
-          ) {
-            setBridgeState('unavailable');
-          }
-        }, 800);
-      }
     };
 
     iframe.addEventListener('load', handleLoad);
     return () => {
       iframe.removeEventListener('load', handleLoad);
-      window.clearTimeout(unavailableTimer);
     };
   }, [
     attachConsoleCapture,
-    canBridgeCurrentPreview,
     isOpen,
-    postBridgeMessage,
     resetConsoleLogs,
     resetSelectModeState,
-    setBridgeState,
     setPreviewAccess,
   ]);
 
   useEffect(() => {
-    const handleBridgeMessage = (event: MessageEvent<unknown>) => {
-      const iframeWindow = iframeRef.current?.contentWindow;
-      if (!iframeWindow || event.source !== iframeWindow || !isBridgeMessage(event.data)) {
-        return;
-      }
-
-      const sourceUrl = typeof event.data.sourceUrl === 'string' ? event.data.sourceUrl : url;
-      if (!canUsePreviewSelectBridge(sourceUrl)) {
-        return;
-      }
-
-      if (event.data.type === BRIDGE_READY) {
-        setPreviewAccess('cross-origin');
-        setBridgeState('ready');
-        crossOriginNoticeShownRef.current = true;
-        bridgeUnavailableNoticeShownRef.current = false;
-        return;
-      }
-
-      if (event.data.type === BRIDGE_RESULT) {
-        const selector = typeof event.data.selector === 'string' ? event.data.selector : '';
-        const html = typeof event.data.html === 'string' ? event.data.html : '';
-        setBridgeState('ready');
-        resetSelectModeState();
-        if (selector && html) {
-          onSelectElement?.(html, selector, sourceUrl);
-        }
-        return;
-      }
-
-      if (event.data.type === BRIDGE_ERROR) {
-        const message = typeof event.data.message === 'string' ? event.data.message : '选择元素失败';
-        pushConsoleLog('error', `跨域选择失败：${message}`);
-        setBridgeState('ready');
-        resetSelectModeState();
-        return;
-      }
-
-      if (event.data.type === BRIDGE_CANCEL) {
-        setBridgeState('ready');
-        resetSelectModeState();
-      }
-    };
-
-    window.addEventListener('message', handleBridgeMessage);
     return () => {
-      window.removeEventListener('message', handleBridgeMessage);
-    };
-  }, [onSelectElement, pushConsoleLog, resetSelectModeState, setBridgeState, setPreviewAccess, url]);
-
-  useEffect(() => {
-    return () => {
-      if (previewSelectBridgeStateRef.current === 'selecting') {
-        postBridgeMessage(BRIDGE_CANCEL);
-      }
       cleanupRef.current?.();
       cleanupRef.current = null;
       detachConsoleRef.current?.();
       detachConsoleRef.current = null;
     };
-  }, [postBridgeMessage]);
-
-  const handleBridgeSelectElement = useCallback(() => {
-    if (!canBridgeCurrentPreview) {
-      markCrossOrigin(new Error('跨域页面暂不支持直接选择元素'));
-      return;
-    }
-
-    if (previewSelectBridgeStateRef.current !== 'ready') {
-      if (!bridgeUnavailableNoticeShownRef.current) {
-        pushConsoleLog(
-          'warn',
-          '需要在目标 Vite dev 项目接入 scripts/supercode-vite-select-bridge-plugin.mjs，或手动引入 select-bridge.js 后才能跨域选择元素。'
-        );
-        bridgeUnavailableNoticeShownRef.current = true;
-      }
-      setBridgeState('unavailable');
-      return;
-    }
-
-    postBridgeMessage(BRIDGE_START);
-    setBridgeState('selecting');
-    setIsSelectMode(true);
-  }, [canBridgeCurrentPreview, markCrossOrigin, postBridgeMessage, pushConsoleLog, setBridgeState]);
+  }, []);
 
   const handleSelectElement = useCallback(() => {
-    const doc = previewAccessStateRef.current === 'cross-origin' ? null : resolveIframeDocument();
+    const doc = resolveIframeDocument();
     if (!doc) {
-      handleBridgeSelectElement();
       return;
     }
     setIsSelectMode(true);
@@ -525,25 +370,19 @@ export function EditorSidebar({
     doc.addEventListener('mouseout', handleMouseOut, true);
     doc.addEventListener('click', handleClick, true);
     doc.addEventListener('keydown', handleKeyDown, true);
-  }, [cancelSelectMode, handleBridgeSelectElement, onSelectElement, resolveIframeDocument, url]);
+  }, [cancelSelectMode, onSelectElement, resolveIframeDocument, url]);
 
   const selectTooltip = isSelectMode
     ? '取消选择'
     : previewAccessState === 'cross-origin'
-      ? previewSelectBridgeState === 'ready'
-        ? '跨域本地页面可通过 bridge 选择元素'
-        : previewSelectBridgeState === 'unavailable'
-          ? '目标页面需要引入 SuperCode 选择脚本'
-          : canBridgeCurrentPreview
-            ? '等待目标页面选择 bridge 握手'
-            : '跨域页面暂不支持直接选择元素'
+      ? '预览代理未能让页面同源'
       : previewAccessState === 'unknown'
         ? '页面加载完成后可选择元素'
         : '选择元素';
 
   const selectButtonClassName = [
     isSelectMode ? 'bg-primary/15 text-primary' : '',
-    !isSelectMode && previewAccessState === 'cross-origin' && previewSelectBridgeState !== 'ready' ? 'opacity-70' : '',
+    !isSelectMode && previewAccessState === 'cross-origin' ? 'opacity-70' : '',
   ].filter(Boolean).join(' ');
   return (
     <>
@@ -586,7 +425,7 @@ export function EditorSidebar({
                   <X className="w-4 h-4" />
                 </WebPreviewNavigationButton>
               </WebPreviewNavigation>
-              <WebPreviewBody ref={iframeRef} className="bg-white" />
+              <WebPreviewBody ref={iframeRef} className="bg-white" src={previewSrc} />
               <WebPreviewConsole logs={consoleLogs} />
             </WebPreview>
           </motion.div>
