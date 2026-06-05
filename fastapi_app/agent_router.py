@@ -19,6 +19,7 @@ def build_default_route_state() -> dict[str, Any]:
         "fallbackUsed": False,
         "keepCurrentAgent": False,
         "previousAgentType": None,
+        "loadedPlugins": [],
     }
 
 
@@ -47,6 +48,13 @@ def normalize_route_state(value: object) -> dict[str, Any]:
 
     previous_agent_type = str(state.get("previousAgentType") or "").strip().lower()
     state["previousAgentType"] = previous_agent_type if previous_agent_type in ALLOWED_AGENT_TYPES else None
+
+    raw_loaded_plugins = state.get("loadedPlugins")
+    if isinstance(raw_loaded_plugins, list):
+        loaded_plugins = [str(plugin_id).strip() for plugin_id in raw_loaded_plugins]
+    else:
+        loaded_plugins = []
+    state["loadedPlugins"] = sorted({plugin_id for plugin_id in loaded_plugins if plugin_id})
     return state
 
 

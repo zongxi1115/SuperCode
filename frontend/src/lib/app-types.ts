@@ -178,6 +178,8 @@ export type PluginSummary = {
   icon: string;
   navSlot: string;
   enabled: boolean;
+  loadable?: boolean;
+  loaded?: boolean;
 };
 
 export type SessionTokenUsage = {

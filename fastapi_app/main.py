@@ -33,7 +33,12 @@ except ImportError:  # pragma: no cover - optional dependency
 
 from deploy_agent import DeployConnectionManager, DeployPromptModel, build_deploy_tools
 from agent import Agent, AgentEvent, ChatSession, OpenAICompatibleClient
-from coding_agent import CodingPromptModel, InteractiveCommandSession, build_coding_tools
+from coding_agent import (
+    CodingPromptModel,
+    InteractiveCommandSession,
+    build_coding_tools,
+    build_project_docs_tools,
+)
 from coding_agent.tools import (
     DEFAULT_IGNORED_DIR_NAMES,
     delete_file_in_workspace,
@@ -85,7 +90,13 @@ from fastapi_app.api_models import (
 )
 from fastapi_app.kanban_store import KanbanStore
 from fastapi_app.memory_store import build_long_term_memory_context
-from fastapi_app.plugin_registry import list_builtin_plugins
+from fastapi_app.plugin_registry import get_builtin_plugin, list_builtin_plugins
+from fastapi_app.project_docs_store import (
+    create_project_doc,
+    list_project_docs,
+    read_project_docs,
+    write_project_docs,
+)
 from fastapi_app.rag_index import schedule_workspace_rag_index, test_embedding_config
 from fastapi_app.settings_store import (
     load_settings,
@@ -1810,6 +1821,7 @@ def rebuild_chat_session_for_agent_type(session: UISession, agent_type: str) -> 
         session.env_file,
         agent_type=agent_type,
         reasoning_effort=session.reasoning_effort,
+        loaded_plugin_ids=_get_loaded_plugin_ids(session),
     )
 
     session.agent_type = agent_type
@@ -1843,8 +1855,18 @@ def route_session_for_user_message(
         if forced_agent_type
         else decide_route_for_message(session, user_message)
     )
+    current_loaded_plugins = (
+        session.route_state.get("loadedPlugins")
+        if isinstance(session.route_state.get("loadedPlugins"), list)
+        else []
+    )
     next_agent_type = str(route_state.get("agentType") or session.agent_type)
-    session.route_state = normalize_route_state(route_state)
+    session.route_state = normalize_route_state(
+        {
+            **route_state,
+            "loadedPlugins": current_loaded_plugins,
+        }
+    )
     if next_agent_type != session.agent_type or session.chat_session is None:
         rebuild_chat_session_for_agent_type(session, next_agent_type)
     else:
@@ -1892,6 +1914,13 @@ def hydrate_session_from_state(state: PersistedSessionState) -> UISession:
         state.env_file,
         reasoning_effort=state.reasoning_effort,
         agent_type=state.agent_type,
+        loaded_plugin_ids={
+            str(plugin_id).strip()
+            for plugin_id in state.route_state.get("loadedPlugins", [])
+            if str(plugin_id).strip()
+        }
+        if isinstance(state.route_state.get("loadedPlugins"), list)
+        else set(),
     )
     interactive_command_session = InteractiveCommandSession(
         workspace=resolve_workspace_path(state.workspace)
@@ -1972,9 +2001,124 @@ def normalize_workspace_identifier(workspace_id: str) -> str:
     return normalize_workspace_impl(decoded, DEFAULT_WORKSPACE)
 
 
+def _get_loaded_plugin_ids(session: UISession) -> set[str]:
+    raw_loaded_plugins = session.route_state.get("loadedPlugins")
+    if not isinstance(raw_loaded_plugins, list):
+        return set()
+    return {str(plugin_id).strip() for plugin_id in raw_loaded_plugins if str(plugin_id).strip()}
+
+
+def _set_loaded_plugin_ids(session: UISession, plugin_ids: set[str]) -> None:
+    session.route_state = normalize_route_state(
+        {
+            **session.route_state,
+            "loadedPlugins": sorted(plugin_ids),
+        }
+    )
+
+
+def _plugin_payload_for_session(session: UISession, plugin: dict[str, Any]) -> dict[str, Any]:
+    plugin_id = str(plugin.get("id") or "").strip()
+    loaded_plugins = _get_loaded_plugin_ids(session)
+    return {
+        **plugin,
+        "loaded": plugin_id in loaded_plugins,
+    }
+
+
 @app.get("/api/plugins")
 async def get_plugins() -> JSONResponse:
     return JSONResponse({"plugins": list_builtin_plugins()})
+
+
+@app.get("/api/sessions/{session_id}/plugins")
+async def get_session_plugins(session_id: str) -> JSONResponse:
+    session = require_session(session_id)
+    plugins = [_plugin_payload_for_session(session, plugin) for plugin in list_builtin_plugins()]
+    return JSONResponse({"plugins": plugins})
+
+
+@app.post("/api/sessions/{session_id}/plugins/{plugin_id}/load")
+async def load_session_plugin(session_id: str, plugin_id: str) -> JSONResponse:
+    session = require_session(session_id)
+    plugin = get_builtin_plugin(plugin_id)
+    if plugin is None:
+        raise HTTPException(status_code=404, detail="插件不存在")
+    loaded_plugins = _get_loaded_plugin_ids(session)
+    loaded_plugins.add(plugin.id)
+    _set_loaded_plugin_ids(session, loaded_plugins)
+    rebuild_chat_session_for_agent_type(session, session.agent_type)
+    session.touch()
+    return JSONResponse({"plugin": _plugin_payload_for_session(session, plugin.to_payload())})
+
+
+@app.post("/api/sessions/{session_id}/plugins/{plugin_id}/unload")
+async def unload_session_plugin(session_id: str, plugin_id: str) -> JSONResponse:
+    session = require_session(session_id)
+    plugin = get_builtin_plugin(plugin_id)
+    if plugin is None:
+        raise HTTPException(status_code=404, detail="插件不存在")
+    loaded_plugins = _get_loaded_plugin_ids(session)
+    loaded_plugins.discard(plugin.id)
+    _set_loaded_plugin_ids(session, loaded_plugins)
+    rebuild_chat_session_for_agent_type(session, session.agent_type)
+    session.touch()
+    return JSONResponse({"plugin": _plugin_payload_for_session(session, plugin.to_payload())})
+
+
+@app.get("/api/sessions/{session_id}/project-docs")
+async def get_project_docs(session_id: str) -> JSONResponse:
+    session = require_session(session_id)
+    payload = read_project_docs(session.workspace)
+    session.touch()
+    return JSONResponse(payload)
+
+
+@app.put("/api/sessions/{session_id}/project-docs")
+async def save_project_docs(session_id: str, body: dict[str, Any] | None = Body(None)) -> JSONResponse:
+    session = require_session(session_id)
+    markdown = str((body or {}).get("markdown") or "")
+    payload = write_project_docs(session.workspace, markdown)
+    session.touch()
+    return JSONResponse(payload)
+
+
+@app.get("/api/sessions/{session_id}/project-docs/documents")
+async def list_session_project_docs(session_id: str) -> JSONResponse:
+    session = require_session(session_id)
+    payload = list_project_docs(session.workspace)
+    session.touch()
+    return JSONResponse(payload)
+
+
+@app.post("/api/sessions/{session_id}/project-docs/documents")
+async def create_session_project_doc(session_id: str, body: dict[str, Any] | None = Body(None)) -> JSONResponse:
+    session = require_session(session_id)
+    title = str((body or {}).get("title") or "")
+    payload = create_project_doc(session.workspace, title)
+    session.touch()
+    return JSONResponse(payload)
+
+
+@app.get("/api/sessions/{session_id}/project-docs/{document_id}")
+async def get_session_project_doc(session_id: str, document_id: str) -> JSONResponse:
+    session = require_session(session_id)
+    payload = read_project_docs(session.workspace, document_id)
+    session.touch()
+    return JSONResponse(payload)
+
+
+@app.put("/api/sessions/{session_id}/project-docs/{document_id}")
+async def save_session_project_doc(
+    session_id: str,
+    document_id: str,
+    body: dict[str, Any] | None = Body(None),
+) -> JSONResponse:
+    session = require_session(session_id)
+    markdown = str((body or {}).get("markdown") or "")
+    payload = write_project_docs(session.workspace, markdown, document_id)
+    session.touch()
+    return JSONResponse(payload)
 
 
 @app.get("/api/workspaces")
@@ -2174,6 +2318,8 @@ async def switch_session_model(session_id: str, request: SwitchModelRequest) -> 
     else:
         model = CodingPromptModel(client, workspace=session.workspace)
         tools = build_coding_tools()
+    if "project-docs" in _get_loaded_plugin_ids(session):
+        tools = tools + build_project_docs_tools()
     agent = Agent(
         model=model,
         tools=tools,
@@ -2262,6 +2408,7 @@ async def create_session(request: CreateSessionRequest) -> JSONResponse:
                 requested_env_file,
                 agent_type,
                 reasoning_effort,
+                set(),
             ),
             timeout=30,
         )
@@ -4251,6 +4398,7 @@ def build_chat_session(
     env_file: str | None = None,
     agent_type: str = "coding",
     reasoning_effort: str | None = None,
+    loaded_plugin_ids: set[str] | None = None,
 ) -> tuple[ChatSession | None, str, str | None, str | None, str | None]:
     try:
         config, normalized_model_ref = build_agent_config(APP_DATA_ROOT, env_file)
@@ -4258,6 +4406,7 @@ def build_chat_session(
             config.reasoning_effort = normalize_reasoning_effort(reasoning_effort)
         client = OpenAICompatibleClient(config)
         resolved_workspace = resolve_workspace_path(workspace)
+        loaded_plugin_ids = loaded_plugin_ids or set()
         if agent_type == "deploy":
             model = DeployPromptModel(client, workspace=workspace)
             tools = build_deploy_tools()
@@ -4267,6 +4416,8 @@ def build_chat_session(
         else:
             model = CodingPromptModel(client, workspace=workspace)
             tools = build_coding_tools()
+        if "project-docs" in loaded_plugin_ids:
+            tools = tools + build_project_docs_tools()
         agent = Agent(
             model=model,
             tools=tools,
@@ -5324,6 +5475,13 @@ def _rebuild_chat_session_for_existing_history(
         env_file,
         agent_type=agent_type,
         reasoning_effort=reasoning_effort,
+        loaded_plugin_ids={
+            str(plugin_id).strip()
+            for plugin_id in route_state.get("loadedPlugins", [])
+            if str(plugin_id).strip()
+        }
+        if isinstance(route_state.get("loadedPlugins"), list)
+        else set(),
     )
     interactive_command_session = InteractiveCommandSession(
         workspace=resolve_workspace_path(workspace)

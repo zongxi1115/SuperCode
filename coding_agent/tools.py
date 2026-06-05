@@ -24,6 +24,7 @@ from agent.schema import AgentResponse, AgentState, StepRecord, ToolCall
 from agent.tools import BaseTool, ToolContext
 from coding_agent.model import CodeExplorationPromptModel
 from fastapi_app.memory_store import remember_preference
+from fastapi_app.project_docs_store import read_project_docs, write_project_docs
 
 INTERACTIVE_INPUT_PROMPT_IDLE_SECONDS = 0.2
 INTERACTIVE_POLL_SECONDS = 0.05
@@ -1247,6 +1248,50 @@ class GetDocsTool(CodingBaseTool):
                 ]
             ),
         }
+
+
+class ReadProjectDocsTool(CodingBaseTool):
+    """读取当前工作区的项目文档。"""
+
+    name = "read_project_docs"
+    description = (
+        "读取项目文档插件维护的当前工作区项目文档。"
+        "仅当 project-docs 插件已加载时可用；适合在理解项目约定、需求、设计说明前调用。"
+    )
+    supports_parallel = True
+    parameters_schema = {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    }
+
+    def run(self, arguments: dict[str, object], context: ToolContext) -> dict[str, object]:
+        return read_project_docs(str(context.workspace))
+
+
+class WriteProjectDocsTool(CodingBaseTool):
+    """写入当前工作区的项目文档。"""
+
+    name = "write_project_docs"
+    description = (
+        "覆盖写入项目文档插件维护的当前工作区项目文档。"
+        "仅当 project-docs 插件已加载时可用；参数 markdown 必填，应写入完整 Markdown 文档。"
+    )
+    parameters_schema = {
+        "type": "object",
+        "properties": {
+            "markdown": {
+                "type": "string",
+                "description": "完整的项目文档 Markdown 内容。",
+            },
+        },
+        "required": ["markdown"],
+        "additionalProperties": False,
+    }
+
+    def run(self, arguments: dict[str, object], context: ToolContext) -> dict[str, object]:
+        markdown = str(arguments.get("markdown") or "")
+        return write_project_docs(str(context.workspace), markdown)
 
 
 class GlobFileTool(CodingBaseTool):
@@ -2524,33 +2569,104 @@ class ApplyPatchTool(CodingBaseTool):
 
     name = "apply_patch"
     description = (
-        "基于起止行号替换文件内容，参数：filename、start_line、end_line、new_content。"
-        "包含 start_line 和 end_line，即 [start_line, end_line] 会被替换。"
+        "基于起止行号替换文件内容，参数：filename、edits。"
+        "edits 是数组，每项包含 start_line、end_line、new_content；"
+        "多处修改必须放在同一次调用里，所有行号都基于修改前的原文件。"
+        "兼容旧参数 start_line、end_line、new_content。"
     )
     parameters_schema = {
         "type": "object",
         "properties": {
             "filename": {"type": "string"},
+            "edits": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "start_line": {"type": "integer"},
+                        "end_line": {"type": "integer"},
+                        "new_content": {"type": "string"},
+                    },
+                    "required": ["start_line", "end_line", "new_content"],
+                    "additionalProperties": False,
+                },
+                "minItems": 1,
+            },
             "start_line": {"type": "integer"},
             "end_line": {"type": "integer"},
             "new_content": {"type": "string"},
         },
-        "required": ["filename", "start_line", "end_line", "new_content"],
+        "required": ["filename"],
         "additionalProperties": False,
     }
+
+    def _parse_edits(self, arguments: dict[str, object]) -> list[dict[str, object]]:
+        edits_raw = arguments.get("edits")
+        if edits_raw is not None:
+            if not isinstance(edits_raw, list) or not edits_raw:
+                raise ValueError("edits 必须是非空数组")
+            edits: list[dict[str, object]] = []
+            for index, edit_raw in enumerate(edits_raw, start=1):
+                if not isinstance(edit_raw, dict):
+                    raise ValueError(f"edits[{index}] 必须是对象")
+                edits.append(edit_raw)
+            return edits
+
+        missing_fields = [
+            field
+            for field in ("start_line", "end_line", "new_content")
+            if field not in arguments
+        ]
+        if missing_fields:
+            raise ValueError(
+                "apply_patch 需要 edits，或旧参数 start_line、end_line、new_content"
+            )
+        return [
+            {
+                "start_line": arguments["start_line"],
+                "end_line": arguments["end_line"],
+                "new_content": arguments.get("new_content", ""),
+            }
+        ]
+
+    def _normalize_edit(
+        self, edit: dict[str, object], total_lines: int, index: int
+    ) -> tuple[int, int, str]:
+        try:
+            start_line = int(edit["start_line"])
+            end_line = int(edit["end_line"])
+        except KeyError as exc:
+            raise ValueError(
+                f"edits[{index}] 缺少 {exc.args[0]}"
+            ) from exc
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"edits[{index}] 的 start_line 和 end_line 必须是整数"
+            ) from exc
+
+        if "new_content" not in edit:
+            raise ValueError(f"edits[{index}] 缺少 new_content")
+        new_content = str(edit.get("new_content", ""))
+
+        if start_line < 1 or end_line < 0:
+            raise ValueError("start_line 必须 >= 1，end_line 必须 >= 0")
+        if start_line > end_line + 1:
+            raise ValueError("start_line 不能大于 end_line + 1")
+        if start_line > total_lines + 1:
+            raise ValueError(
+                f"start_line ({start_line}) 超出文件总行数 ({total_lines})"
+            )
+        if end_line > total_lines:
+            raise ValueError(
+                f"end_line ({end_line}) 超出文件总行数 ({total_lines})"
+            )
+
+        return start_line, end_line, new_content
 
     def run(
         self, arguments: dict[str, object], context: ToolContext
     ) -> dict[str, object]:
         filename = str(arguments["filename"])
-        start_line = int(arguments["start_line"])
-        end_line = int(arguments["end_line"])
-        new_content = str(arguments.get("new_content", ""))
-
-        if start_line < 1 or end_line < 1:
-            raise ValueError("start_line 和 end_line 必须 >= 1")
-        if start_line > end_line + 1:
-            raise ValueError("start_line 不能大于 end_line + 1")
 
         target = self._resolve_path(filename, context)
         if not target.exists():
@@ -2564,18 +2680,23 @@ class ApplyPatchTool(CodingBaseTool):
         lines = original_text.splitlines()
         total_lines = len(lines)
 
-        if start_line > total_lines + 1:
-            raise ValueError(
-                f"start_line ({start_line}) 超出文件总行数 ({total_lines})"
-            )
+        edits = [
+            self._normalize_edit(edit, total_lines, index)
+            for index, edit in enumerate(self._parse_edits(arguments), start=1)
+        ]
+        edits_by_start_line = sorted(edits, key=lambda edit: (edit[0], edit[1]))
+        previous_end_line = -1
+        for start_line, end_line, _new_content in edits_by_start_line:
+            if start_line <= previous_end_line:
+                raise ValueError("edits 不能包含重叠的行号区间")
+            previous_end_line = max(previous_end_line, end_line)
 
-        new_lines = new_content.splitlines()
-
-        # 0-indexed slicing
-        prefix = lines[: start_line - 1]
-        suffix = lines[end_line:] if end_line <= total_lines else []
-
-        updated_lines = prefix + new_lines + suffix
+        updated_lines = lines[:]
+        for start_line, end_line, new_content in sorted(
+            edits, key=lambda edit: (edit[0], edit[1]), reverse=True
+        ):
+            new_lines = new_content.splitlines()
+            updated_lines[start_line - 1 : end_line] = new_lines
         updated_text = "\n".join(updated_lines)
 
         if had_trailing_newline and (updated_text or original_text):
@@ -2584,7 +2705,7 @@ class ApplyPatchTool(CodingBaseTool):
         self._write_text(target, updated_text)
 
         return {
-            "summary": f"已修改文件 {filename} 的第 {start_line} 到 {end_line} 行。",
+            "summary": f"已修改文件 {filename} 的 {len(edits)} 处行号区间。",
             "files": [filename],
         }
 
@@ -3554,6 +3675,15 @@ def build_coding_tools() -> list[BaseTool]:
         GitCommitTool(),
         GitLogTool(),
         GitTagTool(),
+    ]
+
+
+def build_project_docs_tools() -> list[BaseTool]:
+    """构造项目文档插件工具集。"""
+
+    return [
+        ReadProjectDocsTool(),
+        WriteProjectDocsTool(),
     ]
 
 

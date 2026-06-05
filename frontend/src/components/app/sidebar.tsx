@@ -4,7 +4,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { AnimatePresence, motion } from 'motion/react';
 import type { PluginSummary, SessionHistoryItem } from '@/lib/app-types';
 import { cn } from '@/lib/utils';
-import { ChevronRight, FileCode, FolderOpen, GitBranch, PanelLeftClose, PanelLeftOpen, Plus, Trash2, LayoutDashboard } from 'lucide-react';
+import { ChevronRight, FileCode, FileText, FolderOpen, GitBranch, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Plus, Trash2 } from 'lucide-react';
 import { useMemo, useState } from 'react';
 
 type SidebarProps = {
@@ -41,6 +41,24 @@ type ProjectGroup = {
   name: string;
   items: SessionHistoryItem[];
 };
+
+const fallbackPlugins: PluginSummary[] = [
+  {
+    id: 'kanban',
+    name: '看板',
+    description: '工作区级任务看板',
+    icon: 'layout-dashboard',
+    navSlot: 'sidebar',
+    enabled: true,
+  },
+];
+
+function PluginIcon({ id }: { id: string }) {
+  if (id === 'project-docs') {
+    return <FileText className="w-3.5 h-3.5 shrink-0" />;
+  }
+  return <LayoutDashboard className="w-3.5 h-3.5 shrink-0" />;
+}
 
 export function Sidebar({
   currentSessionId,
@@ -147,12 +165,12 @@ export function Sidebar({
             <ScrollArea className="flex-1 px-2 py-1">
               <div className="space-y-1">
                 {/* 插件入口 */}
-                {(plugins.length > 0 ? plugins : [{ id: 'kanban', name: '看板', description: '工作区级任务看板', icon: 'layout-dashboard', navSlot: 'sidebar', enabled: true }]).length > 0 ? (
+                {(plugins.length > 0 ? plugins : fallbackPlugins).length > 0 ? (
                   <div className="space-y-0.5 mb-4">
                     <div className="px-2 py-1.5 text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
                       插件
                     </div>
-                    {(plugins.length > 0 ? plugins : [{ id: 'kanban', name: '看板', description: '工作区级任务看板', icon: 'layout-dashboard', navSlot: 'sidebar', enabled: true }])
+                    {(plugins.length > 0 ? plugins : fallbackPlugins)
                       .filter((plugin) => plugin.enabled && plugin.navSlot === 'sidebar')
                       .map((plugin) => (
                         <button
@@ -165,8 +183,17 @@ export function Sidebar({
                           )}
                           title={plugin.description}
                         >
-                          <LayoutDashboard className="w-3.5 h-3.5 shrink-0" />
+                          <PluginIcon id={plugin.id} />
                           <span className="flex-1 text-left">{plugin.id === 'kanban' ? '看板' : plugin.name}</span>
+                          {plugin.loadable ? (
+                            <span
+                              className={cn(
+                                'size-1.5 shrink-0 rounded-full',
+                                plugin.loaded ? 'bg-emerald-500' : 'bg-muted-foreground/25'
+                              )}
+                              title={plugin.loaded ? '已加载' : '未加载'}
+                            />
+                          ) : null}
                         </button>
                       ))}
                   </div>

@@ -1818,6 +1818,7 @@ function ToolBody({
       typeof args.start_line === "number" ? args.start_line : undefined;
     const endLine =
       typeof args.end_line === "number" ? args.end_line : undefined;
+    const editCount = Array.isArray(args.edits) ? args.edits.length : undefined;
     const fileIcon = filename
       ? getFileIcon(filename.split(/[\\/]/).pop() ?? "")
       : null;
@@ -1836,6 +1837,9 @@ function ToolBody({
               <span className="text-muted-foreground">
                 :{startLine}-{endLine}
               </span>
+            )}
+            {editCount != null && editCount > 1 && (
+              <span className="text-muted-foreground">:{editCount} 处编辑</span>
             )}
           </TaskItemFile>
         )}

@@ -349,7 +349,17 @@ class UIMessageStreamAdapter:
 
         if tool_name == "apply_patch":
             new_content = arguments.get("new_content")
-            return new_content if isinstance(new_content, str) else ""
+            if isinstance(new_content, str):
+                return new_content
+            edits = arguments.get("edits")
+            if isinstance(edits, list):
+                edit_contents = [
+                    edit.get("new_content")
+                    for edit in edits
+                    if isinstance(edit, dict) and isinstance(edit.get("new_content"), str)
+                ]
+                return "\n\n".join(edit_contents)
+            return ""
 
         return ""
 

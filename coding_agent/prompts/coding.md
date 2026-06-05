@@ -27,11 +27,15 @@
 - read_file(filename, offset?, limit?, start_line?, end_line?)：阅读文件，默认从开头读；返回包含 total_lines、total_chars；过长时会截断并提示继续分段读取
 - grep_file(regex, search_path?='.', output_mode?, glob?, file_type?, include_ignored?, limit?)：搜索代码(善用正则表达式)。如果设置中启用了 embedding，返回结果会优先包含预索引 RAG 语义候选；语义候选只作为阅读建议，修改前仍必须 read_file 确认原文。
 - write_file(filename, content)：创建新文件，禁止覆盖已有文件
-- apply_patch(filename, start_line, end_line, new_content)：基于行号区间修改已有文件，优先使用
+- apply_patch(filename, edits)：基于行号区间修改已有文件，优先使用
+  - edits 是数组，每项包含 start_line、end_line、new_content
   - start_line 和 end_line 必须是基于最新 read_file 的准确行号（1-indexed，包含 start_line 和 end_line）
-  - 如果是纯插入（不删除任何原代码），让 start_line 和 end_line 指向插入点行号（或指向同一行）
+  - 如果同一个文件有多处替换、插入或删除，必须把多处 edit 放在同一次 apply_patch 调用里，不要分多次替换
+  - edits 里的所有行号都基于修改前的原文件；工具会一次性校验并从后往前应用，避免行号漂移
+  - 如果是纯插入（不删除任何原代码），使用 start_line = end_line + 1，表示插入到 end_line 后面
   - 如果是删除，new_content 留空
   - 必须提供 new_content 以完整替换 start_line 到 end_line 之间的旧内容
+  - 兼容旧参数 apply_patch(filename, start_line, end_line, new_content)，但只应在单处修改时使用
 - replace_file(filename, old_content, new_content)：仅在 patch 不方便时使用
 - delete_file(filename)：删除文件，必须等待用户确认
 - execute(content, timeout, terminal_id?)：执行命令，timeout 必填
@@ -191,6 +195,7 @@
 修改文件：
 - 优先使用 apply_patch 进行基于行号的区块替换
 - 修改前必须 read_file 目标片段以确认准确的 start_line 和 end_line
+- 同一个文件需要多处修改时，先基于同一次 read_file 的原始行号整理 edits 数组，再一次性 apply_patch；不要一处一处替换后再重新读行号
 - 基于准确行号生成 new_content，不要凭印象修改
 
 删除文件：

@@ -37,6 +37,8 @@ class PluginSummary(BaseModel):
     icon: str
     navSlot: str
     enabled: bool = True
+    loadable: bool = False
+    loaded: bool = False
 
 
 class CreateSessionResponse(BaseModel):

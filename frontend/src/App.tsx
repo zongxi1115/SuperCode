@@ -8,6 +8,7 @@ import { TerminalPanel } from '@/components/app/terminal-panel';
 import { SettingsDialog } from '@/components/app/settings-dialog';
 import { WorkspacePicker } from '@/components/app/workspace-picker';
 import { KanbanBoard } from '@/components/kanban/kanban-board';
+import { ProjectDocsPage } from '@/components/project-docs/project-docs-page';
 import type { KanbanAiState, KanbanCard } from '@/lib/kanban-types';
 import type {
   AgentMode,
@@ -103,8 +104,13 @@ function getUrlAppState(): UrlAppState {
   const searchParams = new URLSearchParams(window.location.search);
   const legacyHash = window.location.hash.slice(1);
   const sessionMatch = pathname.match(/^\/sessions\/([^/]+)(?:\/([^/]+))?$/);
+  const pluginPath = sessionMatch?.[2] ?? pathname.slice(1);
   const pluginFromPath =
-    sessionMatch?.[2] === 'kanban' || pathname === '/kanban' ? 'kanban' : null;
+    pluginPath === 'kanban'
+      ? 'kanban'
+      : pluginPath === 'docs' || pluginPath === 'project-docs'
+        ? 'project-docs'
+        : null;
   const pluginFromHash = legacyHash.startsWith('/plugin/')
     ? legacyHash.replace('/plugin/', '')
     : null;
@@ -127,8 +133,13 @@ function buildUrlForAppState(state: UrlAppState) {
   const pathBase = state.sessionId
     ? `/sessions/${encodeURIComponent(state.sessionId)}`
     : '/app';
-  const pathname = state.activePlugin === 'kanban'
-    ? state.sessionId ? `${pathBase}/kanban` : '/kanban'
+  const pluginPath = state.activePlugin === 'kanban'
+    ? 'kanban'
+    : state.activePlugin === 'project-docs'
+      ? 'docs'
+      : null;
+  const pathname = pluginPath
+    ? state.sessionId ? `${pathBase}/${pluginPath}` : `/${pluginPath}`
     : pathBase;
 
   if (state.isEditorOpen) {
@@ -1096,6 +1107,74 @@ export default function App() {
       setIsSessionBooting(false);
     }
   }, [applySessionPayload, loadSessionHistory, selectedAgentMode, selectedModelId, selectedReasoningEffort]);
+
+  const refreshPlugins = useCallback(async (targetSessionId?: string | null) => {
+    const endpoint = targetSessionId ? `/api/sessions/${targetSessionId}/plugins` : '/api/plugins';
+    const response = await apiFetch(endpoint);
+    const data = await response.json() as { plugins?: PluginSummary[] };
+    setAvailablePlugins(data.plugins ?? []);
+    return data.plugins ?? [];
+  }, []);
+
+  useEffect(() => {
+    void refreshPlugins(sessionId);
+  }, [refreshPlugins, sessionId]);
+
+  const setPluginLoaded = useCallback(async (targetSessionId: string, pluginId: string, loaded: boolean) => {
+    const response = await apiFetch(`/api/sessions/${targetSessionId}/plugins/${pluginId}/${loaded ? 'load' : 'unload'}`, {
+      method: 'POST',
+    });
+    const data = await response.json() as { plugin?: PluginSummary; detail?: string };
+    if (!response.ok) {
+      throw new Error(String(data.detail ?? '切换插件加载状态失败'));
+    }
+    if (data.plugin) {
+      setAvailablePlugins((prev) =>
+        prev.map((plugin) => (plugin.id === data.plugin?.id ? { ...plugin, ...data.plugin } : plugin)),
+      );
+    }
+    await refreshPlugins(targetSessionId);
+  }, [refreshPlugins]);
+
+  const handleActivePluginChange = useCallback(
+    async (pluginId: string | null) => {
+      const previousPlugin = activePlugin;
+      let targetSessionId = sessionId;
+      if (!targetSessionId && pluginId) {
+        const created = await createSessionWithWorkspace(currentBaseWorkspace || selectedWorkspace);
+        targetSessionId = created?.sessionId ?? null;
+      }
+
+      if (targetSessionId && previousPlugin === 'project-docs' && pluginId !== 'project-docs') {
+        await setPluginLoaded(targetSessionId, 'project-docs', false);
+      }
+      if (targetSessionId && pluginId === 'project-docs') {
+        await setPluginLoaded(targetSessionId, 'project-docs', true);
+      }
+      setActivePlugin(pluginId);
+    },
+    [
+      activePlugin,
+      createSessionWithWorkspace,
+      currentBaseWorkspace,
+      selectedWorkspace,
+      sessionId,
+      setPluginLoaded,
+    ],
+  );
+
+  useEffect(() => {
+    if (!sessionId) return;
+    const docsPlugin = availablePlugins.find((plugin) => plugin.id === 'project-docs');
+    if (!docsPlugin) return;
+    if (activePlugin === 'project-docs' && !docsPlugin.loaded) {
+      void setPluginLoaded(sessionId, 'project-docs', true);
+      return;
+    }
+    if (activePlugin !== 'project-docs' && docsPlugin.loaded) {
+      void setPluginLoaded(sessionId, 'project-docs', false);
+    }
+  }, [activePlugin, availablePlugins, sessionId, setPluginLoaded]);
 
   const hasRestoredRef = useRef(false);
 
@@ -3250,7 +3329,7 @@ export default function App() {
         onSelectOtherProject={handleSelectOtherProject}
         activePlugin={activePlugin}
         plugins={availablePlugins}
-        onActivePluginChange={setActivePlugin}
+        onActivePluginChange={(pluginId) => void handleActivePluginChange(pluginId)}
       />
       {!isSidebarCollapsed && (
         <ResizableHandle
@@ -3266,6 +3345,10 @@ export default function App() {
             fileTree={fileTree}
             onSendCardToAi={handleSendKanbanCardToAi}
           />
+        </div>
+      ) : activePlugin === 'project-docs' ? (
+        <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+          <ProjectDocsPage sessionId={sessionId} workspace={selectedWorkspace} />
         </div>
       ) : (
       <>
