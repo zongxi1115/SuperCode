@@ -271,6 +271,7 @@ export type SessionPayload = {
   thoughts?: string[];
   terminalOutput?: string;
   fileTree?: FileTreeNode[];
+  fileTreeRevision?: number;
   selectedFilePath?: string | null;
   selectedFileContent?: string;
   availableSkills?: SkillSummary[];
@@ -418,6 +419,7 @@ export type MemoryItem = {
 export type AppSettings = {
   autoApprove: boolean;
   thinkingRendering: "text" | "markdown";
+  finalAnswerRendering: "markdown" | "html";
   bodyFontFamily: string;
   bodyFontSize: number;
   bodyLineHeight: number;

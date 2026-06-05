@@ -464,8 +464,39 @@ function formatRetryDelay(ms: number) {
   return Number.isInteger(seconds) ? `${seconds} 秒` : `${seconds.toFixed(1)} 秒`;
 }
 
+function applyDirectoryPatch(nodes: FileTreeNode[], directories: FileTreeNode[]) {
+  let changed = false;
+
+  const replaceInNodes = (currentNodes: FileTreeNode[]): FileTreeNode[] =>
+    currentNodes.map((node) => {
+      const replacement = directories.find((directory) => directory.path === node.path);
+      if (replacement) {
+        changed = true;
+        return replacement;
+      }
+      if (node.children?.length) {
+        const nextChildren = replaceInNodes(node.children);
+        if (nextChildren !== node.children) {
+          return { ...node, children: nextChildren };
+        }
+      }
+      return node;
+    });
+
+  const nextNodes = replaceInNodes(nodes);
+  return changed ? nextNodes : null;
+}
+
 function getErrorMessage(error: unknown, fallback: string) {
   return error instanceof Error && error.message ? error.message : fallback;
+}
+
+function normalizeAppSettings(settings: AppSettings): AppSettings {
+  return {
+    ...settings,
+    finalAnswerRendering:
+      settings.finalAnswerRendering === 'html' ? 'html' : 'markdown',
+  };
 }
 
 function waitForRetryDelay(ms: number, signal: AbortSignal) {
@@ -520,6 +551,8 @@ export default function App() {
   const [codeChanges, setCodeChanges] = useState<CodeChangeRecord[]>([]);
   const [input, setInput] = useState('');
   const [fileTree, setFileTree] = useState<FileTreeNode[]>([]);
+  const fileTreeRef = useRef<FileTreeNode[]>([]);
+  const fileTreeRevisionRef = useRef(0);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [activePlugin, setActivePlugin] = useState<string | null>(initialUrlState.activePlugin);
   const [terminalCwd, setTerminalCwd] = useState('');
@@ -571,6 +604,7 @@ export default function App() {
   const [appSettings, setAppSettings] = useState<AppSettings>({
     autoApprove: false,
     thinkingRendering: 'text',
+    finalAnswerRendering: 'markdown',
     bodyFontFamily:
       'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
     bodyFontSize: 14,
@@ -705,6 +739,27 @@ export default function App() {
     setTerminalBackend((prev) => data.backend ?? prev);
   }, []);
 
+  const applyFileTreeSnapshot = useCallback((tree: FileTreeNode[], revision?: number | null) => {
+    fileTreeRef.current = tree;
+    setFileTree(tree);
+    if (typeof revision === 'number' && Number.isFinite(revision)) {
+      fileTreeRevisionRef.current = Math.max(fileTreeRevisionRef.current, revision);
+    }
+  }, []);
+
+  const refreshFileTreeSnapshot = useCallback(async (targetSessionId?: string | null, force = false) => {
+    const currentSessionId = targetSessionId ?? sessionId;
+    if (!currentSessionId) return;
+
+    const query = force ? '?force=true' : '';
+    const res = await apiFetch(`/api/sessions/${currentSessionId}/file-tree${query}`);
+    if (!res.ok) {
+      throw new Error('刷新项目结构失败');
+    }
+    const data = await res.json();
+    applyFileTreeSnapshot(Array.isArray(data.fileTree) ? data.fileTree : [], data.revision);
+  }, [applyFileTreeSnapshot, sessionId]);
+
   const appendCodeChanges = useCallback((incoming: CodeChangeRecord[]) => {
     setCodeChanges((prev) => {
       const merged = mergeCodeChanges(prev, incoming);
@@ -789,7 +844,7 @@ export default function App() {
         const data: TerminalSnapshotPayload = await res.json();
         applyTerminalSnapshot(data);
         if (Array.isArray(data.fileTree)) {
-          setFileTree(data.fileTree);
+          applyFileTreeSnapshot(data.fileTree, null);
         }
         if (options?.includeProcesses) {
           setManagedProcesses(Array.isArray(data.processes) ? data.processes : []);
@@ -800,7 +855,7 @@ export default function App() {
         }
       }
     },
-    [applyTerminalSnapshot, sessionId]
+    [applyFileTreeSnapshot, applyTerminalSnapshot, sessionId]
   );
 
   const refreshFileTreeAfterTerminalActivity = useCallback(
@@ -814,6 +869,116 @@ export default function App() {
     },
     [isTerminalOpen, refreshTerminalState]
   );
+
+  useEffect(() => {
+    if (!sessionId) return;
+
+    const controller = new AbortController();
+    let buffer = '';
+
+    const parseSsePayload = (eventStr: string) => {
+      const dataLines = eventStr
+        .split('\n')
+        .filter((line) => line.startsWith('data:'))
+        .map((line) => line.slice(5).trimStart());
+      if (dataLines.length === 0) return null;
+      const rawData = dataLines.join('\n').trim();
+      if (!rawData || rawData === '[DONE]') return null;
+      return JSON.parse(rawData) as {
+        type?: string;
+        revision?: number;
+        tree?: unknown;
+        directories?: unknown;
+      };
+    };
+
+    const handleFileTreeEvent = async (eventStr: string) => {
+      const parsed = parseSsePayload(eventStr);
+      if (!parsed) return;
+
+      const revision = typeof parsed.revision === 'number' ? parsed.revision : 0;
+      if (parsed.type === 'tree.snapshot' && Array.isArray(parsed.tree)) {
+        const currentRevision = fileTreeRevisionRef.current;
+        if (revision > 0 && revision < currentRevision) {
+          return;
+        }
+        const nextTree = parsed.tree as FileTreeNode[];
+        fileTreeRef.current = nextTree;
+        setFileTree(nextTree);
+        fileTreeRevisionRef.current = Math.max(currentRevision, revision);
+        return;
+      }
+
+      if (parsed.type === 'tree.patch') {
+        const currentRevision = fileTreeRevisionRef.current;
+        if (revision > 0 && currentRevision > 0 && revision > currentRevision + 1) {
+          await refreshFileTreeSnapshot(sessionId, true);
+          return;
+        }
+        if (revision > 0 && revision < currentRevision) {
+          return;
+        }
+        if (Array.isArray(parsed.tree)) {
+          const nextTree = parsed.tree as FileTreeNode[];
+          fileTreeRef.current = nextTree;
+          setFileTree(nextTree);
+        } else if (Array.isArray(parsed.directories)) {
+          const nextTree = applyDirectoryPatch(fileTreeRef.current, parsed.directories as FileTreeNode[]);
+          if (nextTree === null) {
+            await refreshFileTreeSnapshot(sessionId, true);
+            return;
+          }
+          fileTreeRef.current = nextTree;
+          setFileTree(nextTree);
+        }
+        const nextRevision = Math.max(currentRevision, revision);
+        fileTreeRevisionRef.current = nextRevision;
+      }
+    };
+
+    const run = async () => {
+      try {
+        const revision = fileTreeRevisionRef.current;
+        const query = revision > 0 ? `?since=${revision}` : '';
+        const res = await apiFetch(`/api/sessions/${sessionId}/file-tree/events${query}`, {
+          signal: controller.signal,
+        });
+        if (!res.ok || !res.body) {
+          throw new Error('连接项目结构事件流失败');
+        }
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) {
+            buffer += decoder.decode();
+            break;
+          }
+          buffer += decoder.decode(value, { stream: true });
+          const events = buffer.split('\n\n');
+          buffer = events.pop() ?? '';
+          for (const eventStr of events) {
+            await handleFileTreeEvent(eventStr);
+          }
+        }
+        if (buffer.trim()) {
+          await handleFileTreeEvent(buffer);
+        }
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          console.error(error);
+          void refreshFileTreeSnapshot(sessionId, true).catch(console.error);
+        }
+      }
+    };
+
+    void run();
+
+    return () => {
+      controller.abort();
+    };
+  }, [refreshFileTreeSnapshot, sessionId]);
 
   const loadSessionContext = useCallback(
     async (options?: { silent?: boolean; targetSessionId?: string }) => {
@@ -885,7 +1050,7 @@ export default function App() {
 
   const loadAppSettings = useCallback(async () => {
     const res = await apiFetch('/api/settings');
-    const data = await res.json();
+    const data = normalizeAppSettings(await res.json());
     setAppSettings(data);
     return data;
   }, []);
@@ -900,7 +1065,7 @@ export default function App() {
     if (!res.ok) {
       throw new Error(String(data.detail ?? '保存设置失败'));
     }
-    setAppSettings(data);
+    setAppSettings(normalizeAppSettings(data));
   }, []);
 
   const loadModelConfigs = useCallback(async () => {
@@ -971,13 +1136,13 @@ export default function App() {
     setSelectedReasoningEffort(normalizeReasoningEffort(data.reasoningEffort));
     setMessages(hydrateMessages(data.messages ?? [], data.thoughts, data.toolCalls));
     setCodeChanges(data.codeChanges ?? []);
-    setFileTree(data.fileTree ?? []);
+    applyFileTreeSnapshot(data.fileTree ?? [], data.fileTreeRevision ?? null);
     setWebPreviewUrl(data.previewUrl ?? DEFAULT_WEB_PREVIEW_URL);
     setSelectedFilePath(data.selectedFilePath ?? '');
     setSelectedFileContent(data.selectedFileContent ?? '');
     setAvailableSkills(data.availableSkills ?? []);
     setIsLoading(Boolean(data.isGenerating));
-  }, [modelOptions]);
+  }, [applyFileTreeSnapshot, modelOptions]);
 
   const fetchSessionSnapshot = useCallback(async (targetSessionId: string) => {
     const controller = new AbortController();
@@ -1736,6 +1901,8 @@ export default function App() {
       setMessages([]);
       setCodeChanges([]);
       setFileTree([]);
+      fileTreeRef.current = [];
+      fileTreeRevisionRef.current = 0;
       setTerminalCwd('');
       setTerminalBackend('subprocess');
       setSelectedFileContent('');
@@ -3194,6 +3361,8 @@ export default function App() {
     setMessages([]);
     setCodeChanges([]);
     setFileTree([]);
+    fileTreeRef.current = [];
+    fileTreeRevisionRef.current = 0;
     setTerminalCwd('');
     setTerminalBackend('subprocess');
     setManagedProcesses([]);
@@ -3393,6 +3562,7 @@ export default function App() {
         onCompletionAction={handleCompletionAction}
         activeCompletionAction={completionActionState}
         thinkingRendering={appSettings.thinkingRendering}
+        finalAnswerRendering={appSettings.finalAnswerRendering}
         />
       </div>
       {!isRightPanelCollapsed && (

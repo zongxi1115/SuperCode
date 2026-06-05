@@ -20,6 +20,7 @@ import type { AppSettings, ModelOption, UIModelProvider } from '@/lib/app-types'
 import {
   AlertTriangle,
   Brain,
+  CodeXml,
   Eye,
   EyeOff,
   Globe,
@@ -107,6 +108,7 @@ function toEditableProvider(provider?: UIModelProvider): EditableProvider {
 function withSettingsDefaults(settings: AppSettings): AppSettings {
   return {
     ...settings,
+    finalAnswerRendering: settings.finalAnswerRendering ?? 'markdown',
     memory: {
       enabled: settings.memory?.enabled ?? true,
       autoLearn: settings.memory?.autoLearn ?? true,
@@ -1172,8 +1174,44 @@ export function SettingsDialog({
               <Separator />
 
               <div>
-                <h3 className="mb-3 text-sm font-semibold">思考过程渲染</h3>
+                <h3 className="mb-3 text-sm font-semibold">答复渲染</h3>
                 <div className="space-y-4">
+                  <div className="flex items-start justify-between gap-4 rounded-lg border bg-card p-4">
+                    <div className="flex items-start gap-3">
+                      <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-sky-500/10">
+                        <CodeXml className="size-4 text-sky-600 dark:text-sky-400" />
+                      </div>
+                      <div className="space-y-1">
+                        <div className="text-sm font-medium">最终答复渲染方式</div>
+                        <div className="text-xs text-muted-foreground">
+                          HTML Artifacts 会在适合可视化或交互时嵌入独立预览，默认仍使用 Markdown
+                        </div>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <Button
+                        variant={draftSettings.finalAnswerRendering === 'markdown' ? 'default' : 'outline'}
+                        size="sm"
+                        className="h-7 px-2.5 text-xs"
+                        onClick={() =>
+                          setDraftSettings((prev) => ({ ...prev, finalAnswerRendering: 'markdown' }))
+                        }
+                      >
+                        Markdown
+                      </Button>
+                      <Button
+                        variant={draftSettings.finalAnswerRendering === 'html' ? 'default' : 'outline'}
+                        size="sm"
+                        className="h-7 px-2.5 text-xs"
+                        onClick={() =>
+                          setDraftSettings((prev) => ({ ...prev, finalAnswerRendering: 'html' }))
+                        }
+                      >
+                        HTML
+                      </Button>
+                    </div>
+                  </div>
+
                   <div className="flex items-start justify-between gap-4 rounded-lg border bg-card p-4">
                     <div className="flex items-start gap-3">
                       <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-violet-500/10">

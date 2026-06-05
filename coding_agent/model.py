@@ -18,6 +18,18 @@ PLANNING_RECORD_VALUE_LIMIT = 1_200
 MAX_ACTIVE_SKILL_CONTENT_CHARS = 8_000
 MAX_AVAILABLE_SKILL_DESCRIPTION_CHARS = 280
 
+HTML_ARTIFACT_OUTPUT_RULES = [
+    "## 最终答复 HTML Artifact 规则",
+    "1. 默认最终答复使用 Markdown；仅当 runtime_state.final_answer_rendering == \"html\"，且最终答复明显适合可视化、交互卡片、小工具、报告面板或独立预览内容时，才在 Markdown 正文中自然插入 artifact。",
+    "2. Artifact 是最终答复里的临时渲染块，不是项目文件，不会写入工作区；不要把它说成已创建文件、已保存网页或已修改代码。",
+    "3. 如果用户明确要求创建/修改项目里的 HTML、页面、组件或静态文件，在具备改文件能力的编码场景必须使用写文件/改文件工具完成；完成后最终答复可以可选附带 artifact 作为预览，但不能用 artifact 代替文件修改。计划/部署等非本地改文件场景应先说明后续需要的文件变更，而不是伪称 artifact 已保存。",
+    "4. 如果只是解释、总结、展示交互示例、数据看板、一次性 demo 或可视化结果，可以只给 artifact，不要主动创建文件。",
+    "5. Artifact block 格式必须是：<supercode-artifact type=\"html\" title=\"短标题\">\\n<!doctype html>...\\n</supercode-artifact>。",
+    "6. HTML 应尽量自包含；允许为可视化/交互使用少量常见 HTTPS CDN 第三方库（如 Chart.js、D3、Three.js、Tailwind CDN），但只在确有价值时使用，并在正文简短说明用了哪些外部库。",
+    "7. 不要访问 window.parent / window.top，不要跳转父页面，不要读取本地文件、密钥或尝试持久化到工作区；artifact 内代码只服务于预览本身。",
+    "8. 不要把普通文字总结强行改写成 HTML；正文和 artifact 可以混排，artifact 只承载值得独立渲染的内容。",
+]
+
 
 class CodingPromptModel(OpenAICompatibleModel):
     """Model adapter with coding-specific prompts and context."""
@@ -68,6 +80,7 @@ class CodingPromptModel(OpenAICompatibleModel):
                 "12. 你会在上下文里看到 [技能目录]，必要时应主动使用其中相关 skill 的描述与约束，不要等用户先显式 @ skill。",
                 "13. 当用户明确表达可长期复用的偏好、工作流约束、交互风格或项目约定时，调用 remember_preference 记录；不要记录普通任务过程或临时事实。",
                 "14. 当命令不存在、运行时/SDK/系统包缺失、PATH 未配置，或需要用 winget 搜索/安装系统包时，先调用 get_docs，参数 type=environment_setup，读取集中流程文档后再给用户渐进式提示。安装会改变用户机器环境，除非用户已明确要求执行，否则先展示将执行的命令并等待确认。",
+                *HTML_ARTIFACT_OUTPUT_RULES,
             ]
         else:
             protocol_lines = [
@@ -97,6 +110,7 @@ class CodingPromptModel(OpenAICompatibleModel):
                 "12. 你会在上下文里看到 [技能目录]，必要时应主动使用其中相关 skill 的描述与约束，不要等用户先显式 @ skill。",
                 "13. 当用户明确表达可长期复用的偏好、工作流约束、交互风格或项目约定时，调用 remember_preference 记录；不要记录普通任务过程或临时事实。",
                 "14. 当命令不存在、运行时/SDK/系统包缺失、PATH 未配置，或需要用 winget 搜索/安装系统包时，先调用 get_docs，参数 type=environment_setup，读取集中流程文档后再给用户渐进式提示。安装会改变用户机器环境，除非用户已明确要求执行，否则先展示将执行的命令并等待确认。",
+                *HTML_ARTIFACT_OUTPUT_RULES,
             ]
 
         return "\n\n".join(

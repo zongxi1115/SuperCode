@@ -19,7 +19,7 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 from urllib.parse import unquote
 
 from fastapi import Body, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
@@ -150,6 +150,7 @@ from fastapi_app.terminal_runtime import TerminalRuntimeBase
 from fastapi_app.ui_message_stream import UIMessageStreamAdapter, sse_data
 from fastapi_app.workspace_utils import (
     build_default_open_files,
+    build_directory_tree_node,
     build_file_tree,
     list_child_directories,
     list_workspace_options as list_workspace_options_impl,
@@ -462,6 +463,11 @@ class TerminalRuntime(TerminalRuntimeBase):
         return PtyProcess
 
 
+class WorkspaceTreeSubscriber(NamedTuple):
+    loop: asyncio.AbstractEventLoop
+    queue: asyncio.Queue[dict[str, Any] | None]
+
+
 @dataclass
 class UISession:
     session_id: str
@@ -491,6 +497,9 @@ class UISession:
     cached_file_tree: list[dict[str, Any]] = field(default_factory=list, repr=False)
     file_tree_loaded: bool = field(default=False, repr=False)
     file_tree_dirty: bool = field(default=True, repr=False)
+    file_tree_revision: int = field(default=0, repr=False)
+    file_tree_events: list[dict[str, Any]] = field(default_factory=list, repr=False)
+    file_tree_subscribers: dict[str, WorkspaceTreeSubscriber] = field(default_factory=dict, repr=False)
     file_tree_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     pending_delete_confirmations: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
     pending_commit_confirmations: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
@@ -554,6 +563,7 @@ class UISession:
         if default_runtime is not None:
             self.terminal_output = default_runtime.snapshot(self.session_id).output
         refresh_session_runtime_state(self)
+        file_tree = self.get_file_tree()
         return CreateSessionResponse(
             sessionId=self.session_id,
             model=self.model,
@@ -579,7 +589,8 @@ class UISession:
             thoughts=self.thoughts,
             terminalOutput=self.terminal_output,
             previewUrl=self.preview_url,
-            fileTree=self.get_file_tree(),
+            fileTree=file_tree,
+            fileTreeRevision=self.file_tree_revision,
             selectedFilePath=self.selected_file_path,
             selectedFileContent=read_text_file(self.selected_file_path, self.workspace),
             openFiles=self.open_files,
@@ -588,17 +599,149 @@ class UISession:
             planSteps=self.plan_steps,
         )
 
-    def mark_file_tree_dirty(self) -> None:
+    def mark_file_tree_dirty(
+        self,
+        *,
+        publish: bool = True,
+        paths: list[str | Path] | None = None,
+    ) -> None:
+        event: dict[str, Any] | None = None
         with self.file_tree_lock:
             self.file_tree_dirty = True
+            if publish:
+                if paths:
+                    event = self._refresh_file_tree_paths_locked(paths, reason="dirty")
+                else:
+                    event = self._refresh_file_tree_locked(reason="dirty")
+        if event is not None:
+            self._publish_file_tree_event(event)
+
+    def _refresh_file_tree_locked(self, *, reason: str = "refresh") -> dict[str, Any]:
+        self.cached_file_tree = build_file_tree(resolve_workspace_path(self.workspace))
+        self.file_tree_loaded = True
+        self.file_tree_dirty = False
+        self.file_tree_revision += 1
+        event = {
+            "type": "tree.patch",
+            "revision": self.file_tree_revision,
+            "reason": reason,
+            "tree": self.cached_file_tree,
+        }
+        self.file_tree_events = [*self.file_tree_events, event][-100:]
+        return event
+
+    def _refresh_file_tree_paths_locked(
+        self,
+        paths: list[str | Path],
+        *,
+        reason: str = "paths",
+    ) -> dict[str, Any]:
+        if not self.file_tree_loaded:
+            return self._refresh_file_tree_locked(reason=reason)
+
+        directories: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        workspace_root = resolve_workspace_path(self.workspace)
+        for raw_path in paths:
+            target = Path(raw_path).expanduser().resolve()
+            directory = target if target.is_dir() else target.parent
+            if workspace_root != directory and workspace_root not in directory.parents:
+                continue
+            directory_key = str(directory)
+            if directory_key in seen:
+                continue
+            seen.add(directory_key)
+            node = build_directory_tree_node(directory)
+            directories.append(node)
+            self._replace_cached_directory_node(directory_key, node)
+
+        if not directories:
+            return self._refresh_file_tree_locked(reason=reason)
+
+        self.file_tree_loaded = True
+        self.file_tree_dirty = False
+        self.file_tree_revision += 1
+        event = {
+            "type": "tree.patch",
+            "revision": self.file_tree_revision,
+            "reason": reason,
+            "directories": directories,
+        }
+        self.file_tree_events = [*self.file_tree_events, event][-100:]
+        return event
+
+    def _replace_cached_directory_node(self, directory_path: str, next_node: dict[str, Any]) -> bool:
+        def replace(nodes: list[dict[str, Any]]) -> bool:
+            for index, node in enumerate(nodes):
+                if node.get("path") == directory_path:
+                    nodes[index] = next_node
+                    return True
+                children = node.get("children")
+                if isinstance(children, list) and replace(children):
+                    return True
+            return False
+
+        if replace(self.cached_file_tree):
+            return True
+
+        workspace_root = str(resolve_workspace_path(self.workspace))
+        if directory_path == workspace_root:
+            self.cached_file_tree = [next_node]
+            return True
+
+        return False
 
     def get_file_tree(self, force_refresh: bool = False) -> list[dict[str, Any]]:
         with self.file_tree_lock:
             if force_refresh or self.file_tree_dirty or not self.file_tree_loaded:
-                self.cached_file_tree = build_file_tree(resolve_workspace_path(self.workspace))
-                self.file_tree_loaded = True
-                self.file_tree_dirty = False
+                event = self._refresh_file_tree_locked(reason="force" if force_refresh else "lazy")
+            else:
+                event = None
+        if event is not None:
+            self._publish_file_tree_event(event)
+        with self.file_tree_lock:
             return self.cached_file_tree
+
+    def file_tree_snapshot_event(self, *, force_refresh: bool = False) -> dict[str, Any]:
+        tree = self.get_file_tree(force_refresh=force_refresh)
+        with self.file_tree_lock:
+            return {
+                "type": "tree.snapshot",
+                "revision": self.file_tree_revision,
+                "tree": tree,
+            }
+
+    def subscribe_file_tree(self, queue: asyncio.Queue[dict[str, Any] | None]) -> str:
+        subscriber_id = uuid.uuid4().hex
+        subscriber = WorkspaceTreeSubscriber(loop=asyncio.get_running_loop(), queue=queue)
+        with self.file_tree_lock:
+            self.file_tree_subscribers[subscriber_id] = subscriber
+        return subscriber_id
+
+    def unsubscribe_file_tree(self, subscriber_id: str) -> None:
+        with self.file_tree_lock:
+            self.file_tree_subscribers.pop(subscriber_id, None)
+
+    def file_tree_events_since(self, revision: int) -> list[dict[str, Any]]:
+        with self.file_tree_lock:
+            return [event for event in self.file_tree_events if int(event.get("revision") or 0) > revision]
+
+    def can_replay_file_tree_events_since(self, revision: int) -> bool:
+        with self.file_tree_lock:
+            if revision <= 0:
+                return False
+            if revision >= self.file_tree_revision:
+                return True
+            if not self.file_tree_events:
+                return False
+            oldest_revision = int(self.file_tree_events[0].get("revision") or 0)
+            return oldest_revision <= revision + 1
+
+    def _publish_file_tree_event(self, event: dict[str, Any]) -> None:
+        with self.file_tree_lock:
+            subscribers = list(self.file_tree_subscribers.values())
+        for subscriber in subscribers:
+            subscriber.loop.call_soon_threadsafe(subscriber.queue.put_nowait, event)
 
     def get_managed_processes(self, active_only: bool = True) -> list[dict[str, Any]]:
         if self.interactive_command_session is None:
@@ -632,7 +775,7 @@ class UISession:
             supportsInterrupt=snapshot.supportsInterrupt,
             supportsRawInput=snapshot.supportsRawInput,
             supportsResize=snapshot.supportsResize,
-            fileTree=self.get_file_tree() if include_file_tree else None,
+            fileTree=self.get_file_tree(force_refresh=True) if include_file_tree else None,
             processes=self.get_managed_processes(active_only=True) if include_processes else None,
         )
 
@@ -1470,10 +1613,17 @@ def refresh_session_runtime_state(session: UISession) -> None:
 
 def build_agent_runtime_state(session: UISession) -> dict[str, Any]:
     refresh_session_runtime_state(session)
+    settings = load_settings(APP_DATA_ROOT)
+    final_answer_rendering = (
+        "html"
+        if settings.get("finalAnswerRendering") == "html"
+        else "markdown"
+    )
     return {
         "agent_type": session.agent_type,
         "phase": session.phase,
         "workspace": session.workspace,
+        "final_answer_rendering": final_answer_rendering,
         "execution_mode": session.execution_mode,
         "base_workspace": session.base_workspace,
         "worktree_path": session.worktree_path,
@@ -2494,6 +2644,7 @@ async def create_session(request: CreateSessionRequest) -> JSONResponse:
             terminalOutput=session.terminal_output,
             previewUrl=session.preview_url,
             fileTree=[],
+            fileTreeRevision=session.file_tree_revision,
             selectedFilePath=session.selected_file_path,
             selectedFileContent="",
             openFiles=session.open_files,
@@ -2540,6 +2691,7 @@ async def get_session_snapshot(session_id: str) -> JSONResponse:
             terminalOutput=session.terminal_output,
             previewUrl=session.preview_url,
             fileTree=[],
+            fileTreeRevision=session.file_tree_revision,
             selectedFilePath=session.selected_file_path,
             selectedFileContent="",
             openFiles=session.open_files,
@@ -2692,16 +2844,54 @@ async def get_preview_select_bridge_script() -> Response:
 
 
 @app.get("/api/sessions/{session_id}/file-tree")
-async def get_file_tree(session_id: str) -> JSONResponse:
+async def get_file_tree(session_id: str, force: bool = Query(False)) -> JSONResponse:
     session = require_session(session_id)
     try:
-        tree = await asyncio.wait_for(asyncio.to_thread(session.get_file_tree), timeout=15)
+        tree = await asyncio.wait_for(asyncio.to_thread(session.get_file_tree, force), timeout=15)
     except asyncio.TimeoutError:
         tree = []
     return JSONResponse(
         {
             "fileTree": tree,
+            "revision": session.file_tree_revision,
         },
+    )
+
+
+@app.get("/api/sessions/{session_id}/file-tree/events")
+async def get_file_tree_events(
+    session_id: str,
+    since: int = Query(0),
+) -> StreamingResponse:
+    session = require_session(session_id)
+
+    async def event_generator():
+        queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+        subscriber_id = session.subscribe_file_tree(queue)
+        try:
+            if session.can_replay_file_tree_events_since(since):
+                missed_events = session.file_tree_events_since(since)
+                for event in missed_events:
+                    yield sse_data(event)
+            else:
+                yield sse_data(session.file_tree_snapshot_event())
+
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=25)
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+                    continue
+                if event is None:
+                    break
+                yield sse_data(event)
+        finally:
+            session.unsubscribe_file_tree(subscriber_id)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache"},
     )
 
 
@@ -2718,7 +2908,7 @@ async def save_file(
         before_text = read_text_file(str(target), session.workspace) if existed_before_save else ""
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
-        session.mark_file_tree_dirty()
+        session.mark_file_tree_dirty(paths=[target])
         code_change = None
         if (not existed_before_save) or before_text != content:
             code_change = record_code_change(
@@ -2784,7 +2974,7 @@ async def confirm_delete_tool(
         target = Path(normalize_relative_path(filename, session.workspace))
         before_text = read_text_file(str(target), session.workspace)
         output = delete_file_in_workspace(filename, resolve_workspace_path(session.workspace))
-        session.mark_file_tree_dirty()
+        session.mark_file_tree_dirty(paths=[target])
         if session.selected_file_path == normalize_relative_path(filename, session.workspace):
             session.selected_file_path = None
             selected_file_cleared = True
@@ -4672,6 +4862,7 @@ async def run_agent_stream(
             before_snapshots = tool_before_snapshots.pop(tool_id, None)
             terminal_output = extract_terminal_output(output)
             preview_url = extract_preview_url(output)
+            file_tree_marked_for_tool_result = False
             raw_requires_confirmation = bool(
                 (event.tool_result.name == "delete_file"
                  or event.tool_result.name == "git_commit"
@@ -4691,7 +4882,8 @@ async def run_agent_stream(
                             target = Path(normalize_relative_path(filename, session.workspace))
                             before_text = read_text_file(str(target), session.workspace)
                             output = delete_file_in_workspace(filename, resolve_workspace_path(session.workspace))
-                            session.mark_file_tree_dirty()
+                            session.mark_file_tree_dirty(paths=[target])
+                            file_tree_marked_for_tool_result = True
                             if session.selected_file_path == normalize_relative_path(filename, session.workspace):
                                 session.selected_file_path = None
                             record_code_change(
@@ -4740,7 +4932,14 @@ async def run_agent_stream(
             if event.tool_result.name in {"write_file", "replace_file", "apply_patch"} or (
                 event.tool_result.name == "delete_file" and not requires_confirmation
             ):
-                session.mark_file_tree_dirty()
+                if not file_tree_marked_for_tool_result:
+                    changed_paths = file_tree_changed_paths_from_tool_result(
+                        session,
+                        tool_name=event.tool_result.name,
+                        tool_arguments=event.tool_call.arguments,
+                        output=output,
+                    )
+                    session.mark_file_tree_dirty(paths=changed_paths or None)
             if event.tool_result.name == "open_browser" and preview_url is not None:
                 session.preview_url = preview_url
             tool_state = (
@@ -6568,6 +6767,41 @@ def code_change_records_from_tool_result(
         return [record] if record is not None else []
 
     return []
+
+
+def file_tree_changed_paths_from_tool_result(
+    session: UISession,
+    *,
+    tool_name: str,
+    tool_arguments: dict[str, Any],
+    output: Any,
+) -> list[Path]:
+    raw_paths: list[str] = []
+    if tool_name in {"write_file", "replace_file", "delete_file"}:
+        filename = str(tool_arguments.get("filename") or "").strip()
+        if filename:
+            raw_paths.append(filename)
+    elif tool_name == "apply_patch":
+        if isinstance(output, dict) and isinstance(output.get("files"), list):
+            raw_paths.extend(str(path) for path in output["files"] if str(path).strip())
+        else:
+            filename = str(tool_arguments.get("filename") or "").strip()
+            if filename:
+                raw_paths.append(filename)
+
+    resolved: list[Path] = []
+    seen: set[str] = set()
+    for raw_path in raw_paths:
+        try:
+            target = Path(normalize_relative_path(raw_path, session.workspace))
+        except HTTPException:
+            continue
+        key = str(target)
+        if key in seen:
+            continue
+        seen.add(key)
+        resolved.append(target)
+    return resolved
 
 
 if __name__ == "__main__":

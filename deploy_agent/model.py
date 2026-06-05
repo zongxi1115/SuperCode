@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from coding_agent.model import CodingPromptModel
+from coding_agent.model import CodingPromptModel, HTML_ARTIFACT_OUTPUT_RULES
 
 
 class DeployPromptModel(CodingPromptModel):
@@ -47,6 +47,7 @@ class DeployPromptModel(CodingPromptModel):
                 "18. 如果用户目标已经完成，必须直接输出最终答复，不要为了“继续”而调用无必要工具。",
                 "19. 已成功完成的工具调用会出现在内部工具调用记录里，不要重复同一连接或同一读取动作；连续失败的同一工具在没有新信息前也不要重试。",
                 "20. 你会在上下文里看到 [技能目录]，如果其中某个 skill 与当前部署任务高度相关，应主动吸收其摘要或已激活正文，不要等用户先显式 @ skill。",
+                *HTML_ARTIFACT_OUTPUT_RULES,
             ]
         else:
             protocol_lines = [
@@ -79,6 +80,7 @@ class DeployPromptModel(CodingPromptModel):
                 "18. 对会改变线上状态的命令，要先在最终答复里说明目的、影响和验证方式，再执行。",
                 "19. 如果用户目标已经完成，必须 action=final，不要继续调用无必要工具；连续失败的同一工具在没有新信息前也不要重试。",
                 "20. 你会在上下文里看到 [技能目录]，如果其中某个 skill 与当前部署任务高度相关，应主动吸收其摘要或已激活正文，不要等用户先显式 @ skill。",
+                *HTML_ARTIFACT_OUTPUT_RULES,
             ]
 
         return "\n\n".join(
@@ -111,4 +113,3 @@ class DeployPromptModel(CodingPromptModel):
 
     def _default_prompt_path(self) -> Path:
         return Path(__file__).resolve().parent / "prompts" / "deploy.md"
-

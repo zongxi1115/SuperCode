@@ -186,6 +186,18 @@ def build_file_tree(root: Path, max_depth: int = FILE_TREE_MAX_DEPTH) -> list[di
     ]
 
 
+def build_directory_tree_node(directory: Path, max_depth: int = FILE_TREE_MAX_DEPTH) -> dict[str, Any]:
+    resolved = directory.expanduser().resolve()
+    return {
+        "path": str(resolved),
+        "name": resolved.name,
+        "type": "folder",
+        "children": build_file_tree(resolved, max_depth=max_depth)[0].get("children", [])
+        if resolved.exists()
+        else [],
+    }
+
+
 def read_text_file(relative_path: str | None, workspace: str) -> str:
     if relative_path is None or not str(relative_path).strip():
         return ""

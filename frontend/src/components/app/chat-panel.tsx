@@ -125,6 +125,12 @@ import {
 } from "@/components/ai-elements/model-selector";
 import { Button } from "@/components/ui/button";
 import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
@@ -164,7 +170,9 @@ import {
   ChevronDown,
   ChevronRight,
   BarChart3Icon,
+  CodeXml,
   DatabaseIcon,
+  ExternalLink,
   FileCodeIcon,
   FileSearchIcon,
   FileText,
@@ -194,6 +202,7 @@ import {
   Check,
   MessageSquareIcon,
   MemoryStick,
+  Maximize2,
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import type React from "react";
@@ -267,6 +276,7 @@ type ChatPanelProps = {
   onRemoveElementAttachment?: (id: string) => void;
   onEditMessage?: (content: string) => void;
   thinkingRendering?: "text" | "markdown";
+  finalAnswerRendering?: "markdown" | "html";
 };
 
 type MentionSuggestion = {
@@ -591,6 +601,351 @@ function escapeHtmlAttribute(value: string) {
     .replace(/"/g, "&quot;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
+}
+
+type HtmlArtifact = {
+  type: "html";
+  title: string;
+  html: string;
+};
+
+type FinalAnswerSegment =
+  | { type: "text"; value: string }
+  | { type: "artifact"; artifact: HtmlArtifact }
+  | { type: "pending-artifact"; title: string };
+
+const ARTIFACT_OPEN_TAG_RE = /<supercode-artifact\b([^>]*)>/i;
+const ARTIFACT_CLOSE_TAG_RE = /<\/supercode-artifact>/i;
+const ARTIFACT_TITLE_RE = /\btitle\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i;
+const ARTIFACT_TYPE_RE = /\btype\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i;
+const FENCED_HTML_BLOCK_RE = /```html\b[^\n]*\n([\s\S]*?)\n```/i;
+const FENCED_HTML_OPEN_RE = /```html\b[^\n]*\n/i;
+const COMPLETE_HTML_DOC_RE = /(?:<!doctype\s+html[^>]*>\s*)?<html\b[\s\S]*?<\/html>/i;
+const HTML_FRAGMENT_RE = /<(?:style|script|main|section|article|div|svg)\b[\s\S]*?<\/(?:style|script|main|section|article|div|svg)>/i;
+const HTML_TITLE_RE = /<title[^>]*>([\s\S]*?)<\/title>/i;
+const HTML_H1_RE = /<h1[^>]*>([\s\S]*?)<\/h1>/i;
+
+function decodeHtmlAttributeValue(value: string) {
+  if (typeof document === "undefined") return value;
+  const textarea = document.createElement("textarea");
+  textarea.innerHTML = value;
+  return textarea.value;
+}
+
+function readArtifactAttribute(attributes: string, regex: RegExp) {
+  const match = regex.exec(attributes);
+  const rawValue = match?.[1] ?? match?.[2] ?? match?.[3] ?? "";
+  return decodeHtmlAttributeValue(rawValue.trim());
+}
+
+function stripHtmlForTitle(value: string) {
+  return decodeHtmlAttributeValue(value.replace(/<[^>]*>/g, " "))
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function inferHtmlArtifactTitle(html: string) {
+  const title = HTML_TITLE_RE.exec(html)?.[1] ?? HTML_H1_RE.exec(html)?.[1] ?? "";
+  return stripHtmlForTitle(title) || "HTML Artifact";
+}
+
+function parseFinalAnswerSegments(
+  text: string,
+  options?: { allowAutoHtml?: boolean },
+): FinalAnswerSegment[] {
+  const segments: FinalAnswerSegment[] = [];
+  let cursor = 0;
+  const allowAutoHtml = options?.allowAutoHtml ?? false;
+
+  while (cursor < text.length) {
+    const remaining = text.slice(cursor);
+    const openMatch = ARTIFACT_OPEN_TAG_RE.exec(remaining);
+    const fencedHtmlMatch = allowAutoHtml ? FENCED_HTML_BLOCK_RE.exec(remaining) : null;
+    const fencedHtmlOpenMatch = allowAutoHtml ? FENCED_HTML_OPEN_RE.exec(remaining) : null;
+    const htmlDocMatch = allowAutoHtml ? COMPLETE_HTML_DOC_RE.exec(remaining) : null;
+    const htmlFragmentMatch = allowAutoHtml ? HTML_FRAGMENT_RE.exec(remaining) : null;
+
+    const candidates = [
+      openMatch ? { kind: "artifact" as const, index: openMatch.index, match: openMatch } : null,
+      fencedHtmlMatch ? { kind: "fenced" as const, index: fencedHtmlMatch.index, match: fencedHtmlMatch } : null,
+      htmlDocMatch ? { kind: "document" as const, index: htmlDocMatch.index, match: htmlDocMatch } : null,
+      htmlFragmentMatch ? { kind: "fragment" as const, index: htmlFragmentMatch.index, match: htmlFragmentMatch } : null,
+      fencedHtmlOpenMatch && !fencedHtmlMatch
+        ? { kind: "pending-fenced" as const, index: fencedHtmlOpenMatch.index, match: fencedHtmlOpenMatch }
+        : null,
+    ]
+      .filter((candidate): candidate is NonNullable<typeof candidate> => candidate !== null)
+      .sort((a, b) => a.index - b.index);
+
+    const candidate = candidates[0];
+    if (!candidate) {
+      const value = text.slice(cursor);
+      if (value) segments.push({ type: "text", value });
+      break;
+    }
+
+    const start = cursor + candidate.index;
+    const before = text.slice(cursor, start);
+    if (before) segments.push({ type: "text", value: before });
+
+    if (candidate.kind === "fenced") {
+      const html = (candidate.match[1] ?? "").trim();
+      segments.push({
+        type: "artifact",
+        artifact: {
+          type: "html",
+          title: inferHtmlArtifactTitle(html),
+          html,
+        },
+      });
+      cursor = start + candidate.match[0].length;
+      continue;
+    }
+
+    if (candidate.kind === "pending-fenced") {
+      segments.push({ type: "pending-artifact", title: "HTML Artifact" });
+      break;
+    }
+
+    if (candidate.kind === "document") {
+      const html = candidate.match[0].trim();
+      segments.push({
+        type: "artifact",
+        artifact: {
+          type: "html",
+          title: inferHtmlArtifactTitle(html),
+          html,
+        },
+      });
+      cursor = start + candidate.match[0].length;
+      continue;
+    }
+
+    if (candidate.kind === "fragment") {
+      const html = candidate.match[0].trim();
+      segments.push({
+        type: "artifact",
+        artifact: {
+          type: "html",
+          title: inferHtmlArtifactTitle(html),
+          html,
+        },
+      });
+      cursor = start + candidate.match[0].length;
+      continue;
+    }
+
+    const openStart = start;
+    const openEnd = openStart + candidate.match[0].length;
+    const attributes = candidate.match[1] ?? "";
+    const artifactType = readArtifactAttribute(attributes, ARTIFACT_TYPE_RE).toLowerCase();
+    const title = readArtifactAttribute(attributes, ARTIFACT_TITLE_RE) || "HTML Artifact";
+    const closeMatch = ARTIFACT_CLOSE_TAG_RE.exec(text.slice(openEnd));
+    if (!closeMatch || closeMatch.index < 0) {
+      segments.push({ type: "pending-artifact", title });
+      break;
+    }
+
+    const closeStart = openEnd + closeMatch.index;
+    const closeEnd = closeStart + closeMatch[0].length;
+    const html = text.slice(openEnd, closeStart).trim();
+    if (artifactType === "html") {
+      segments.push({
+        type: "artifact",
+        artifact: {
+          type: "html",
+          title,
+          html,
+        },
+      });
+    } else {
+      segments.push({ type: "text", value: text.slice(openStart, closeEnd) });
+    }
+    cursor = closeEnd;
+  }
+
+  return segments;
+}
+
+function buildArtifactSrcDoc(html: string) {
+  const csp = [
+    "default-src https: data: blob:",
+    "img-src https: data: blob:",
+    "style-src https: 'unsafe-inline'",
+    "script-src https: 'unsafe-inline'",
+    "font-src https: data:",
+    "connect-src https:",
+    "frame-ancestors 'none'",
+  ].join("; ");
+  const meta = `<meta http-equiv="Content-Security-Policy" content="${escapeHtmlAttribute(csp)}">`;
+  const trimmed = html.trim();
+  if (/<head[\s>]/i.test(trimmed)) {
+    return trimmed.replace(/<head([^>]*)>/i, `<head$1>${meta}`);
+  }
+  if (/<html[\s>]/i.test(trimmed)) {
+    return trimmed.replace(/<html([^>]*)>/i, `<html$1><head>${meta}</head>`);
+  }
+  return `<!doctype html><html><head>${meta}</head><body>${trimmed}</body></html>`;
+}
+
+function HtmlArtifactPreview({ artifact }: { artifact: HtmlArtifact }) {
+  const [isPreviewOpen, setIsPreviewOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const copiedTimerRef = useRef<number | null>(null);
+  const srcDoc = useMemo(() => buildArtifactSrcDoc(artifact.html), [artifact.html]);
+
+  useEffect(() => {
+    return () => {
+      if (copiedTimerRef.current !== null) {
+        window.clearTimeout(copiedTimerRef.current);
+      }
+    };
+  }, []);
+
+  const copyArtifact = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(artifact.html);
+      setCopied(true);
+      if (copiedTimerRef.current !== null) {
+        window.clearTimeout(copiedTimerRef.current);
+      }
+      copiedTimerRef.current = window.setTimeout(() => {
+        setCopied(false);
+        copiedTimerRef.current = null;
+      }, 1200);
+    } catch {
+      setCopied(false);
+    }
+  }, [artifact.html]);
+
+  return (
+    <div className="my-3 w-full overflow-hidden rounded-lg border bg-card">
+      <div className="flex min-w-0 items-center gap-2 border-b bg-muted/40 px-3 py-2">
+        <CodeXml className="size-4 shrink-0 text-sky-600 dark:text-sky-400" />
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-sm font-medium">{artifact.title}</div>
+          <div className="text-[11px] text-muted-foreground">HTML Artifact</div>
+        </div>
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                onClick={copyArtifact}
+              >
+                {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              <p>{copied ? "已复制" : "复制 HTML"}</p>
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                onClick={() => setIsPreviewOpen(true)}
+              >
+                <Maximize2 className="size-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              <p>全屏预览</p>
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      </div>
+      <div className="h-[360px] bg-white">
+        <iframe
+          className="size-full border-0"
+          sandbox="allow-scripts"
+          srcDoc={srcDoc}
+          title={artifact.title}
+        />
+      </div>
+      <Dialog open={isPreviewOpen} onOpenChange={setIsPreviewOpen}>
+        <DialogContent
+          showCloseButton
+          className="flex h-[92vh] max-w-[min(1200px,calc(100vw-2rem))] flex-col gap-0 overflow-hidden p-0"
+        >
+          <DialogHeader className="shrink-0 border-b px-4 py-3">
+            <DialogTitle className="flex items-center gap-2 text-sm">
+              <ExternalLink className="size-4 text-sky-600 dark:text-sky-400" />
+              <span className="truncate">{artifact.title}</span>
+            </DialogTitle>
+          </DialogHeader>
+          <div className="min-h-0 flex-1 bg-white">
+            <iframe
+              className="size-full border-0"
+              sandbox="allow-scripts"
+              srcDoc={srcDoc}
+              title={`${artifact.title} 全屏预览`}
+            />
+          </div>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+function PendingHtmlArtifact({ title }: { title: string }) {
+  return (
+    <div className="my-3 flex items-center gap-2 rounded-lg border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
+      <Loader2 className="size-3.5 animate-spin" />
+      <span className="truncate">{title || "HTML Artifact"} 正在生成</span>
+    </div>
+  );
+}
+
+function renderFinalAnswerContent(
+  text: string,
+  citations: Map<string, CitationInfo>,
+  options?: {
+    className?: string;
+    isAnimating?: boolean;
+    key?: string;
+    finalAnswerRendering?: "markdown" | "html";
+  },
+) {
+  const hasExplicitArtifact = ARTIFACT_OPEN_TAG_RE.test(text);
+  if (options?.finalAnswerRendering !== "html" && !hasExplicitArtifact) {
+    return renderCitationMessage(text, citations, options);
+  }
+
+  const segments = parseFinalAnswerSegments(text, {
+    allowAutoHtml: options?.finalAnswerRendering === "html",
+  });
+  const isAnimating = options?.isAnimating ?? false;
+  return (
+    <div key={options?.key} className="space-y-2">
+      {segments.map((segment, index) => {
+        if (segment.type === "text") {
+          return segment.value.trim()
+            ? renderCitationMessage(segment.value, citations, {
+                className: options?.className,
+                isAnimating,
+                key: `text-${index}`,
+              })
+            : null;
+        }
+        if (segment.type === "pending-artifact") {
+          return <PendingHtmlArtifact key={`pending-${index}`} title={segment.title} />;
+        }
+        return (
+          <HtmlArtifactPreview
+            key={`artifact-${index}`}
+            artifact={segment.artifact}
+          />
+        );
+      })}
+    </div>
+  );
 }
 
 function getCitationDisplayTitle(
@@ -3145,6 +3500,7 @@ const MessageList = memo(function MessageList({
   canCompress,
   onEditMessage,
   thinkingRendering = "text",
+  finalAnswerRendering = "markdown",
 }: {
   sessionId: string | null;
   isLoading: boolean;
@@ -3177,6 +3533,7 @@ const MessageList = memo(function MessageList({
   canCompress: boolean;
   onEditMessage?: (content: string) => void;
   thinkingRendering?: "text" | "markdown";
+  finalAnswerRendering?: "markdown" | "html";
 }) {
   const [taskOpenState, setTaskOpenState] = useState<Record<string, boolean>>(
     {},
@@ -3540,10 +3897,11 @@ const MessageList = memo(function MessageList({
       if (group.type === "text") {
         const isStreamingText = isLast && isLoading && gi === groups.length - 1;
         return group.block.text
-          ? renderCitationMessage(group.block.text, citations, {
+          ? renderFinalAnswerContent(group.block.text, citations, {
               className: isStreamingText ? "streaming-tail-fade" : undefined,
               isAnimating: isStreamingText,
               key: `text-${gi}`,
+              finalAnswerRendering,
             })
           : null;
       }
@@ -3986,10 +4344,11 @@ const MessageList = memo(function MessageList({
                   ? renderPartsAssistant(msg, isLast)
                   : renderLegacyAssistant(msg, isLast))}
               {!msg.parts && msg.content
-                ? renderCitationMessage(msg.content, new Map(), {
+                ? renderFinalAnswerContent(msg.content, new Map(), {
                     className:
                       isLast && isLoading ? "streaming-tail-fade" : undefined,
                     isAnimating: isLast && isLoading,
+                    finalAnswerRendering,
                   })
                 : null}
             </MessageContent>
@@ -4050,6 +4409,7 @@ const ChatStreamBody = memo(function ChatStreamBody({
   canCompress,
   onEditMessage,
   thinkingRendering = "text",
+  finalAnswerRendering = "markdown",
 }: {
   sessionId: string | null;
   isLoading: boolean;
@@ -4082,6 +4442,7 @@ const ChatStreamBody = memo(function ChatStreamBody({
   canCompress: boolean;
   onEditMessage?: (content: string) => void;
   thinkingRendering?: "text" | "markdown";
+  finalAnswerRendering?: "markdown" | "html";
 }) {
   const [compressedMessageIds, setCompressedMessageIds] = useState<Set<string>>(
     new Set(),
@@ -4132,6 +4493,7 @@ const ChatStreamBody = memo(function ChatStreamBody({
         canCompress={canCompress}
         onEditMessage={onEditMessage}
         thinkingRendering={thinkingRendering}
+        finalAnswerRendering={finalAnswerRendering}
       />
       <PersonaRail
         state={personaState}
@@ -4705,6 +5067,7 @@ export function ChatPanel({
   onRemoveElementAttachment,
   onEditMessage,
   thinkingRendering = "text",
+  finalAnswerRendering = "markdown",
 }: ChatPanelProps) {
   const planSteps = contextData?.planSteps ?? [];
   const composerRef = useRef<HTMLDivElement>(null);
@@ -5509,6 +5872,7 @@ export function ChatPanel({
                     canCompress={canCompress}
                     onEditMessage={onEditMessage}
                     thinkingRendering={thinkingRendering}
+                    finalAnswerRendering={finalAnswerRendering}
                   />
                 </ConversationContent>
                 <ConversationScrollButton className="bottom-16" />

@@ -13,6 +13,7 @@ SETTINGS_FILE_NAME = "settings.json"
 DEFAULT_SETTINGS: dict[str, Any] = {
     "autoApprove": False,
     "thinkingRendering": "text",
+    "finalAnswerRendering": "markdown",
     "bodyFontFamily": 'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
     "bodyFontSize": 14,
     "bodyLineHeight": 22,
@@ -110,6 +111,8 @@ def _normalize_memory_settings(raw_memory: object) -> dict[str, Any]:
 
 def _merge_settings(payload: dict[str, Any]) -> dict[str, Any]:
     merged = {**deepcopy(DEFAULT_SETTINGS), **payload}
+    if merged.get("finalAnswerRendering") not in {"markdown", "html"}:
+        merged["finalAnswerRendering"] = DEFAULT_SETTINGS["finalAnswerRendering"]
     default_embedding = DEFAULT_SETTINGS["embedding"]
     raw_embedding = payload.get("embedding")
     if isinstance(default_embedding, dict) and isinstance(raw_embedding, dict):

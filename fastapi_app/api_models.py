@@ -67,6 +67,7 @@ class CreateSessionResponse(BaseModel):
     terminalOutput: str
     previewUrl: str
     fileTree: list[dict[str, Any]]
+    fileTreeRevision: int = 0
     selectedFilePath: str | None
     selectedFileContent: str
     openFiles: list[str]
@@ -214,6 +215,7 @@ class MemorySettingsPayload(BaseModel):
 class SettingsPayload(BaseModel):
     autoApprove: bool = False
     thinkingRendering: Literal["text", "markdown"] = "text"
+    finalAnswerRendering: Literal["markdown", "html"] = "markdown"
     bodyFontFamily: str = 'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
     bodyFontSize: int = 14
     bodyLineHeight: int = 22
