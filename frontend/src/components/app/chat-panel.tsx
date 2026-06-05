@@ -125,12 +125,6 @@ import {
 } from "@/components/ai-elements/model-selector";
 import { Button } from "@/components/ui/button";
 import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
@@ -170,9 +164,7 @@ import {
   ChevronDown,
   ChevronRight,
   BarChart3Icon,
-  CodeXml,
   DatabaseIcon,
-  ExternalLink,
   FileCodeIcon,
   FileSearchIcon,
   FileText,
@@ -202,7 +194,6 @@ import {
   Check,
   MessageSquareIcon,
   MemoryStick,
-  Maximize2,
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import type React from "react";
@@ -625,6 +616,9 @@ const HTML_FRAGMENT_RE = /<(?:style|script|main|section|article|div|svg)\b[\s\S]
 const HTML_TITLE_RE = /<title[^>]*>([\s\S]*?)<\/title>/i;
 const HTML_H1_RE = /<h1[^>]*>([\s\S]*?)<\/h1>/i;
 
+const CHAT_CONTENT_MAX_WIDTH = "max-w-[880px]";
+const CHAT_HERO_MAX_WIDTH = "max-w-[960px]";
+
 function decodeHtmlAttributeValue(value: string) {
   if (typeof document === "undefined") return value;
   const textarea = document.createElement("textarea");
@@ -767,7 +761,7 @@ function parseFinalAnswerSegments(
   return segments;
 }
 
-function buildArtifactSrcDoc(html: string) {
+function buildArtifactSrcDoc(html: string, frameId: string) {
   const csp = [
     "default-src https: data: blob:",
     "img-src https: data: blob:",
@@ -778,118 +772,68 @@ function buildArtifactSrcDoc(html: string) {
     "frame-ancestors 'none'",
   ].join("; ");
   const meta = `<meta http-equiv="Content-Security-Policy" content="${escapeHtmlAttribute(csp)}">`;
+  const baseStyle = [
+    "<style data-supercode-artifact-base>",
+    "html,body{margin:0;background:transparent;}",
+    "body{min-height:auto;color:inherit;overflow:hidden;}",
+    "</style>",
+  ].join("");
+  const resizeScript = [
+    "<script data-supercode-artifact-resize>",
+    "(()=>{",
+    `const id=${JSON.stringify(frameId)};`,
+    "const send=()=>{",
+    "const b=document.body,d=document.documentElement;",
+    "const h=Math.ceil(Math.max(b?b.scrollHeight:0,d?d.scrollHeight:0,b?b.offsetHeight:0,d?d.offsetHeight:0));",
+    "parent.postMessage({type:'supercode-artifact-size',id,height:h},'*');",
+    "};",
+    "new ResizeObserver(send).observe(document.documentElement);",
+    "window.addEventListener('load',send);",
+    "setTimeout(send,0);setTimeout(send,120);setTimeout(send,600);",
+    "})();",
+    "</script>",
+  ].join("");
   const trimmed = html.trim();
   if (/<head[\s>]/i.test(trimmed)) {
-    return trimmed.replace(/<head([^>]*)>/i, `<head$1>${meta}`);
+    return trimmed.replace(/<head([^>]*)>/i, `<head$1>${meta}${baseStyle}${resizeScript}`);
   }
   if (/<html[\s>]/i.test(trimmed)) {
-    return trimmed.replace(/<html([^>]*)>/i, `<html$1><head>${meta}</head>`);
+    return trimmed.replace(/<html([^>]*)>/i, `<html$1><head>${meta}${baseStyle}${resizeScript}</head>`);
   }
-  return `<!doctype html><html><head>${meta}</head><body>${trimmed}</body></html>`;
+  return `<!doctype html><html><head>${meta}${baseStyle}${resizeScript}</head><body>${trimmed}</body></html>`;
 }
 
 function HtmlArtifactPreview({ artifact }: { artifact: HtmlArtifact }) {
-  const [isPreviewOpen, setIsPreviewOpen] = useState(false);
-  const [copied, setCopied] = useState(false);
-  const copiedTimerRef = useRef<number | null>(null);
-  const srcDoc = useMemo(() => buildArtifactSrcDoc(artifact.html), [artifact.html]);
+  const frameId = useId();
+  const [height, setHeight] = useState(240);
+  const srcDoc = useMemo(
+    () => buildArtifactSrcDoc(artifact.html, frameId),
+    [artifact.html, frameId],
+  );
 
   useEffect(() => {
-    return () => {
-      if (copiedTimerRef.current !== null) {
-        window.clearTimeout(copiedTimerRef.current);
-      }
+    const handleMessage = (event: MessageEvent) => {
+      const data = event.data;
+      if (!data || typeof data !== "object") return;
+      if (data.type !== "supercode-artifact-size" || data.id !== frameId) return;
+      const nextHeight = Number(data.height);
+      if (!Number.isFinite(nextHeight) || nextHeight <= 0) return;
+      setHeight(Math.min(Math.max(Math.ceil(nextHeight), 40), 6000));
     };
-  }, []);
-
-  const copyArtifact = useCallback(async () => {
-    try {
-      await navigator.clipboard.writeText(artifact.html);
-      setCopied(true);
-      if (copiedTimerRef.current !== null) {
-        window.clearTimeout(copiedTimerRef.current);
-      }
-      copiedTimerRef.current = window.setTimeout(() => {
-        setCopied(false);
-        copiedTimerRef.current = null;
-      }, 1200);
-    } catch {
-      setCopied(false);
-    }
-  }, [artifact.html]);
+    window.addEventListener("message", handleMessage);
+    return () => window.removeEventListener("message", handleMessage);
+  }, [frameId]);
 
   return (
-    <div className="my-3 w-full overflow-hidden rounded-lg border bg-card">
-      <div className="flex min-w-0 items-center gap-2 border-b bg-muted/40 px-3 py-2">
-        <CodeXml className="size-4 shrink-0 text-sky-600 dark:text-sky-400" />
-        <div className="min-w-0 flex-1">
-          <div className="truncate text-sm font-medium">{artifact.title}</div>
-          <div className="text-[11px] text-muted-foreground">HTML Artifact</div>
-        </div>
-        <TooltipProvider>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                onClick={copyArtifact}
-              >
-                {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>
-              <p>{copied ? "已复制" : "复制 HTML"}</p>
-            </TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
-        <TooltipProvider>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                onClick={() => setIsPreviewOpen(true)}
-              >
-                <Maximize2 className="size-3.5" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>
-              <p>全屏预览</p>
-            </TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
-      </div>
-      <div className="h-[360px] bg-white">
-        <iframe
-          className="size-full border-0"
-          sandbox="allow-scripts"
-          srcDoc={srcDoc}
-          title={artifact.title}
-        />
-      </div>
-      <Dialog open={isPreviewOpen} onOpenChange={setIsPreviewOpen}>
-        <DialogContent
-          showCloseButton
-          className="flex h-[92vh] max-w-[min(1200px,calc(100vw-2rem))] flex-col gap-0 overflow-hidden p-0"
-        >
-          <DialogHeader className="shrink-0 border-b px-4 py-3">
-            <DialogTitle className="flex items-center gap-2 text-sm">
-              <ExternalLink className="size-4 text-sky-600 dark:text-sky-400" />
-              <span className="truncate">{artifact.title}</span>
-            </DialogTitle>
-          </DialogHeader>
-          <div className="min-h-0 flex-1 bg-white">
-            <iframe
-              className="size-full border-0"
-              sandbox="allow-scripts"
-              srcDoc={srcDoc}
-              title={`${artifact.title} 全屏预览`}
-            />
-          </div>
-        </DialogContent>
-      </Dialog>
+    <div className="my-3 w-full">
+      <iframe
+        className="block w-full border-0"
+        sandbox="allow-scripts"
+        scrolling="no"
+        srcDoc={srcDoc}
+        style={{ height }}
+        title={artifact.title}
+      />
     </div>
   );
 }
@@ -3414,7 +3358,7 @@ const EmptyHeroState = memo(function EmptyHeroState({
               className="size-24 drop-shadow-[0_0_28px_rgba(168,85,247,0.2)]"
             />
           </motion.div>
-          <div className="flex min-h-[9rem] w-full max-w-[860px] flex-col items-center justify-start">
+          <div className={cn("flex min-h-[9rem] w-full flex-col items-center justify-start", CHAT_HERO_MAX_WIDTH)}>
             <SuperCodeTitle morphText={effectiveMorphText} />
             {!effectiveMorphText && (
               <motion.p
@@ -3427,7 +3371,7 @@ const EmptyHeroState = memo(function EmptyHeroState({
               </motion.p>
             )}
           </div>
-          <div className="mt-3 w-full max-w-[760px]">{children}</div>
+          <div className={cn("mt-3 w-full", CHAT_CONTENT_MAX_WIDTH)}>{children}</div>
         </motion.div>
       </div>
     </motion.div>
@@ -5570,7 +5514,7 @@ export function ChatPanel({
 
   const composer = (
     <div className="shrink-0 border-t bg-background">
-      <div className="max-w-[720px] mx-auto w-full">
+      <div className={cn("mx-auto w-full", CHAT_CONTENT_MAX_WIDTH)}>
         <PlanToggle planSteps={planSteps} isStreaming={isLoading} />
         <div className="p-3 pt-2">
           <div className="flex flex-col rounded-lg border bg-muted/30 p-2 shadow-sm focus-within:ring-1 focus-within:ring-ring">
@@ -5855,7 +5799,7 @@ export function ChatPanel({
           >
             <div className="flex-1 relative min-h-0">
               <Conversation className="absolute inset-0">
-                <ConversationContent className="gap-4 pb-4 max-w-[720px] mx-auto w-full">
+                <ConversationContent className={cn("mx-auto w-full gap-4 pb-4", CHAT_CONTENT_MAX_WIDTH)}>
                   <ChatStreamBody
                     sessionId={sessionId}
                     isLoading={isLoading}

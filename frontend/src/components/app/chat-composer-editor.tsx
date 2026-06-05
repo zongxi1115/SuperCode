@@ -12,7 +12,8 @@ import {
   MessageSquareIcon,
   PencilIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { motion, useReducedMotion } from "motion/react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 type MentionKind = "workspace" | "file" | "change" | "element" | "skill";
@@ -49,6 +50,9 @@ type MentionAttrs = {
   label: string;
   kind: MentionKind;
 };
+
+const COMPOSER_MIN_HEIGHT = 80;
+const COMPOSER_MAX_HEIGHT = 220;
 
 const MENTION_KIND_ICON_COLORS: Record<MentionKind, string> = {
   workspace: "text-amber-600 bg-amber-50 dark:text-amber-400 dark:bg-amber-950/60",
@@ -292,8 +296,13 @@ export function ChatComposerEditor({
   onSubmit,
 }: ChatComposerEditorProps) {
   const anchorRef = useRef<HTMLDivElement>(null);
+  const scrollAreaRef = useRef<HTMLDivElement>(null);
   const lastSerializedValueRef = useRef(value);
+  const shouldReduceMotion = useReducedMotion();
   const [activeMention, setActiveMention] = useState<ActiveMention | null>(null);
+  const [editorHeight, setEditorHeight] = useState(COMPOSER_MIN_HEIGHT);
+  const [scrollProgress, setScrollProgress] = useState(0);
+  const [isEditorOverflowing, setIsEditorOverflowing] = useState(false);
   const [mentionNavigation, setMentionNavigation] = useState<{
     key: string | null;
     index: number;
@@ -336,6 +345,23 @@ export function ChatComposerEditor({
   useEffect(() => { filteredSuggestionsRef.current = filteredSuggestions; }, [filteredSuggestions]);
   useEffect(() => { selectedIndexRef.current = selectedIndex; }, [selectedIndex]);
   useEffect(() => { onSubmitRef.current = onSubmit; }, [onSubmit]);
+
+  const refreshEditorMetrics = useCallback(() => {
+    const scrollArea = scrollAreaRef.current;
+    if (!scrollArea) return;
+
+    const editorElement = scrollArea.querySelector<HTMLElement>(".ProseMirror");
+    const contentHeight = Math.max(
+      COMPOSER_MIN_HEIGHT,
+      editorElement?.scrollHeight ?? scrollArea.scrollHeight,
+    );
+    const nextHeight = Math.min(COMPOSER_MAX_HEIGHT, contentHeight);
+    setEditorHeight(nextHeight);
+
+    const maxScroll = Math.max(scrollArea.scrollHeight - scrollArea.clientHeight, 0);
+    setIsEditorOverflowing(maxScroll > 1);
+    setScrollProgress(maxScroll > 0 ? scrollArea.scrollTop / maxScroll : 0);
+  }, []);
 
   const insertSuggestionDirectly = useCallback(
     (editorInstance: NonNullable<ReturnType<typeof useEditor>>, suggestion: ComposerMentionSuggestion, mention: ActiveMention) => {
@@ -457,6 +483,7 @@ export function ChatComposerEditor({
         lastSerializedValueRef.current = serialized;
         onChange(serialized);
         setActiveMention(getActiveMentionFromEditor(currentEditor, anchorRef));
+        requestAnimationFrame(refreshEditorMetrics);
       },
       onSelectionUpdate({ editor: currentEditor }) {
         setActiveMention(getActiveMentionFromEditor(currentEditor, anchorRef));
@@ -464,6 +491,20 @@ export function ChatComposerEditor({
     },
     [],
   );
+
+  useLayoutEffect(() => {
+    if (!editor) return;
+
+    refreshEditorMetrics();
+    const observer = new ResizeObserver(refreshEditorMetrics);
+    observer.observe(editor.view.dom);
+    window.addEventListener("resize", refreshEditorMetrics);
+
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", refreshEditorMetrics);
+    };
+  }, [editor, refreshEditorMetrics]);
 
   useEffect(() => {
     if (!editor) return;
@@ -487,9 +528,14 @@ export function ChatComposerEditor({
       e.preventDefault();
       const pastedText = e.clipboardData.getData("text/plain");
       editor.chain().focus().insertContent(pastedText).run();
+      requestAnimationFrame(refreshEditorMetrics);
     },
-    [editor],
+    [editor, refreshEditorMetrics],
   );
+
+  const handleEditorScroll = useCallback(() => {
+    refreshEditorMetrics();
+  }, [refreshEditorMetrics]);
 
   const dropdownStyle = useMemo(() => {
     if (!activeMention) return null;
@@ -516,9 +562,49 @@ export function ChatComposerEditor({
         </div>
       )}
 
-      <div onPaste={handlePaste}>
-        <EditorContent editor={editor} />
-      </div>
+      <motion.div
+        animate={{ height: editorHeight }}
+        className="relative overflow-hidden"
+        initial={false}
+        transition={
+          shouldReduceMotion
+            ? { duration: 0 }
+            : { duration: 0.24, ease: [0.22, 1, 0.36, 1] }
+        }
+      >
+        <div
+          ref={scrollAreaRef}
+          onPaste={handlePaste}
+          onScroll={handleEditorScroll}
+          className={cn(
+            "h-full pr-2",
+            isEditorOverflowing
+              ? "overflow-y-auto [scrollbar-width:thin]"
+              : "overflow-hidden",
+          )}
+        >
+          <EditorContent editor={editor} />
+        </div>
+
+        {isEditorOverflowing ? (
+          <div className="pointer-events-none absolute bottom-2 right-0 top-2 w-px overflow-hidden rounded-full bg-border/60">
+            <motion.div
+              className="absolute left-0 w-full rounded-full bg-muted-foreground/45"
+              style={{
+                height: "34%",
+              }}
+              animate={{
+                top: `${Math.min(Math.max(scrollProgress, 0), 1) * 66}%`,
+              }}
+              transition={
+                shouldReduceMotion
+                  ? { duration: 0 }
+                  : { duration: 0.16, ease: [0.22, 1, 0.36, 1] }
+              }
+            />
+          </div>
+        ) : null}
+      </motion.div>
 
       {activeMention && dropdownStyle ? createPortal(
         <div

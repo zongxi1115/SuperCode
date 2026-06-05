@@ -27,7 +27,9 @@ HTML_ARTIFACT_OUTPUT_RULES = [
     "5. Artifact block 格式必须是：<supercode-artifact type=\"html\" title=\"短标题\">\\n<!doctype html>...\\n</supercode-artifact>。",
     "6. HTML 应尽量自包含；允许为可视化/交互使用少量常见 HTTPS CDN 第三方库（如 Chart.js、D3、Three.js、Tailwind CDN），但只在确有价值时使用，并在正文简短说明用了哪些外部库。",
     "7. 不要访问 window.parent / window.top，不要跳转父页面，不要读取本地文件、密钥或尝试持久化到工作区；artifact 内代码只服务于预览本身。",
-    "8. 不要把普通文字总结强行改写成 HTML；正文和 artifact 可以混排，artifact 只承载值得独立渲染的内容。",
+    "8. 对话内用于回答问题的 HTML artifact 默认不要设置整页背景色、满屏渐变或 body 深色背景；优先透明背景，让内容自然嵌入聊天正文。只有用户明确要求海报、落地页、沉浸式页面或独立视觉作品时才使用明显背景。",
+    "9. 对话内用于回答问题的 HTML artifact 应尽量自然高度完整展示，避免固定 100vh、高度滚动容器、overflow:auto/scroll 或需要内部滚动条的布局；宽度默认适配聊天正文即可。",
+    "10. 不要把普通文字总结强行改写成 HTML；正文和 artifact 可以混排，artifact 只承载值得独立渲染的内容。",
 ]
 
 
