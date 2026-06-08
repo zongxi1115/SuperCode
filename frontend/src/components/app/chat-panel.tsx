@@ -5246,6 +5246,16 @@ export function ChatPanel({
 
   const selectedModel =
     modelOptions.find((m) => m.id === model) ?? modelOptions[0];
+
+  const formatModelContextWindow = (tokens: number | null | undefined) => {
+    if (!tokens) return "未知";
+    if (tokens >= 1_000_000) {
+      const value = tokens / 1_000_000;
+      return `${Number.isInteger(value) ? value : value.toFixed(1)}M`;
+    }
+    const value = tokens / 1_000;
+    return `${Number.isInteger(value) ? value : value.toFixed(0)}K`;
+  };
   const selectedReasoningEffort = reasoningEffort ?? "default";
   const mentionSuggestions = useMemo(() => {
     const items: MentionSuggestion[] = [];
@@ -5788,15 +5798,21 @@ export function ChatPanel({
                               onModelChange(m.id);
                               setIsModelSelectorOpen(false);
                             }}
-                            className="gap-2"
+                            className="min-h-12 gap-2 py-2"
                           >
                             <ModelSelectorLogo
                               provider={m.provider}
                               model={m.name}
+                              className="mt-0.5"
                             />
-                            <ModelSelectorName>
-                              {m.label ?? m.name}
-                            </ModelSelectorName>
+                            <div className="min-w-0 flex-1 text-left">
+                              <ModelSelectorName className="block">
+                                {m.label ?? m.name}
+                              </ModelSelectorName>
+                              <span className="block truncate text-[11px] leading-4 text-muted-foreground">
+                                上下文长度：{formatModelContextWindow(m.contextWindow)}
+                              </span>
+                            </div>
                           </ModelSelectorItem>
                         ))}
                       </ModelSelectorGroup>

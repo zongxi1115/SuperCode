@@ -45,9 +45,7 @@ import {
   Type,
 } from 'lucide-react';
 
-type EditableProvider = UIModelProvider & {
-  modelsText: string;
-};
+type EditableProvider = UIModelProvider;
 
 type EditableMCPServer = MCPServerConfig & {
   argsText: string;
@@ -99,30 +97,11 @@ type SettingsDialogProps = {
   onSaveSettings: (settings: AppSettings) => Promise<void>;
 };
 
-function normalizeModels(text: string) {
-  return Array.from(
-    new Set(
-      text
-        .split(/[\n,]+/)
-        .map((item) => item.trim())
-        .filter(Boolean),
-    ),
-  );
-}
-
-function modelRecordIds(models: UIModelProvider['models']) {
-  return models.map((model) => model.id).filter(Boolean);
-}
-
-function buildModelRecords(
-  modelIds: string[],
-  existingModels: UIModelProvider['models'] = [],
-): UIModelProvider['models'] {
-  const existingById = new Map(existingModels.map((model) => [model.id, model]));
-  return modelIds.map((id) => ({
-    id,
-    contextWindow: existingById.get(id)?.contextWindow ?? null,
-  }));
+function createModelRecord() {
+  return {
+    id: '',
+    contextWindow: 32_000,
+  };
 }
 
 function normalizeLines(text: string) {
@@ -165,7 +144,6 @@ function toEditableProvider(provider?: UIModelProvider): EditableProvider {
     models: provider?.models ?? [],
     provider: provider?.provider ?? null,
     apiMode: provider?.apiMode ?? 'chat_completions',
-    modelsText: modelRecordIds(provider?.models ?? []).join('\n'),
   };
 }
 
@@ -343,12 +321,46 @@ export function SettingsDialog({
     setDraftProviders((prev) =>
       prev.map((p, i) => {
         if (i !== index) return p;
-        const next = { ...p, ...patch };
-        if (patch.modelsText !== undefined) {
-          next.models = buildModelRecords(normalizeModels(patch.modelsText), next.models);
-        }
-        return next;
+        return { ...p, ...patch };
       }),
+    );
+  };
+
+  const updateProviderModel = (
+    providerIndex: number,
+    modelIndex: number,
+    patch: Partial<UIModelProvider['models'][number]>,
+  ) => {
+    setDraftProviders((prev) =>
+      prev.map((provider, index) => {
+        if (index !== providerIndex) return provider;
+        return {
+          ...provider,
+          models: provider.models.map((model, itemIndex) =>
+            itemIndex === modelIndex ? { ...model, ...patch } : model,
+          ),
+        };
+      }),
+    );
+  };
+
+  const addProviderModel = (providerIndex: number) => {
+    setDraftProviders((prev) =>
+      prev.map((provider, index) =>
+        index === providerIndex
+          ? { ...provider, models: [...provider.models, createModelRecord()] }
+          : provider,
+      ),
+    );
+  };
+
+  const removeProviderModel = (providerIndex: number, modelIndex: number) => {
+    setDraftProviders((prev) =>
+      prev.map((provider, index) =>
+        index === providerIndex
+          ? { ...provider, models: provider.models.filter((_, itemIndex) => itemIndex !== modelIndex) }
+          : provider,
+      ),
     );
   };
 
@@ -464,7 +476,6 @@ export function SettingsDialog({
       if (!canUpdateAsyncState()) return;
       updateProvider(index, {
         models: catalog.models,
-        modelsText: modelRecordIds(catalog.models).join('\n'),
       });
       const contextCount = catalog.models.filter((model) => model.contextWindow).length;
       setFeedback(`已拉取 ${catalog.models.length} 个模型，缓存 ${contextCount} 个上下文窗口`);
@@ -645,18 +656,20 @@ export function SettingsDialog({
     setIsSaving(true);
     try {
       await onSaveProviders(
-        draftProviders.map((p) => {
-          const models = buildModelRecords(normalizeModels(p.modelsText), p.models);
-          return {
-            id: p.id ?? null,
-            name: p.name.trim() || '未命名供应商',
-            baseUrl: p.baseUrl.trim(),
-            apiKey: p.apiKey.trim(),
-            models,
-            provider: p.provider ?? null,
-            apiMode: p.apiMode ?? 'chat_completions',
-          };
-        }),
+        draftProviders.map((p) => ({
+          id: p.id ?? null,
+          name: p.name.trim() || '未命名供应商',
+          baseUrl: p.baseUrl.trim(),
+          apiKey: p.apiKey.trim(),
+          models: p.models
+            .map((model) => ({
+              id: model.id.trim(),
+              contextWindow: model.contextWindow ?? null,
+            }))
+            .filter((model) => model.id),
+          provider: p.provider ?? null,
+          apiMode: p.apiMode ?? 'chat_completions',
+        })),
       );
       await onSaveMcpServers(draftMcpServers.map((server) => serializeMcpServer(server)));
       await onSaveSettings(draftSettings);
@@ -904,16 +917,76 @@ export function SettingsDialog({
                         </div>
 
                         <div className="space-y-1">
-                          <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
-                            <List className="size-2.5" />
-                            模型
-                          </label>
-                          <Textarea
-                            value={provider.modelsText}
-                            onChange={(e) => updateProvider(index, { modelsText: e.target.value })}
-                            className="min-h-[56px] font-mono text-[11px] leading-snug"
-                            placeholder={'每行一个或逗号分隔\nopenai/gpt-4.1\nanthropic/claude-sonnet-4'}
-                          />
+                          <div className="flex items-center justify-between gap-2">
+                            <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+                              <List className="size-2.5" />
+                              模型
+                            </label>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="h-6 gap-1 px-2 text-[11px]"
+                              onClick={() => addProviderModel(index)}
+                            >
+                              <Plus className="size-3" />
+                              添加
+                            </Button>
+                          </div>
+                          <div className="overflow-hidden rounded-md border bg-background">
+                            {provider.models.length === 0 ? (
+                              <div className="flex h-20 items-center justify-center text-xs text-muted-foreground">
+                                暂无模型，点击添加或拉取模型
+                              </div>
+                            ) : (
+                              <div className="divide-y">
+                                {provider.models.map((model, modelIndex) => (
+                                  <div
+                                    key={`${model.id || 'draft'}-${modelIndex}`}
+                                    className="grid grid-cols-[minmax(0,1fr)_120px_32px] items-center gap-2 px-2 py-2"
+                                  >
+                                    <div className="flex min-w-0 items-center gap-2">
+                                      <div className="flex size-6 shrink-0 items-center justify-center rounded-full border bg-muted/40">
+                                        <Server className="size-3 text-muted-foreground" />
+                                      </div>
+                                      <Input
+                                        value={model.id}
+                                        onChange={(event) =>
+                                          updateProviderModel(index, modelIndex, { id: event.target.value })
+                                        }
+                                        placeholder="model-id"
+                                        className="h-7 min-w-0 border-0 bg-transparent px-0 font-mono text-xs shadow-none focus-visible:ring-0"
+                                      />
+                                    </div>
+                                    <div className="flex items-center gap-1.5">
+                                      <span className="shrink-0 text-[10px] text-muted-foreground">上下文</span>
+                                      <Input
+                                        type="number"
+                                        min={1}
+                                        value={model.contextWindow ?? ''}
+                                        onChange={(event) =>
+                                          updateProviderModel(index, modelIndex, {
+                                            contextWindow: event.target.value
+                                              ? Number(event.target.value)
+                                              : null,
+                                          })
+                                        }
+                                        className="h-7 px-2 text-right font-mono text-[11px]"
+                                      />
+                                    </div>
+                                    <Button
+                                      variant="ghost"
+                                      size="icon-xs"
+                                      className="size-7 text-muted-foreground"
+                                      onClick={() => removeProviderModel(index, modelIndex)}
+                                      title="删除模型"
+                                    >
+                                      <Trash2 className="size-3" />
+                                    </Button>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
                         </div>
                       </div>
                     );
