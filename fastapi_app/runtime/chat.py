@@ -381,7 +381,7 @@ async def run_agent_stream(
             )
             if event.tool_result.name in {"execute", "excecute", "terminal_input", "terminal_wait"} and terminal_output is not None:
                 session.terminal_output = terminal_output
-            if event.tool_result.name in {"write_file", "replace_file", "apply_patch"} or (
+            if event.tool_result.name in {"write_file", "replace_file", "apply_patch", "generate_image"} or (
                 event.tool_result.name == "delete_file" and not requires_confirmation
             ):
                 schedule_workspace_rag_index(APP_DATA_ROOT, session.workspace)

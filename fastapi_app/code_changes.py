@@ -271,6 +271,10 @@ def file_tree_changed_paths_from_tool_result(
         filename = str(tool_arguments.get("filename") or "").strip()
         if filename:
             raw_paths.append(filename)
+    elif tool_name == "generate_image" and isinstance(output, dict):
+        filename = str(output.get("file") or tool_arguments.get("filename") or "").strip()
+        if filename:
+            raw_paths.append(filename)
     elif tool_name == "apply_patch":
         if isinstance(output, dict) and isinstance(output.get("files"), list):
             raw_paths.extend(str(path) for path in output["files"] if str(path).strip())

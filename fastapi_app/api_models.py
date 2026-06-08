@@ -220,6 +220,15 @@ class MCPServerTestRequest(BaseModel):
     server: MCPServerPayload | None = None
 
 
+class ImageGenerationSettingsPayload(BaseModel):
+    enabled: bool = False
+    baseUrl: str = ""
+    apiKey: str = ""
+    model: str = ""
+    size: str = "1024x1024"
+    quality: str = "auto"
+
+
 class MemoryItemPayload(BaseModel):
     id: str
     content: str
@@ -246,6 +255,7 @@ class SettingsPayload(BaseModel):
     bodyFontSize: int = 14
     bodyLineHeight: int = 22
     embedding: EmbeddingSettingsPayload = Field(default_factory=EmbeddingSettingsPayload)
+    imageGeneration: ImageGenerationSettingsPayload = Field(default_factory=ImageGenerationSettingsPayload)
     memory: MemorySettingsPayload = Field(default_factory=MemorySettingsPayload)
 
 

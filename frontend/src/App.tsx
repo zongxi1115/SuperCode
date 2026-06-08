@@ -515,6 +515,26 @@ function normalizeAppSettings(settings: AppSettings): AppSettings {
     ...settings,
     finalAnswerRendering:
       settings.finalAnswerRendering === 'html' ? 'html' : 'markdown',
+    embedding: {
+      enabled: settings.embedding?.enabled ?? false,
+      baseUrl: settings.embedding?.baseUrl ?? '',
+      apiKey: settings.embedding?.apiKey ?? '',
+      model: settings.embedding?.model ?? '',
+    },
+    imageGeneration: {
+      enabled: settings.imageGeneration?.enabled ?? false,
+      baseUrl: settings.imageGeneration?.baseUrl ?? '',
+      apiKey: settings.imageGeneration?.apiKey ?? '',
+      model: settings.imageGeneration?.model ?? '',
+      size: settings.imageGeneration?.size ?? '1024x1024',
+      quality: settings.imageGeneration?.quality ?? 'auto',
+    },
+    memory: {
+      enabled: settings.memory?.enabled ?? true,
+      autoLearn: settings.memory?.autoLearn ?? true,
+      global: settings.memory?.global ?? [],
+      workspaces: settings.memory?.workspaces ?? {},
+    },
   };
 }
 
@@ -633,6 +653,14 @@ export default function App() {
       baseUrl: '',
       apiKey: '',
       model: '',
+    },
+    imageGeneration: {
+      enabled: false,
+      baseUrl: '',
+      apiKey: '',
+      model: '',
+      size: '1024x1024',
+      quality: 'auto',
     },
     memory: {
       enabled: true,

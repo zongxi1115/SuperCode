@@ -31,6 +31,7 @@ import {
   EyeOff,
   Globe,
   GripVertical,
+  ImageIcon,
   Key,
   List,
   Lock,
@@ -76,6 +77,8 @@ const BODY_TEXT_SIZE_OPTIONS = [
   { label: '舒适', fontSize: 15, lineHeight: 24 },
   { label: '大字', fontSize: 16, lineHeight: 26 },
 ] as const;
+
+const IMAGE_QUALITY_OPTIONS = ['auto', 'low', 'medium', 'high'] as const;
 
 type SettingsDialogProps = {
   open: boolean;
@@ -190,6 +193,20 @@ function withSettingsDefaults(settings: AppSettings): AppSettings {
   return {
     ...settings,
     finalAnswerRendering: settings.finalAnswerRendering ?? 'markdown',
+    embedding: {
+      enabled: settings.embedding?.enabled ?? false,
+      baseUrl: settings.embedding?.baseUrl ?? '',
+      apiKey: settings.embedding?.apiKey ?? '',
+      model: settings.embedding?.model ?? '',
+    },
+    imageGeneration: {
+      enabled: settings.imageGeneration?.enabled ?? false,
+      baseUrl: settings.imageGeneration?.baseUrl ?? '',
+      apiKey: settings.imageGeneration?.apiKey ?? '',
+      model: settings.imageGeneration?.model ?? '',
+      size: settings.imageGeneration?.size ?? '1024x1024',
+      quality: settings.imageGeneration?.quality ?? 'auto',
+    },
     memory: {
       enabled: settings.memory?.enabled ?? true,
       autoLearn: settings.memory?.autoLearn ?? true,
@@ -262,6 +279,8 @@ export function SettingsDialog({
     ) ?? BODY_TEXT_SIZE_OPTIONS[1];
   const embeddingKey = 'embedding-api-key';
   const isEmbeddingKeyVisible = visibleKeys.has(embeddingKey);
+  const imageGenerationKey = 'image-generation-api-key';
+  const isImageGenerationKeyVisible = visibleKeys.has(imageGenerationKey);
   const currentWorkspaceKey = currentWorkspace.trim();
   const workspaceMemoryItems =
     currentWorkspaceKey && draftSettings.memory?.workspaces
@@ -546,6 +565,21 @@ export function SettingsDialog({
         setMcpTestingId(null);
       }
     }
+  };
+
+  const updateImageGenerationSettings = (patch: Partial<AppSettings['imageGeneration']>) => {
+    setDraftSettings((prev) => ({
+      ...prev,
+      imageGeneration: {
+        enabled: prev.imageGeneration?.enabled ?? false,
+        baseUrl: prev.imageGeneration?.baseUrl ?? '',
+        apiKey: prev.imageGeneration?.apiKey ?? '',
+        model: prev.imageGeneration?.model ?? '',
+        size: prev.imageGeneration?.size ?? '1024x1024',
+        quality: prev.imageGeneration?.quality ?? 'auto',
+        ...patch,
+      },
+    }));
   };
 
   const updateMemoryItem = (
@@ -1765,6 +1799,118 @@ export function SettingsDialog({
                       <RefreshCcw className={`size-3 ${isTestingEmbedding ? 'animate-spin' : ''}`} />
                       {isTestingEmbedding ? '测试中...' : '测试配置'}
                     </Button>
+                  </div>
+                </div>
+              </div>
+
+              <Separator />
+
+              <div>
+                <h3 className="mb-3 text-sm font-semibold">图片生成工具</h3>
+                <div className="space-y-4 rounded-lg border bg-card p-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="flex items-start gap-3">
+                      <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-fuchsia-500/10">
+                        <ImageIcon className="size-4 text-fuchsia-600 dark:text-fuchsia-400" />
+                      </div>
+                      <div className="space-y-1">
+                        <div className="text-sm font-medium">启用 generate_image</div>
+                        <div className="text-xs text-muted-foreground">
+                          编码智能体可按 OpenAI Images API 协议生成图片，并保存到当前工作区
+                        </div>
+                      </div>
+                    </div>
+                    <Switch
+                      checked={draftSettings.imageGeneration?.enabled ?? false}
+                      onCheckedChange={(enabled) => updateImageGenerationSettings({ enabled })}
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1.5">
+                      <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+                        <Globe className="size-2.5" />
+                        Images Base URL
+                      </label>
+                      <Input
+                        value={draftSettings.imageGeneration?.baseUrl ?? ''}
+                        onChange={(e) => updateImageGenerationSettings({ baseUrl: e.target.value })}
+                        placeholder="https://api.openai.com/v1"
+                        className="h-8 text-xs"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+                        <Server className="size-2.5" />
+                        Image Model
+                      </label>
+                      <Input
+                        value={draftSettings.imageGeneration?.model ?? ''}
+                        onChange={(e) => updateImageGenerationSettings({ model: e.target.value })}
+                        placeholder="gpt-image-1"
+                        className="h-8 text-xs"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+                      <Key className="size-2.5" />
+                      Images API Key
+                    </label>
+                    <div className="relative">
+                      <Input
+                        type={isImageGenerationKeyVisible ? 'text' : 'password'}
+                        value={draftSettings.imageGeneration?.apiKey ?? ''}
+                        onChange={(e) => updateImageGenerationSettings({ apiKey: e.target.value })}
+                        placeholder="sk-..."
+                        className="h-8 pr-8 text-xs"
+                      />
+                      <Button
+                        variant="ghost"
+                        size="icon-xs"
+                        className="absolute top-1/2 right-1 size-5 -translate-y-1/2"
+                        onClick={() => toggleKeyVisibility(imageGenerationKey)}
+                      >
+                        {isImageGenerationKeyVisible ? <EyeOff className="size-3" /> : <Eye className="size-3" />}
+                      </Button>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1.5">
+                      <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+                        <ImageIcon className="size-2.5" />
+                        默认尺寸
+                      </label>
+                      <Input
+                        value={draftSettings.imageGeneration?.size ?? '1024x1024'}
+                        onChange={(e) => updateImageGenerationSettings({ size: e.target.value })}
+                        placeholder="2048x2048"
+                        className="h-8 text-xs"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+                        <ShieldCheck className="size-2.5" />
+                        默认质量
+                      </label>
+                      <Select
+                        value={draftSettings.imageGeneration?.quality ?? 'auto'}
+                        onValueChange={(quality) => updateImageGenerationSettings({ quality })}
+                      >
+                        <SelectTrigger className="h-8 text-xs">
+                          <SelectValue placeholder="选择质量" />
+                        </SelectTrigger>
+                        <SelectContent align="start">
+                          {IMAGE_QUALITY_OPTIONS.map((quality) => (
+                            <SelectItem key={quality} value={quality}>
+                              {quality}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
                   </div>
                 </div>
               </div>

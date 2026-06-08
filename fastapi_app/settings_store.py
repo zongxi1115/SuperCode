@@ -21,6 +21,14 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "apiKey": "",
         "model": "",
     },
+    "imageGeneration": {
+        "enabled": False,
+        "baseUrl": "",
+        "apiKey": "",
+        "model": "",
+        "size": "1024x1024",
+        "quality": "auto",
+    },
 }
 
 
@@ -34,6 +42,12 @@ def _merge_settings(payload: dict[str, Any]) -> dict[str, Any]:
         merged["embedding"] = {**default_embedding, **raw_embedding}
     elif isinstance(default_embedding, dict):
         merged["embedding"] = {**default_embedding}
+    default_image_generation = DEFAULT_SETTINGS["imageGeneration"]
+    raw_image_generation = payload.get("imageGeneration")
+    if isinstance(default_image_generation, dict) and isinstance(raw_image_generation, dict):
+        merged["imageGeneration"] = {**default_image_generation, **raw_image_generation}
+    elif isinstance(default_image_generation, dict):
+        merged["imageGeneration"] = {**default_image_generation}
     return merged
 
 

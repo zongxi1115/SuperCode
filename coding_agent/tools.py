@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import codecs
 import fnmatch
+import hashlib
 import json
+import mimetypes
 import re
 import shutil
 import subprocess
@@ -25,6 +29,7 @@ from agent.tools import BaseTool, ToolContext
 from coding_agent.model import CodeExplorationPromptModel
 from fastapi_app.memory_store import remember_preference
 from fastapi_app.project_docs_store import read_project_docs, write_project_docs
+from fastapi_app.settings_store import load_settings
 
 INTERACTIVE_INPUT_PROMPT_IDLE_SECONDS = 0.2
 INTERACTIVE_POLL_SECONDS = 0.05
@@ -55,6 +60,22 @@ GREP_MAX_LIMIT = 300
 CODE_EXPLORATION_DEFAULT_MAX_STEPS = 8
 CODE_EXPLORATION_MAX_STEPS = 16
 SUBAGENT_SUMMARY_MAX_CHARS = 6000
+IMAGE_GENERATION_OUTPUT_DIR = ".supercode/generated-images"
+IMAGE_GENERATION_ALLOWED_QUALITIES = {
+    "auto",
+    "low",
+    "medium",
+    "high",
+    "standard",
+    "hd",
+}
+IMAGE_GENERATION_EXTENSIONS_BY_MIME = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+}
 APPLY_PATCH_BEGIN = "*** Begin Patch"
 APPLY_PATCH_END = "*** End Patch"
 APPLY_PATCH_UPDATE_PREFIX = "*** Update File: "
@@ -1181,6 +1202,378 @@ class RememberPreferenceTool(CodingBaseTool):
             "workspaceKey": result.get("workspaceKey"),
             "item": result.get("item"),
         }
+
+
+class GenerateImageTool(CodingBaseTool):
+    """按 OpenAI Images API 协议生成图片，并保存到本地工作区。"""
+
+    name = "generate_image"
+    description = (
+        "生成图片并保存到本地文件，适合在实现网站、游戏、视觉素材或占位图时使用。"
+        "后端按 OpenAI Images API 协议请求配置的图片生成服务，拿到 url 或 b64_json 后会下载/解码到工作区。"
+        "参数：prompt 必填；filename、size、quality、background、output_format 可选。"
+        "返回本地文件路径，不返回远端图片 URL。"
+    )
+    parameters_schema = {
+        "type": "object",
+        "properties": {
+            "prompt": {
+                "type": "string",
+                "description": "图片生成提示词，描述主体、风格、用途和重要约束。",
+            },
+            "filename": {
+                "type": "string",
+                "description": "可选保存路径，相对当前工作区；不填则保存到 .supercode/generated-images/。",
+            },
+            "size": {
+                "type": "string",
+                "description": "可选图片尺寸，默认使用设置里的尺寸；不同供应商支持的尺寸可能不同。",
+            },
+            "quality": {
+                "type": "string",
+                "enum": sorted(IMAGE_GENERATION_ALLOWED_QUALITIES),
+                "description": "可选图片质量，默认使用设置里的质量。",
+            },
+            "background": {
+                "type": "string",
+                "enum": ["auto", "transparent", "opaque"],
+                "description": "可选背景模式；仅在后端模型支持时生效。",
+            },
+            "output_format": {
+                "type": "string",
+                "enum": ["png", "jpeg", "webp"],
+                "description": "可选输出格式；仅在后端模型支持时生效。",
+            },
+        },
+        "required": ["prompt"],
+        "additionalProperties": False,
+    }
+
+    def run(
+        self, arguments: dict[str, object], context: ToolContext
+    ) -> dict[str, object]:
+        prompt = str(arguments.get("prompt") or "").strip()
+        if not prompt:
+            raise ValueError("prompt 不能为空。")
+
+        config = self._load_image_generation_config(context)
+        size = self._normalize_size(
+            arguments.get("size") or config.get("size") or "1024x1024"
+        )
+        quality = self._normalize_option(
+            arguments.get("quality") or config.get("quality") or "auto",
+            IMAGE_GENERATION_ALLOWED_QUALITIES,
+            "quality",
+        )
+        output_format = str(arguments.get("output_format") or "").strip().lower()
+        if output_format and output_format not in {"png", "jpeg", "webp"}:
+            raise ValueError("output_format 只支持 png、jpeg、webp。")
+
+        request_payload: dict[str, object] = {
+            "model": str(config["model"]),
+            "prompt": prompt,
+            "n": 1,
+            "size": size,
+        }
+        if quality:
+            request_payload["quality"] = quality
+        background = str(arguments.get("background") or "").strip().lower()
+        if background:
+            request_payload["background"] = background
+        if output_format:
+            request_payload["output_format"] = output_format
+
+        response_payload = self._request_image_generation(config, request_payload)
+        size = str(request_payload.get("size") or size)
+        image_bytes, mime_type, source_kind = self._extract_image_bytes(response_payload)
+        extension = self._choose_extension(
+            mime_type=mime_type,
+            output_format=output_format,
+        )
+        target = self._resolve_output_target(
+            raw_filename=str(arguments.get("filename") or "").strip(),
+            extension=extension,
+            prompt=prompt,
+            context=context,
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(image_bytes)
+
+        relative_path = _relative_posix_path(target, context.workspace.resolve())
+        return {
+            "summary": f"已生成图片并保存到 {relative_path}",
+            "file": relative_path,
+            "absolute_path": str(target),
+            "mime_type": mime_type,
+            "bytes": len(image_bytes),
+            "model": str(config["model"]),
+            "size": size,
+            "quality": quality,
+            "source": source_kind,
+        }
+
+    def _load_image_generation_config(self, context: ToolContext) -> dict[str, object]:
+        app_data_root = Path(
+            context.metadata.get("app_data_root")
+            or context.metadata.get("project_root")
+            or "."
+        )
+        raw_config = load_settings(app_data_root).get("imageGeneration")
+        config = raw_config if isinstance(raw_config, dict) else {}
+
+        if not bool(config.get("enabled")):
+            raise RuntimeError("图片生成工具未启用，请先在设置中启用并配置图片生成 API。")
+
+        base_url = str(config.get("baseUrl") or "").strip().rstrip("/")
+        api_key = str(config.get("apiKey") or "").strip()
+        model = str(config.get("model") or "").strip()
+        missing = [
+            label
+            for label, value in (
+                ("Base URL", base_url),
+                ("API Key", api_key),
+                ("Model", model),
+            )
+            if not value
+        ]
+        if missing:
+            raise RuntimeError(f"图片生成配置缺少 {', '.join(missing)}。")
+
+        return {
+            **config,
+            "baseUrl": base_url,
+            "apiKey": api_key,
+            "model": model,
+        }
+
+    def _normalize_option(
+        self,
+        value: object,
+        allowed_values: set[str],
+        field_name: str,
+    ) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized not in allowed_values:
+            allowed = ", ".join(sorted(allowed_values))
+            raise ValueError(f"{field_name} 只支持：{allowed}")
+        return normalized
+
+    def _normalize_size(self, value: object) -> str:
+        normalized = str(value or "").strip().lower()
+        if not normalized:
+            return "1024x1024"
+        return normalized
+
+    def _request_image_generation(
+        self,
+        config: dict[str, object],
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        try:
+            return self._send_image_generation_request(config, payload)
+        except RuntimeError as exc:
+            supported_sizes = self._extract_supported_sizes(str(exc))
+            fallback_size = self._pick_fallback_size(
+                supported_sizes,
+                requested_size=str(payload.get("size") or ""),
+            )
+            if not fallback_size:
+                raise
+            payload["size"] = fallback_size
+            return self._send_image_generation_request(config, payload)
+
+    def _send_image_generation_request(
+        self,
+        config: dict[str, object],
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        request = Request(
+            self._image_generation_endpoint(str(config["baseUrl"])),
+            data=body,
+            headers={
+                "Authorization": f"Bearer {config['apiKey']}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "SuperCode/1.0",
+            },
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=120) as response:
+                raw_body = response.read().decode("utf-8")
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace").strip()
+            raise RuntimeError(detail or f"图片生成请求失败：HTTP {exc.code}") from exc
+        except URLError as exc:
+            raise RuntimeError(f"图片生成请求失败：{exc.reason}") from exc
+        except TimeoutError as exc:
+            raise RuntimeError("图片生成请求超时。") from exc
+
+        try:
+            parsed = json.loads(raw_body)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"图片生成接口返回了无法解析的 JSON：{raw_body[:300]}") from exc
+        if not isinstance(parsed, dict):
+            raise RuntimeError("图片生成接口返回格式不正确。")
+        return parsed
+
+    def _extract_supported_sizes(self, error_detail: str) -> list[str]:
+        if "size" not in error_detail.lower():
+            return []
+        return re.findall(r"\b\d{3,5}x\d{3,5}\b", error_detail.lower())
+
+    def _pick_fallback_size(
+        self,
+        supported_sizes: list[str],
+        *,
+        requested_size: str,
+    ) -> str | None:
+        unique_sizes = list(dict.fromkeys(size for size in supported_sizes if "x" in size))
+        if not unique_sizes:
+            return None
+        if requested_size in unique_sizes:
+            return None
+
+        requested_dimensions = self._parse_size_dimensions(requested_size)
+        if requested_dimensions is None:
+            return unique_sizes[0]
+        requested_width, requested_height = requested_dimensions
+        requested_ratio = requested_width / max(requested_height, 1)
+        requested_area = requested_width * requested_height
+
+        ranked_sizes: list[tuple[float, int, str]] = []
+        for size in unique_sizes:
+            dimensions = self._parse_size_dimensions(size)
+            if dimensions is None:
+                continue
+            width, height = dimensions
+            ratio_distance = abs((width / max(height, 1)) - requested_ratio)
+            area_distance = abs((width * height) - requested_area)
+            ranked_sizes.append((ratio_distance, area_distance, size))
+
+        if not ranked_sizes:
+            return unique_sizes[0]
+        ranked_sizes.sort(key=lambda item: (item[0], item[1]))
+        return ranked_sizes[0][2]
+
+    def _parse_size_dimensions(self, size: str) -> tuple[int, int] | None:
+        match = re.fullmatch(r"(\d{3,5})x(\d{3,5})", size.strip().lower())
+        if match is None:
+            return None
+        return int(match.group(1)), int(match.group(2))
+
+    def _image_generation_endpoint(self, base_url: str) -> str:
+        normalized = base_url.rstrip("/")
+        if normalized.endswith("/images/generations"):
+            return normalized
+        return f"{normalized}/images/generations"
+
+    def _extract_image_bytes(
+        self,
+        payload: dict[str, object],
+    ) -> tuple[bytes, str, str]:
+        image_item = self._first_image_item(payload)
+        image_url = str(image_item.get("url") or "").strip()
+        if image_url:
+            image_bytes, mime_type = self._download_image(image_url)
+            return image_bytes, mime_type, "url"
+
+        b64_json = str(image_item.get("b64_json") or "").strip()
+        if b64_json:
+            try:
+                image_bytes = base64.b64decode(b64_json, validate=True)
+            except binascii.Error as exc:
+                raise RuntimeError("图片生成接口返回了无效的 b64_json。") from exc
+            return image_bytes, self._sniff_mime_type(image_bytes, ""), "b64_json"
+
+        raise RuntimeError("图片生成接口未返回 url 或 b64_json。")
+
+    def _first_image_item(self, payload: dict[str, object]) -> dict[str, object]:
+        data = payload.get("data")
+        if isinstance(data, list) and data:
+            first = data[0]
+            if isinstance(first, dict):
+                return first
+
+        if isinstance(payload.get("url"), str) or isinstance(payload.get("b64_json"), str):
+            return payload
+
+        raise RuntimeError("图片生成接口未返回 data[0]。")
+
+    def _download_image(self, image_url: str) -> tuple[bytes, str]:
+        parsed = urlparse(image_url)
+        if parsed.scheme not in {"http", "https"}:
+            raise RuntimeError("图片生成接口返回了不支持下载的 URL。")
+
+        request = Request(
+            image_url,
+            headers={
+                "Accept": "image/*,*/*;q=0.8",
+                "User-Agent": "SuperCode/1.0",
+            },
+            method="GET",
+        )
+        try:
+            with urlopen(request, timeout=120) as response:
+                image_bytes = response.read()
+                content_type = response.headers.get("Content-Type", "")
+        except HTTPError as exc:
+            raise RuntimeError(f"下载生成图片失败：HTTP {exc.code}") from exc
+        except URLError as exc:
+            raise RuntimeError(f"下载生成图片失败：{exc.reason}") from exc
+        except TimeoutError as exc:
+            raise RuntimeError("下载生成图片超时。") from exc
+
+        if not image_bytes:
+            raise RuntimeError("下载生成图片为空。")
+        return image_bytes, self._sniff_mime_type(image_bytes, content_type)
+
+    def _sniff_mime_type(self, image_bytes: bytes, content_type: str) -> str:
+        mime_type = content_type.split(";", 1)[0].strip().lower()
+        if mime_type.startswith("image/"):
+            return mime_type
+        if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+            return "image/png"
+        if image_bytes.startswith(b"\xff\xd8\xff"):
+            return "image/jpeg"
+        if image_bytes.startswith(b"RIFF") and image_bytes[8:12] == b"WEBP":
+            return "image/webp"
+        if image_bytes.startswith(b"GIF87a") or image_bytes.startswith(b"GIF89a"):
+            return "image/gif"
+        return "image/png"
+
+    def _choose_extension(self, *, mime_type: str, output_format: str) -> str:
+        if output_format == "jpeg":
+            return ".jpg"
+        if output_format:
+            return f".{output_format}"
+        return IMAGE_GENERATION_EXTENSIONS_BY_MIME.get(
+            mime_type,
+            mimetypes.guess_extension(mime_type) or ".png",
+        )
+
+    def _resolve_output_target(
+        self,
+        *,
+        raw_filename: str,
+        extension: str,
+        prompt: str,
+        context: ToolContext,
+    ) -> Path:
+        if raw_filename:
+            target = self._resolve_path(raw_filename, context)
+            allowed_extensions = set(IMAGE_GENERATION_EXTENSIONS_BY_MIME.values())
+            if target.suffix.lower() not in allowed_extensions:
+                target = target.with_suffix(extension)
+            return target
+
+        digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:10]
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        return self._resolve_path(
+            f"{IMAGE_GENERATION_OUTPUT_DIR}/image-{timestamp}-{digest}{extension}",
+            context,
+        )
 
 
 class GetDocsTool(CodingBaseTool):
@@ -3727,6 +4120,7 @@ def build_coding_tools() -> list[BaseTool]:
     return [
         ListFileTool(),
         RememberPreferenceTool(),
+        GenerateImageTool(),
         GetDocsTool(),
         GlobFileTool(),
         ReadFileTool(),

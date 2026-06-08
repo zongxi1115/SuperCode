@@ -473,6 +473,14 @@ export type AppSettings = {
     apiKey: string;
     model: string;
   };
+  imageGeneration: {
+    enabled: boolean;
+    baseUrl: string;
+    apiKey: string;
+    model: string;
+    size: string;
+    quality: string;
+  };
   memory: {
     enabled: boolean;
     autoLearn: boolean;
