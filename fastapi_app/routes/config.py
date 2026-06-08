@@ -8,6 +8,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
 from agent import Agent, ChatSession, OpenAICompatibleClient
+from chat_agent import ChatPromptModel
 from deploy_agent import DeployPromptModel, build_deploy_tools
 from coding_agent import CodingPromptModel, build_coding_tools, build_project_docs_tools
 from plan_agent import PlanPromptModel, build_plan_tools
@@ -163,12 +164,16 @@ def register_config_routes(
         elif session.agent_type == "plan":
             model = PlanPromptModel(client, workspace=session.workspace)
             tools = build_plan_tools()
+        elif session.agent_type == "chat":
+            model = ChatPromptModel(client)
+            tools = []
         else:
             model = CodingPromptModel(client, workspace=session.workspace)
             tools = build_coding_tools()
-        if "project-docs" in deps.get_loaded_plugin_ids(session):
+        if session.agent_type != "chat" and "project-docs" in deps.get_loaded_plugin_ids(session):
             tools = tools + build_project_docs_tools()
-        tools = tools + build_enabled_mcp_tools(deps.app_data_root)
+        if session.agent_type != "chat":
+            tools = tools + build_enabled_mcp_tools(deps.app_data_root)
         agent = Agent(
             model=model,
             tools=tools,

@@ -51,6 +51,6 @@ def resolve_requested_env_file(model_name: str | None, env_file: str | None = No
 
 def normalize_agent_type(agent_type: str | None) -> str:
     normalized = str(agent_type or "coding").strip().lower()
-    if normalized not in {"coding", "deploy", "plan"}:
+    if normalized not in {"chat", "coding", "deploy", "plan"}:
         raise HTTPException(status_code=400, detail=f"不支持的 agent_type: {agent_type}")
     return normalized

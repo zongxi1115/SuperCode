@@ -109,6 +109,33 @@ PLAN_ROUTE_KEYWORDS = (
     "技术方案",
 )
 
+CHAT_ROUTE_KEYWORDS = (
+    "chat mode",
+    "chat模式",
+    "聊天",
+    "闲聊",
+    "普通对话",
+)
+
+PLAIN_CHAT_QUESTION_KEYWORDS = (
+    "是什么",
+    "为什么",
+    "怎么",
+    "如何",
+    "what is",
+    "why",
+    "how",
+)
+
+CHAT_EXACT_MESSAGES = {
+    "hi",
+    "hello",
+    "hey",
+    "你好",
+    "您好",
+    "在吗",
+}
+
 PLAN_GENERIC_FOLLOWUPS = ROUTER_GENERIC_FOLLOWUPS | {
     "改下计划",
     "调整计划",
@@ -221,6 +248,18 @@ def _is_vague_requirement(text: str) -> bool:
     return len(text) <= 16
 
 
+def _is_plain_chat_question(text: str) -> bool:
+    if _message_has_specific_path_hint(text):
+        return False
+    if _contains_any_keyword(text, DEPLOY_ROUTE_KEYWORDS):
+        return False
+    if _contains_any_keyword(text, PLAN_ROUTE_KEYWORDS):
+        return False
+    if _contains_any_keyword(text, CODING_ROUTE_KEYWORDS):
+        return False
+    return text.endswith("?") or text.endswith("？") or _contains_any_keyword(text, PLAIN_CHAT_QUESTION_KEYWORDS)
+
+
 def _is_plan_session_active(session: RoutingSession) -> bool:
     if session.agent_type != "plan":
         return False
@@ -257,12 +296,22 @@ def route_agent_type_for_message(session: RoutingSession, user_message: str) -> 
 
     active_deploy_session = bool(normalize_deploy_state(session.deploy_state).get("active_session_id"))
 
+    if text in CHAT_EXACT_MESSAGES:
+        return "chat"
     if _contains_any_keyword(text, CODING_ROUTE_KEYWORDS):
         return "coding"
+    if session.agent_type == "chat" and text in ROUTER_GENERIC_FOLLOWUPS:
+        return "chat"
     if active_deploy_session and text in ROUTER_GENERIC_FOLLOWUPS:
         return "deploy"
     if active_deploy_session and session.agent_type == "deploy":
         return "deploy"
+    if (
+        _contains_any_keyword(text, CHAT_ROUTE_KEYWORDS)
+        or (session.agent_type == "chat" and _is_plain_chat_question(text))
+        or (not session.history_messages and _is_plain_chat_question(text))
+    ):
+        return "chat"
     if _should_force_plan_route(session, text):
         return "plan"
     if _contains_any_keyword(text, DEPLOY_ROUTE_KEYWORDS):

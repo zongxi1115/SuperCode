@@ -404,7 +404,7 @@ function advanceKanbanPlanSteps(currentSteps: PlanStep[], toolName: string): Pla
 }
 
 function isAgentMode(value: unknown): value is AgentMode {
-  return value === 'plan' || value === 'coding' || value === 'deploy';
+  return value === 'chat' || value === 'plan' || value === 'coding' || value === 'deploy';
 }
 
 function resolveAgentModeForRequest(value: unknown) {

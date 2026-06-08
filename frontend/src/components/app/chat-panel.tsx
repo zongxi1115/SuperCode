@@ -2736,6 +2736,11 @@ function DataPartView({
         icon: <LightbulbIcon className="size-3.5" />,
         color: "text-amber-600",
       },
+      chat: {
+        label: "聊天",
+        icon: <MessageSquareIcon className="size-3.5" />,
+        color: "text-violet-600",
+      },
       coding: {
         label: "编码",
         icon: <Code2Icon className="size-3.5" />,
@@ -5836,6 +5841,7 @@ export function ChatPanel({
                   </SelectTrigger>
                   <SelectContent align="start">
                     <SelectItem value="auto">自动</SelectItem>
+                    <SelectItem value="chat">聊天</SelectItem>
                     <SelectItem value="plan">计划</SelectItem>
                     <SelectItem value="coding">编码</SelectItem>
                     <SelectItem value="deploy">部署</SelectItem>

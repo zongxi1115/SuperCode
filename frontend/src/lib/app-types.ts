@@ -280,7 +280,7 @@ export type SessionPayload = {
   taskState?: TaskState;
 };
 
-export type AgentMode = 'auto' | 'plan' | 'coding' | 'deploy';
+export type AgentMode = 'auto' | 'chat' | 'plan' | 'coding' | 'deploy';
 
 export interface LastSession {
   workspace: string;

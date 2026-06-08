@@ -60,17 +60,7 @@ export function WorkspacePicker({
   onRemoveRecentProject,
 }: WorkspacePickerProps) {
   if (shouldRestoreSession) {
-    return (
-      <div className="min-h-screen bg-background text-foreground flex items-center justify-center p-6">
-        <div className="w-full max-w-xl rounded-2xl border bg-card p-6 shadow-sm space-y-5">
-          <div className="space-y-2">
-            <div className="text-sm font-medium text-muted-foreground">正在恢复上次的工作区</div>
-            <h1 className="text-2xl font-semibold">加载中...</h1>
-            <p className="text-sm text-muted-foreground">工作区：{customWorkspace}</p>
-          </div>
-        </div>
-      </div>
-    );
+    return null;
   }
 
   return (

@@ -4,6 +4,7 @@ import threading
 from typing import Any
 
 from agent import Agent, ChatSession, OpenAICompatibleClient
+from chat_agent import ChatPromptModel
 from coding_agent import (
     CodingPromptModel,
     InteractiveCommandSession,
@@ -155,12 +156,16 @@ def build_chat_session(
         elif agent_type == "plan":
             model = PlanPromptModel(client, workspace=workspace)
             tools = build_plan_tools()
+        elif agent_type == "chat":
+            model = ChatPromptModel(client)
+            tools = []
         else:
             model = CodingPromptModel(client, workspace=workspace)
             tools = build_coding_tools()
-        if "project-docs" in loaded_plugin_ids:
+        if agent_type != "chat" and "project-docs" in loaded_plugin_ids:
             tools = tools + build_project_docs_tools()
-        tools = tools + build_enabled_mcp_tools(APP_DATA_ROOT)
+        if agent_type != "chat":
+            tools = tools + build_enabled_mcp_tools(APP_DATA_ROOT)
         agent = Agent(
             model=model,
             tools=tools,
@@ -261,6 +266,9 @@ def route_session_for_user_message(
 
     if session.agent_type == "plan":
         reset_phase_for_new_turn(session)
+    elif session.agent_type == "chat":
+        session.plan_steps = []
+        set_session_phase(session, "idle")
     elif session.agent_type != "deploy":
         session.plan_steps = []
         set_session_phase(session, "idle")
