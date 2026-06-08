@@ -73,6 +73,7 @@ def register_config_routes(
             save_ui_model_providers,
             deps.app_data_root,
             [provider.model_dump(exclude_none=True) for provider in payload.providers],
+            refresh_context=False,
         )
         return JSONResponse(
             {

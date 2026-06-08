@@ -364,8 +364,28 @@ def register_file_routes(
         )
 
     @app.get("/api/sessions/{session_id}/file-tree")
-    async def get_file_tree(session_id: str, force: bool = Query(False)) -> JSONResponse:
+    async def get_file_tree(
+        session_id: str,
+        force: bool = Query(False),
+        path: str | None = Query(None),
+    ) -> JSONResponse:
         session = deps.require_session(session_id)
+        if path is not None and str(path).strip():
+            try:
+                directory = await asyncio.wait_for(
+                    asyncio.to_thread(session.get_file_tree_directory, path, force),
+                    timeout=15,
+                )
+            except RuntimeError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except asyncio.TimeoutError:
+                directory = None
+            return JSONResponse(
+                {
+                    "directory": directory,
+                    "revision": session.file_tree_revision,
+                }
+            )
         try:
             tree = await asyncio.wait_for(asyncio.to_thread(session.get_file_tree, force), timeout=15)
         except asyncio.TimeoutError:

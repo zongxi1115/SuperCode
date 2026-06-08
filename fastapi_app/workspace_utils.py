@@ -22,6 +22,8 @@ FILE_TREE_IGNORED_DIR_NAMES = {
 }
 FILE_TREE_MAX_DEPTH = 4
 FILE_TREE_MAX_ENTRIES_PER_DIR = 200
+FILE_TREE_MAX_TOTAL_ENTRIES = 1000
+DEFAULT_FILE_PICK_SCAN_BUDGET = 500
 
 FILE_TREE_ALLOWED_SUFFIXES = {
     ".ts",
@@ -143,18 +145,27 @@ def resolve_preview_path(raw_path: str, workspace: str) -> Path:
 def build_file_tree(root: Path, max_depth: int = FILE_TREE_MAX_DEPTH) -> list[dict[str, Any]]:
     if not root.exists():
         return []
+    remaining_entries = [FILE_TREE_MAX_TOTAL_ENTRIES]
 
     def walk(target: Path, depth: int) -> list[dict[str, Any]]:
-        if depth > max_depth:
+        if depth > max_depth or remaining_entries[0] <= 0:
             return []
         items: list[dict[str, Any]] = []
-        count = 0
-        for child in sorted(target.iterdir(), key=lambda item: (item.is_file(), item.name.lower())):
-            if count >= FILE_TREE_MAX_ENTRIES_PER_DIR:
-                items.append({"path": str(target.resolve()), "name": "... (too many entries)", "type": "file"})
+        children, truncated = _limited_directory_children(target, FILE_TREE_MAX_ENTRIES_PER_DIR)
+        for child in children:
+            if remaining_entries[0] <= 0:
+                truncated = True
                 break
-            absolute = str(child.resolve())
-            if child.is_dir():
+            remaining_entries[0] -= 1
+            try:
+                is_dir = child.is_dir()
+            except OSError:
+                continue
+            try:
+                absolute = str(child.resolve())
+            except OSError:
+                absolute = str(child)
+            if is_dir:
                 if child.name in FILE_TREE_IGNORED_DIR_NAMES:
                     continue
                 items.append(
@@ -162,6 +173,7 @@ def build_file_tree(root: Path, max_depth: int = FILE_TREE_MAX_DEPTH) -> list[di
                         "path": absolute,
                         "name": child.name,
                         "type": "folder",
+                        "loaded": depth < max_depth,
                         "children": walk(child, depth + 1),
                     }
                 )
@@ -173,7 +185,8 @@ def build_file_tree(root: Path, max_depth: int = FILE_TREE_MAX_DEPTH) -> list[di
                         "type": "file",
                     }
                 )
-            count += 1
+        if truncated:
+            items.append({"path": str(target.resolve()), "name": "... (too many entries)", "type": "file"})
         return items
 
     return [
@@ -181,17 +194,58 @@ def build_file_tree(root: Path, max_depth: int = FILE_TREE_MAX_DEPTH) -> list[di
             "path": str(root.resolve()),
             "name": root.name,
             "type": "folder",
+            "loaded": max_depth > 0,
             "children": walk(root, 1),
         }
     ]
+
+
+def build_file_tree_root(root: Path) -> list[dict[str, Any]]:
+    resolved = root.expanduser().resolve()
+    if not resolved.exists():
+        return []
+    return [
+        {
+            "path": str(resolved),
+            "name": resolved.name or str(resolved),
+            "type": "folder",
+            "loaded": False,
+            "children": [],
+        }
+    ]
+
+
+def _limited_directory_children(target: Path, limit: int) -> tuple[list[Path], bool]:
+    children: list[Path] = []
+    truncated = False
+    try:
+        for child in target.iterdir():
+            if child.name in FILE_TREE_IGNORED_DIR_NAMES:
+                continue
+            if len(children) >= limit:
+                truncated = True
+                break
+            children.append(child)
+    except OSError:
+        return [], False
+    children.sort(key=lambda item: (_safe_is_file(item), item.name.lower()))
+    return children, truncated
+
+
+def _safe_is_file(path: Path) -> bool:
+    try:
+        return path.is_file()
+    except OSError:
+        return False
 
 
 def build_directory_tree_node(directory: Path, max_depth: int = FILE_TREE_MAX_DEPTH) -> dict[str, Any]:
     resolved = directory.expanduser().resolve()
     return {
         "path": str(resolved),
-        "name": resolved.name,
+        "name": resolved.name or str(resolved),
         "type": "folder",
+        "loaded": True,
         "children": build_file_tree(resolved, max_depth=max_depth)[0].get("children", [])
         if resolved.exists()
         else [],
@@ -275,28 +329,50 @@ def pick_default_file(workspace: str) -> str | None:
 
 def _shallow_glob(root: Path, name: str, max_depth: int) -> list[Path]:
     results: list[Path] = []
-    _walk_shallow(root, max_depth, lambda path: results.append(path) if path.name == name else None)
+    budget = [DEFAULT_FILE_PICK_SCAN_BUDGET]
+
+    def visit(path: Path) -> bool:
+        if path.name == name:
+            results.append(path)
+        return len(results) >= 5
+
+    _walk_shallow(root, max_depth, visit, budget)
     return results[:5]
 
 
 def _shallow_glob_all(root: Path, max_depth: int) -> list[Path]:
     results: list[Path] = []
-    _walk_shallow(root, max_depth, lambda path: results.append(path))
+    budget = [DEFAULT_FILE_PICK_SCAN_BUDGET]
+
+    def visit(path: Path) -> bool:
+        results.append(path)
+        return len(results) >= 50
+
+    _walk_shallow(root, max_depth, visit, budget)
     return results[:50]
 
 
-def _walk_shallow(root: Path, max_depth: int, visitor: Any) -> None:
-    if max_depth <= 0:
-        return
+def _walk_shallow(root: Path, max_depth: int, visitor: Any, budget: list[int]) -> bool:
+    if max_depth <= 0 or budget[0] <= 0:
+        return False
     try:
         for child in root.iterdir():
+            if budget[0] <= 0:
+                return True
             if child.name in FILE_TREE_IGNORED_DIR_NAMES:
                 continue
-            visitor(child)
-            if child.is_dir():
-                _walk_shallow(child, max_depth - 1, visitor)
-    except PermissionError:
-        pass
+            budget[0] -= 1
+            if visitor(child):
+                return True
+            try:
+                is_dir = child.is_dir()
+            except OSError:
+                continue
+            if is_dir and _walk_shallow(child, max_depth - 1, visitor, budget):
+                return True
+    except OSError:
+        return False
+    return False
 
 
 def pick_demo_file(workspace: str) -> str | None:

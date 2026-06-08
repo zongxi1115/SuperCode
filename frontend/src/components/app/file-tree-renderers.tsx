@@ -4,7 +4,7 @@ import type { DirectoryNode, FileTreeNode } from '@/lib/app-types';
 export function renderFileTreeNodes(nodes: FileTreeNode[]): JSX.Element[] {
   return nodes.map((node) =>
     node.type === 'folder' ? (
-      <FileTreeFolder key={node.path} path={node.path} name={node.name}>
+      <FileTreeFolder key={node.path} path={node.path} name={node.name} selectable={false}>
         {renderFileTreeNodes(node.children ?? [])}
       </FileTreeFolder>
     ) : (

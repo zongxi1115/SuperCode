@@ -167,6 +167,7 @@ class SessionRestoreRequest(BaseModel):
 class CreateSessionRequest(BaseModel):
     workspace: str | None = None
     execution_mode: Literal["local", "worktree"] = "local"
+    initialize_git_repository: bool = False
     model: str | None = None
     env_file: str | None = None
     reasoning_effort: str | None = None

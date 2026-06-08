@@ -15,8 +15,14 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import {
+  HoverCard,
+  HoverCardContent,
+  HoverCardTrigger,
+} from "@/components/ui/hover-card";
 import { cn } from "@/lib/utils";
 import type { ComponentProps, ReactNode } from "react";
+import { useState } from "react";
 
 export type ModelSelectorProps = ComponentProps<typeof Dialog>;
 
@@ -88,11 +94,72 @@ export const ModelSelectorGroup = (props: ModelSelectorGroupProps) => (
   <CommandGroup {...props} />
 );
 
-export type ModelSelectorItemProps = ComponentProps<typeof CommandItem>;
+export type ModelSelectorItemProps = ComponentProps<typeof CommandItem> & {
+  hoverPreview?: {
+    icon?: ReactNode;
+    modelName?: string;
+    provider?: string;
+    contextWindow?: string | number;
+    description?: string;
+  };
+};
 
-export const ModelSelectorItem = (props: ModelSelectorItemProps) => (
-  <CommandItem {...props} />
-);
+export const ModelSelectorItem = ({ hoverPreview, ...props }: ModelSelectorItemProps) => {
+  const [open, setOpen] = useState(false);
+
+  if (!hoverPreview) {
+    return <CommandItem {...props} />;
+  }
+
+  return (
+    <HoverCard open={open} onOpenChange={setOpen} openDelay={200}>
+      <HoverCardTrigger asChild>
+        <CommandItem
+          {...props}
+          onMouseEnter={() => setOpen(true)}
+          onMouseLeave={() => setOpen(false)}
+        />
+      </HoverCardTrigger>
+      <HoverCardContent
+        side="right"
+        align="start"
+        className="w-80 p-4"
+        onMouseEnter={() => setOpen(true)}
+        onMouseLeave={() => setOpen(false)}
+      >
+        <div className="space-y-3">
+          {hoverPreview.icon && (
+            <div className="flex items-center gap-2">
+              {hoverPreview.icon}
+            </div>
+          )}
+          {hoverPreview.modelName && (
+            <div>
+              <h4 className="text-sm font-semibold">{hoverPreview.modelName}</h4>
+            </div>
+          )}
+          {hoverPreview.provider && (
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <span className="font-medium">提供商:</span>
+              <span>{hoverPreview.provider}</span>
+            </div>
+          )}
+          {hoverPreview.contextWindow && (
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <span className="font-medium">上下文长度:</span>
+              <span>{hoverPreview.contextWindow}</span>
+            </div>
+          )}
+          {hoverPreview.description && (
+            <div className="text-xs text-muted-foreground">
+              {hoverPreview.description}
+            </div>
+          )}
+        </div>
+      </HoverCardContent>
+    </HoverCard>
+  );
+};
 
 export type ModelSelectorShortcutProps = ComponentProps<typeof CommandShortcut>;
 

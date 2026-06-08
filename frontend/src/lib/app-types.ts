@@ -107,6 +107,7 @@ export type FileTreeNode = {
   path: string;
   name: string;
   type: 'folder' | 'file';
+  loaded?: boolean;
   children?: FileTreeNode[];
 };
 

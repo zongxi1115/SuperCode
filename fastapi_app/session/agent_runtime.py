@@ -137,6 +137,7 @@ def build_chat_session(
     reasoning_effort: str | None = None,
     loaded_plugin_ids: set[str] | None = None,
     fallback_context_tokens: int | None = None,
+    load_mcp_tools: bool = True,
 ) -> tuple[ChatSession | None, str, str | None, str | None, str | None, int | None]:
     try:
         config, normalized_model_ref = build_agent_config(APP_DATA_ROOT, env_file)
@@ -164,8 +165,9 @@ def build_chat_session(
             tools = build_coding_tools()
         if agent_type != "chat" and "project-docs" in loaded_plugin_ids:
             tools = tools + build_project_docs_tools()
-        if agent_type != "chat":
+        if agent_type != "chat" and load_mcp_tools:
             tools = tools + build_enabled_mcp_tools(APP_DATA_ROOT)
+        mcp_tools_loaded = agent_type == "chat" or load_mcp_tools
         agent = Agent(
             model=model,
             tools=tools,
@@ -175,6 +177,7 @@ def build_chat_session(
                 "project_root": str(ROOT),
                 "app_data_root": str(APP_DATA_ROOT),
                 "llm_client": client,
+                "mcp_tools_loaded": mcp_tools_loaded,
             },
         )
         schedule_workspace_rag_index(APP_DATA_ROOT, resolved_workspace)
@@ -237,6 +240,20 @@ def rebuild_chat_session_for_agent_type(session: Any, agent_type: str) -> None:
             sync_session_runtime_state_for_agent(session)
 
 
+def ensure_mcp_tools_for_session(session: Any) -> None:
+    if session.agent_type == "chat" or session.chat_session is None:
+        return
+    agent = getattr(session.chat_session, "agent", None)
+    if not isinstance(agent, Agent):
+        return
+    if bool(agent.tool_context_metadata.get("mcp_tools_loaded")):
+        return
+    tools = build_enabled_mcp_tools(APP_DATA_ROOT)
+    for tool in tools:
+        agent.tool_registry.tools.setdefault(tool.name, tool)
+    agent.tool_context_metadata["mcp_tools_loaded"] = True
+
+
 def route_session_for_user_message(
     session: Any,
     user_message: str,
@@ -263,6 +280,7 @@ def route_session_for_user_message(
         rebuild_chat_session_for_agent_type(session, next_agent_type)
     else:
         session.agent_type = next_agent_type
+        ensure_mcp_tools_for_session(session)
 
     if session.agent_type == "plan":
         reset_phase_for_new_turn(session)

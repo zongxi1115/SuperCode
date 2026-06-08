@@ -1,5 +1,6 @@
-import { ArrowUp, ChevronDown, Code2, FileText, Languages, PenLine } from "lucide-react";
-import { useState } from "react";
+import { ArrowUp, ChevronDown, Code2, FileText, Github, Languages, PenLine } from "lucide-react";
+import { useState, useEffect } from "react";
+import { motion, AnimatePresence } from "motion/react";
 import type { ReactNode } from "react";
 
 const translations = {
@@ -8,8 +9,10 @@ const translations = {
     try: "Try SuperCode",
     product: "Product",
     explore: "Explore here",
-    title: "Meet your thinking partner",
-    subtitle: "Tackle any big, bold, bewildering challenge with SuperCode.",
+    titlePrefix: "Your AI",
+    titleSuffix: "companion",
+    rotatingWords: ["coding", "thinking", "planning"],
+    subtitle: "Write, debug, and ship better code with SuperCode by your side.",
     placeholder: "How can I help you today?",
     ask: "Ask SuperCode",
     write: "Write",
@@ -21,8 +24,10 @@ const translations = {
     try: "试用 SuperCode",
     product: "产品",
     explore: "探索更多",
-    title: "遇见你的思考伙伴",
-    subtitle: "用 SuperCode 解决任何重大、大胆、令人困惑的挑战。",
+    titlePrefix: "你的 AI",
+    titleSuffix: "伙伴",
+    rotatingWords: ["编程", "思考", "规划"],
+    subtitle: "从代码到上线，SuperCode 让开发更轻松。",
     placeholder: "今天我能帮您什么？",
     ask: "询问 SuperCode",
     write: "写作",
@@ -49,12 +54,20 @@ function PromptShortcut({
 export function LandingPage() {
   const [prompt, setPrompt] = useState("");
   const [lang, setLang] = useState<"en" | "zh">("en");
+  const [wordIndex, setWordIndex] = useState(0);
 
   const t = translations[lang];
 
   const toggleLang = () => {
     setLang((prev) => (prev === "en" ? "zh" : "en"));
   };
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setWordIndex((prev) => (prev + 1) % t.rotatingWords.length);
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [t.rotatingWords.length]);
 
   return (
     <main className="landing-stage">
@@ -71,6 +84,16 @@ export function LandingPage() {
           <span>SuperCode</span>
         </a>
         <div className="landing-actions">
+          <a
+            className="landing-github"
+            href="https://github.com/zongxi1115/supercode"
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="Star on GitHub"
+          >
+            <Github className="landing-github-icon" aria-hidden="true" />
+            <span>GitHub</span>
+          </a>
           <button
             className="landing-lang-toggle"
             type="button"
@@ -98,8 +121,25 @@ export function LandingPage() {
 
       <section className="landing-hero" aria-label="SuperCode introduction">
         <div className="landing-copy">
-          <h1>{t.title}</h1>
-          <p>{t.subtitle}</p>
+          <h1 lang={lang}>
+            <span>{t.titlePrefix} </span>
+            <span className="rotating-word-container">
+              <AnimatePresence mode="wait">
+                <motion.span
+                  key={wordIndex}
+                  className="rotating-word"
+                  initial={{ y: 20, opacity: 0 }}
+                  animate={{ y: 0, opacity: 1 }}
+                  exit={{ y: -20, opacity: 0 }}
+                  transition={{ duration: 0.4, ease: "easeInOut" }}
+                >
+                  {t.rotatingWords[wordIndex]}
+                </motion.span>
+              </AnimatePresence>
+            </span>
+            <span> {t.titleSuffix}</span>
+          </h1>
+          <p lang={lang}>{t.subtitle}</p>
 
           <div className="landing-prompt">
             <label className="sr-only" htmlFor="landing-prompt">

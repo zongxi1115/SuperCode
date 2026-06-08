@@ -27,6 +27,7 @@ interface FileTreeContextType {
   togglePath: (path: string) => void;
   selectedPath?: string;
   onSelect?: (path: string) => void;
+  onFolderToggle?: (path: string, expanded: boolean) => void;
 }
 
 const noop = () => {};
@@ -42,6 +43,7 @@ export type FileTreeProps = Omit<HTMLAttributes<HTMLDivElement>, "onSelect"> & {
   selectedPath?: string;
   onSelect?: (path: string) => void;
   onExpandedChange?: (expanded: Set<string>) => void;
+  onFolderToggle?: (path: string, expanded: boolean) => void;
 };
 
 export const FileTree = ({
@@ -50,6 +52,7 @@ export const FileTree = ({
   selectedPath,
   onSelect,
   onExpandedChange,
+  onFolderToggle,
   className,
   children,
   ...props
@@ -60,6 +63,7 @@ export const FileTree = ({
   const togglePath = useCallback(
     (path: string) => {
       const newExpanded = new Set(expandedPaths);
+      const nextExpanded = !newExpanded.has(path);
       if (newExpanded.has(path)) {
         newExpanded.delete(path);
       } else {
@@ -67,13 +71,14 @@ export const FileTree = ({
       }
       setInternalExpanded(newExpanded);
       onExpandedChange?.(newExpanded);
+      onFolderToggle?.(path, nextExpanded);
     },
-    [expandedPaths, onExpandedChange]
+    [expandedPaths, onExpandedChange, onFolderToggle]
   );
 
   const contextValue = useMemo(
-    () => ({ expandedPaths, onSelect, selectedPath, togglePath }),
-    [expandedPaths, onSelect, selectedPath, togglePath]
+    () => ({ expandedPaths, onFolderToggle, onSelect, selectedPath, togglePath }),
+    [expandedPaths, onFolderToggle, onSelect, selectedPath, togglePath]
   );
 
   return (
@@ -131,11 +136,13 @@ const FileTreeFolderContext = createContext<FileTreeFolderContextType>({
 export type FileTreeFolderProps = HTMLAttributes<HTMLDivElement> & {
   path: string;
   name: string;
+  selectable?: boolean;
 };
 
 export const FileTreeFolder = ({
   path,
   name,
+  selectable = true,
   className,
   children,
   ...props
@@ -150,19 +157,23 @@ export const FileTreeFolder = ({
   }, [togglePath, path]);
 
   const handleFolderClick = useCallback(() => {
-    onSelect?.(path);
+    if (selectable) {
+      onSelect?.(path);
+    }
     togglePath(path);
-  }, [onSelect, path, togglePath]);
+  }, [onSelect, path, selectable, togglePath]);
 
   const handleFolderKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLButtonElement>) => {
       if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
-        onSelect?.(path);
+        if (selectable) {
+          onSelect?.(path);
+        }
         togglePath(path);
       }
     },
-    [onSelect, path, togglePath]
+    [onSelect, path, selectable, togglePath]
   );
 
   const folderContextValue = useMemo(

@@ -130,6 +130,7 @@ def register_session_routes(
                     agent_type,
                     reasoning_effort,
                     set(),
+                    load_mcp_tools=False,
                 ),
                 timeout=30,
             )
@@ -146,7 +147,8 @@ def register_session_routes(
         interactive_command_session = deps.interactive_command_session_factory(workspace)
 
         workspace_path = deps.resolve_workspace_path(workspace)
-        if not (workspace_path / ".git").exists():
+        should_auto_init_git = workspace_path.parent != workspace_path
+        if request.initialize_git_repository and should_auto_init_git and not (workspace_path / ".git").exists():
             try:
                 await asyncio.to_thread(init_git_repo, workspace_path)
             except Exception:

@@ -41,7 +41,9 @@ from fastapi_app.skills import list_available_skill_summaries
 from fastapi_app.workspace_utils import (
     build_directory_tree_node,
     build_file_tree,
+    build_file_tree_root,
     read_text_file,
+    normalize_relative_path,
     resolve_workspace_path,
 )
 
@@ -149,12 +151,12 @@ class UISession:
             self.default_terminal_id = "main"
             self.terminal_runtimes["main"] = TerminalRuntime(workspace=workspace)
 
-    def snapshot(self) -> CreateSessionResponse:
+    def snapshot(self, *, include_file_tree: bool = True) -> CreateSessionResponse:
         default_runtime = self.get_terminal()
         if default_runtime is not None:
             self.terminal_output = default_runtime.snapshot(self.session_id).output
         refresh_session_runtime_state(self)
-        file_tree = self.get_file_tree()
+        file_tree = self.get_file_tree() if include_file_tree else []
         return CreateSessionResponse(
             sessionId=self.session_id,
             model=self.model,
@@ -208,7 +210,7 @@ class UISession:
             self._publish_file_tree_event(event)
 
     def _refresh_file_tree_locked(self, *, reason: str = "refresh") -> dict[str, Any]:
-        self.cached_file_tree = build_file_tree(resolve_workspace_path(self.workspace))
+        self.cached_file_tree = build_file_tree_root(resolve_workspace_path(self.workspace))
         self.file_tree_loaded = True
         self.file_tree_dirty = False
         self.file_tree_revision += 1
@@ -242,7 +244,7 @@ class UISession:
             if directory_key in seen:
                 continue
             seen.add(directory_key)
-            node = build_directory_tree_node(directory)
+            node = build_directory_tree_node(directory, max_depth=1)
             directories.append(node)
             self._replace_cached_directory_node(directory_key, node)
 
@@ -293,6 +295,40 @@ class UISession:
         with self.file_tree_lock:
             return self.cached_file_tree
 
+    def get_file_tree_directory(self, raw_path: str, force_refresh: bool = False) -> dict[str, Any]:
+        directory_path = Path(normalize_relative_path(raw_path, self.workspace))
+        if not directory_path.exists() or not directory_path.is_dir():
+            raise RuntimeError("目录不存在")
+
+        with self.file_tree_lock:
+            if force_refresh or not self.file_tree_loaded:
+                self._refresh_file_tree_locked(reason="force" if force_refresh else "lazy")
+            existing = self._find_cached_directory_node(str(directory_path))
+            if (
+                existing is not None
+                and bool(existing.get("loaded"))
+                and not force_refresh
+            ):
+                return existing
+
+            node = build_directory_tree_node(directory_path, max_depth=1)
+            replaced = self._replace_cached_directory_node(str(directory_path), node)
+            if not replaced:
+                self.cached_file_tree = build_file_tree_root(resolve_workspace_path(self.workspace))
+                self._replace_cached_directory_node(str(directory_path), node)
+            self.file_tree_loaded = True
+            self.file_tree_dirty = False
+            self.file_tree_revision += 1
+            event = {
+                "type": "tree.patch",
+                "revision": self.file_tree_revision,
+                "reason": "directory",
+                "directories": [node],
+            }
+            self.file_tree_events = [*self.file_tree_events, event][-100:]
+        self._publish_file_tree_event(event)
+        return node
+
     def file_tree_snapshot_event(self, *, force_refresh: bool = False) -> dict[str, Any]:
         tree = self.get_file_tree(force_refresh=force_refresh)
         with self.file_tree_lock:
@@ -301,6 +337,20 @@ class UISession:
                 "revision": self.file_tree_revision,
                 "tree": tree,
             }
+
+    def _find_cached_directory_node(self, directory_path: str) -> dict[str, Any] | None:
+        def find(nodes: list[dict[str, Any]]) -> dict[str, Any] | None:
+            for node in nodes:
+                if node.get("path") == directory_path and node.get("type") == "folder":
+                    return node
+                children = node.get("children")
+                if isinstance(children, list):
+                    match = find(children)
+                    if match is not None:
+                        return match
+            return None
+
+        return find(self.cached_file_tree)
 
     def subscribe_file_tree(self, queue: asyncio.Queue[dict[str, Any] | None]) -> str:
         subscriber_id = uuid.uuid4().hex

@@ -12,7 +12,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { getFileLanguage } from '@/lib/app-utils';
 import { apiFetch } from '@/lib/api-client';
 import type { FileTreeNode } from '@/lib/app-types';
-import { CircleAlert, FileCode, FolderTree, Maximize2, Minimize2, PanelsTopLeft, Sparkles, SquareTerminal } from 'lucide-react';
+import { CircleAlert, FileCode, FolderTree, Maximize2, Minimize2, PanelsTopLeft, RefreshCw, Sparkles, SquareTerminal } from 'lucide-react';
 import type { editor as MonacoEditor } from 'monaco-editor';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
@@ -26,7 +26,9 @@ type EditorPanelProps = {
   selectedFilePath: string;
   selectedFileContent: string;
   onLoadFile: (path: string) => void | Promise<void>;
+  onLoadDirectory?: (path: string) => void | Promise<void>;
   onSaveFile?: (path: string, content: string) => void | Promise<void>;
+  onRefreshFileTree?: () => void | Promise<void>;
   sessionId: string | null;
   isWebPreviewOpen: boolean;
   onToggleWebPreview: () => void;
@@ -59,7 +61,9 @@ export function EditorPanel({
   selectedFilePath,
   selectedFileContent,
   onLoadFile,
+  onLoadDirectory,
   onSaveFile,
+  onRefreshFileTree,
   sessionId,
   isWebPreviewOpen,
   onToggleWebPreview,
@@ -82,6 +86,7 @@ export function EditorPanel({
   const [editorLaunchError, setEditorLaunchError] = useState<string | null>(null);
   const [planEditContent, setPlanEditContent] = useState('');
   const [isEditorFullscreen, setIsEditorFullscreen] = useState(false);
+  const [isRefreshingFileTree, setIsRefreshingFileTree] = useState(false);
   const monacoRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null);
   const isEditingRef = useRef(false);
   const editContentRef = useRef('');
@@ -240,6 +245,19 @@ export function EditorPanel({
       );
     }
   }, [selectedFilePath, sessionId]);
+
+  const handleRefreshFileTree = useCallback(async () => {
+    if (isRefreshingFileTree || !onRefreshFileTree) return;
+
+    setIsRefreshingFileTree(true);
+    try {
+      await onRefreshFileTree();
+    } catch (error) {
+      console.error('刷新文件树失败:', error);
+    } finally {
+      setIsRefreshingFileTree(false);
+    }
+  }, [isRefreshingFileTree, onRefreshFileTree]);
 
   const hasSelectedFile = Boolean(selectedFilePath);
   const shouldShowFileTree = !isWebPreviewOpen && isFileTreeVisible;
@@ -406,20 +424,40 @@ export function EditorPanel({
                       >
                         <div className="flex items-center border-b px-3 py-2">
                           <span className="flex-1 text-xs font-semibold text-muted-foreground">项目结构</span>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-7 w-7"
-                            onClick={() => setIsFileTreeVisible(false)}
-                            title="收起文件树"
-                          >
-                            <FolderTree className="h-3.5 w-3.5" />
-                          </Button>
+                          <div className="flex items-center gap-1">
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-7 w-7"
+                              onClick={() => void handleRefreshFileTree()}
+                              disabled={isRefreshingFileTree}
+                              title="刷新文件树"
+                            >
+                              <RefreshCw className={`h-3.5 w-3.5 ${isRefreshingFileTree ? 'animate-spin' : ''}`} />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-7 w-7"
+                              onClick={() => setIsFileTreeVisible(false)}
+                              title="收起文件树"
+                            >
+                              <FolderTree className="h-3.5 w-3.5" />
+                            </Button>
+                          </div>
                         </div>
                         <div className="flex-1 overflow-auto">
                           <div className="p-2">
                             {fileTree.length > 0 ? (
-                              <FileTree selectedPath={selectedFilePath} onSelect={onLoadFile}>
+                              <FileTree
+                                selectedPath={selectedFilePath}
+                                onSelect={onLoadFile}
+                                onFolderToggle={(path, expanded) => {
+                                  if (expanded) {
+                                    void onLoadDirectory?.(path);
+                                  }
+                                }}
+                              >
                                 {renderFileTreeNodes(fileTree)}
                               </FileTree>
                             ) : (
@@ -516,20 +554,40 @@ export function EditorPanel({
                             >
                               <div className="flex items-center border-b px-3 py-2">
                                 <span className="flex-1 text-xs font-semibold text-muted-foreground">项目结构</span>
-                                <Button
-                                  variant="ghost"
-                                  size="icon"
-                                  className="h-7 w-7"
-                                  onClick={() => setIsFileTreeVisible(false)}
-                                  title="收起文件树"
-                                >
-                                  <FolderTree className="h-3.5 w-3.5" />
-                                </Button>
+                                <div className="flex items-center gap-1">
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-7 w-7"
+                                    onClick={() => void handleRefreshFileTree()}
+                                    disabled={isRefreshingFileTree}
+                                    title="刷新文件树"
+                                  >
+                                    <RefreshCw className={`h-3.5 w-3.5 ${isRefreshingFileTree ? 'animate-spin' : ''}`} />
+                                  </Button>
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-7 w-7"
+                                    onClick={() => setIsFileTreeVisible(false)}
+                                    title="收起文件树"
+                                  >
+                                    <FolderTree className="h-3.5 w-3.5" />
+                                  </Button>
+                                </div>
                               </div>
                               <div className="flex-1 overflow-auto">
                                 <div className="p-2">
                                   {fileTree.length > 0 ? (
-                                    <FileTree selectedPath={selectedFilePath} onSelect={onLoadFile}>
+                                    <FileTree
+                                      selectedPath={selectedFilePath}
+                                      onSelect={onLoadFile}
+                                      onFolderToggle={(path, expanded) => {
+                                        if (expanded) {
+                                          void onLoadDirectory?.(path);
+                                        }
+                                      }}
+                                    >
                                       {renderFileTreeNodes(fileTree)}
                                     </FileTree>
                                   ) : (

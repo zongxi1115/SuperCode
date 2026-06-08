@@ -2,6 +2,7 @@ import { Button } from '@/components/ui/button';
 import { FileTree } from '@/components/ai-elements/file-tree';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { Switch } from '@/components/ui/switch';
 import { renderDirectoryNodes } from '@/components/app/file-tree-renderers';
 import type { DirectoryNode, RecentProject } from '@/lib/app-types';
 import { Clock, Folder, X } from 'lucide-react';
@@ -11,12 +12,14 @@ type WorkspacePickerProps = {
   customWorkspace: string;
   sessionError: string | null;
   isSessionBooting: boolean;
+  initializeGitRepository: boolean;
   selectedWorkspace: string;
   directoryTree: DirectoryNode[];
   directoryExpanded: Set<string>;
   recentProjects: RecentProject[];
   onDirectoryExpandedChange: (nextExpanded: Set<string>) => void;
   onCustomWorkspaceChange: (value: string) => void;
+  onInitializeGitRepositoryChange: (value: boolean) => void;
   onSelectWorkspace: (path: string) => void;
   onCreateSession: () => void | Promise<void>;
   onOpenRecentProject: (workspace: string) => void;
@@ -48,12 +51,14 @@ export function WorkspacePicker({
   customWorkspace,
   sessionError,
   isSessionBooting,
+  initializeGitRepository,
   selectedWorkspace,
   directoryTree,
   directoryExpanded,
   recentProjects,
   onDirectoryExpandedChange,
   onCustomWorkspaceChange,
+  onInitializeGitRepositoryChange,
   onSelectWorkspace,
   onCreateSession,
   onOpenRecentProject,
@@ -82,6 +87,23 @@ export function WorkspacePicker({
             className="font-mono text-sm"
           />
           <p className="text-xs text-muted-foreground">可以在现有路径后追加新文件夹名称，将自动创建</p>
+        </div>
+
+        <div className="flex items-start justify-between gap-4 rounded-xl border bg-muted/20 px-4 py-3">
+          <div className="space-y-1">
+            <label className="text-sm font-medium" htmlFor="initialize-git-repository">
+              初始化 git 仓库
+            </label>
+            <p className="text-xs text-muted-foreground">
+              默认不初始化；只有确认这是项目根目录时再开启。
+            </p>
+          </div>
+          <Switch
+            id="initialize-git-repository"
+            checked={initializeGitRepository}
+            onCheckedChange={onInitializeGitRepositoryChange}
+            disabled={isSessionBooting}
+          />
         </div>
 
         {recentProjects.length > 0 && (

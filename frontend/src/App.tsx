@@ -483,6 +483,33 @@ function formatRetryDelay(ms: number) {
   return Number.isInteger(seconds) ? `${seconds} 秒` : `${seconds.toFixed(1)} 秒`;
 }
 
+function mergeDirectoryNode(current: FileTreeNode, replacement: FileTreeNode): FileTreeNode {
+  const currentChildren = current.children ?? [];
+  const replacementChildren = replacement.children ?? [];
+  const mergedChildren = replacementChildren.map((child) => {
+    const existing = currentChildren.find((candidate) => candidate.path === child.path);
+    if (
+      existing?.type === 'folder' &&
+      child.type === 'folder' &&
+      existing.loaded &&
+      !child.loaded
+    ) {
+      return {
+        ...child,
+        loaded: true,
+        children: existing.children,
+      };
+    }
+    return child;
+  });
+
+  return {
+    ...replacement,
+    loaded: replacement.loaded ?? true,
+    children: mergedChildren,
+  };
+}
+
 function applyDirectoryPatch(nodes: FileTreeNode[], directories: FileTreeNode[]) {
   let changed = false;
 
@@ -491,7 +518,7 @@ function applyDirectoryPatch(nodes: FileTreeNode[], directories: FileTreeNode[])
       const replacement = directories.find((directory) => directory.path === node.path);
       if (replacement) {
         changed = true;
-        return replacement;
+        return mergeDirectoryNode(node, replacement);
       }
       if (node.children?.length) {
         const nextChildren = replaceInNodes(node.children);
@@ -504,6 +531,21 @@ function applyDirectoryPatch(nodes: FileTreeNode[], directories: FileTreeNode[])
 
   const nextNodes = replaceInNodes(nodes);
   return changed ? nextNodes : null;
+}
+
+function findFileTreeNode(nodes: FileTreeNode[], path: string): FileTreeNode | null {
+  for (const node of nodes) {
+    if (node.path === path) {
+      return node;
+    }
+    if (node.children?.length) {
+      const child = findFileTreeNode(node.children, path);
+      if (child) {
+        return child;
+      }
+    }
+  }
+  return null;
 }
 
 function getErrorMessage(error: unknown, fallback: string) {
@@ -610,6 +652,7 @@ export default function App() {
   const [directoryExpanded, setDirectoryExpanded] = useState<Set<string>>(new Set());
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [isSessionBooting, setIsSessionBooting] = useState(false);
+  const [initializeGitRepository, setInitializeGitRepository] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [isRightPanelCollapsed, setIsRightPanelCollapsed] = useState(!initialUrlState.isEditorOpen);
@@ -686,6 +729,7 @@ export default function App() {
   const activeRequestRef = useRef<AbortController | null>(null);
   const activeStreamSessionIdRef = useRef<string | null>(null);
   const currentSessionIdRef = useRef<string | null>(null);
+  const fileTreeLoadingPathsRef = useRef<Set<string>>(new Set());
   const isApplyingUrlStateRef = useRef(false);
   const shouldDeferInitialUrlSyncRef = useRef(
     Boolean(initialUrlState.sessionId || initialUrlState.filePath || initialUrlState.isContextOpen),
@@ -857,6 +901,49 @@ export default function App() {
     applyFileTreeSnapshot(Array.isArray(data.fileTree) ? data.fileTree : [], data.revision);
   }, [applyFileTreeSnapshot, sessionId]);
 
+  const applyLoadedFileTreeDirectory = useCallback((directory: FileTreeNode, revision?: number | null) => {
+    const currentTree = fileTreeRef.current;
+    const nextTree = applyDirectoryPatch(currentTree, [directory]) ?? [directory];
+    fileTreeRef.current = nextTree;
+    setFileTree(nextTree);
+    if (typeof revision === 'number' && Number.isFinite(revision)) {
+      fileTreeRevisionRef.current = Math.max(fileTreeRevisionRef.current, revision);
+    }
+  }, []);
+
+  const loadFileTreeDirectory = useCallback(async (path: string, force = false) => {
+    const currentSessionId = currentSessionIdRef.current;
+    if (!currentSessionId || !path) return;
+    const existing = findFileTreeNode(fileTreeRef.current, path);
+    if (existing?.type === 'folder' && existing.loaded && !force) {
+      return;
+    }
+    const loadingPaths = fileTreeLoadingPathsRef.current;
+    if (loadingPaths.has(path)) {
+      return;
+    }
+
+    loadingPaths.add(path);
+    try {
+      const query = new URLSearchParams({ path });
+      if (force) {
+        query.set('force', 'true');
+      }
+      const res = await apiFetch(`/api/sessions/${currentSessionId}/file-tree?${query.toString()}`);
+      if (!res.ok) {
+        throw new Error('加载目录失败');
+      }
+      const data = await res.json();
+      if (data.directory && typeof data.directory === 'object') {
+        applyLoadedFileTreeDirectory(data.directory as FileTreeNode, data.revision);
+      }
+    } catch (error) {
+      console.error(error);
+    } finally {
+      loadingPaths.delete(path);
+    }
+  }, [applyLoadedFileTreeDirectory]);
+
   const appendCodeChanges = useCallback((incoming: CodeChangeRecord[]) => {
     setCodeChanges((prev) => {
       const merged = mergeCodeChanges(prev, incoming);
@@ -1022,7 +1109,6 @@ export default function App() {
         } else if (Array.isArray(parsed.directories)) {
           const nextTree = applyDirectoryPatch(fileTreeRef.current, parsed.directories as FileTreeNode[]);
           if (nextTree === null) {
-            await refreshFileTreeSnapshot(sessionId, true);
             return;
           }
           fileTreeRef.current = nextTree;
@@ -1347,7 +1433,7 @@ export default function App() {
 
   const createSessionWithWorkspace = useCallback(async (
     workspace: string,
-    options?: { agentMode?: AgentMode; executionMode?: SessionExecutionMode },
+    options?: { agentMode?: AgentMode; executionMode?: SessionExecutionMode; initializeGitRepository?: boolean },
   ) => {
     setIsSessionBooting(true);
     setSessionError(null);
@@ -1361,6 +1447,7 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           workspace,
+          initialize_git_repository: options?.initializeGitRepository ?? false,
           model: selectedModelId,
           reasoning_effort: selectedReasoningEffort,
           agent_type: resolveAgentModeForRequest(options?.agentMode ?? selectedAgentMode),
@@ -1508,13 +1595,13 @@ export default function App() {
       setSessionError('请选择或输入一个工作区路径');
       return;
     }
-    await createSessionWithWorkspace(workspace);
+    await createSessionWithWorkspace(workspace, { initializeGitRepository });
   };
 
   const handleOpenRecentProject = async (workspace: string) => {
     setSelectedWorkspace(workspace);
     setCustomWorkspace('');
-    await createSessionWithWorkspace(workspace);
+    await createSessionWithWorkspace(workspace, { initializeGitRepository });
   };
 
   const handleRemoveRecentProject = (workspace: string) => {
@@ -3585,12 +3672,14 @@ export default function App() {
           customWorkspace={customWorkspace}
           sessionError={sessionError}
           isSessionBooting={isSessionBooting}
+          initializeGitRepository={initializeGitRepository}
           selectedWorkspace={selectedWorkspace}
           directoryTree={directoryTree}
           directoryExpanded={directoryExpanded}
           recentProjects={recentProjects}
           onDirectoryExpandedChange={handleDirectoryExpandedChange}
           onCustomWorkspaceChange={setCustomWorkspace}
+          onInitializeGitRepositoryChange={setInitializeGitRepository}
           onSelectWorkspace={(path) => {
             setSelectedWorkspace(path);
             setCustomWorkspace(path);
@@ -3767,7 +3856,9 @@ export default function App() {
           selectedFilePath={selectedFilePath}
           selectedFileContent={selectedFileContent}
           onLoadFile={loadFile}
+          onLoadDirectory={loadFileTreeDirectory}
           onSaveFile={saveFile}
+          onRefreshFileTree={() => refreshFileTreeSnapshot(sessionId, true)}
           sessionId={sessionId}
           isWebPreviewOpen={isWebPreviewOpen}
           onToggleWebPreview={() => setIsWebPreviewOpen((prev) => !prev)}
