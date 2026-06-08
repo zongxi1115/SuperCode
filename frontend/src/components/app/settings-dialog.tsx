@@ -1,4 +1,4 @@
-import { type DragEvent, useCallback, useEffect, useState } from 'react';
+import { type DragEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -16,7 +16,13 @@ import { Separator } from '@/components/ui/separator';
 import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
-import type { AppSettings, ModelOption, UIModelProvider } from '@/lib/app-types';
+import type {
+  AppSettings,
+  MCPServerConfig,
+  MCPServerTestResult,
+  ModelOption,
+  UIModelProvider,
+} from '@/lib/app-types';
 import {
   AlertTriangle,
   Brain,
@@ -41,6 +47,12 @@ import {
 
 type EditableProvider = UIModelProvider & {
   modelsText: string;
+};
+
+type EditableMCPServer = MCPServerConfig & {
+  argsText: string;
+  envText: string;
+  headersText: string;
 };
 
 const BODY_FONT_OPTIONS = [
@@ -73,10 +85,16 @@ type SettingsDialogProps = {
   providers: UIModelProvider[];
   envConfigs: ModelOption[];
   configPath: string | null;
+  mcpServers: MCPServerConfig[];
+  mcpConfigPath: string | null;
   settings: AppSettings;
   currentWorkspace: string;
   onSaveProviders: (providers: UIModelProvider[]) => Promise<void>;
-  onDiscoverModels: (provider: UIModelProvider) => Promise<string[]>;
+  onDiscoverModels: (provider: UIModelProvider) => Promise<{
+    models: UIModelProvider['models'];
+  }>;
+  onSaveMcpServers: (servers: MCPServerConfig[]) => Promise<void>;
+  onTestMcpServer: (server: MCPServerConfig) => Promise<MCPServerTestResult>;
   onTestEmbedding: (embedding: AppSettings['embedding']) => Promise<string>;
   onSaveSettings: (settings: AppSettings) => Promise<void>;
 };
@@ -92,6 +110,52 @@ function normalizeModels(text: string) {
   );
 }
 
+function modelRecordIds(models: UIModelProvider['models']) {
+  return models.map((model) => model.id).filter(Boolean);
+}
+
+function buildModelRecords(
+  modelIds: string[],
+  existingModels: UIModelProvider['models'] = [],
+): UIModelProvider['models'] {
+  const existingById = new Map(existingModels.map((model) => [model.id, model]));
+  return modelIds.map((id) => ({
+    id,
+    contextWindow: existingById.get(id)?.contextWindow ?? null,
+  }));
+}
+
+function normalizeLines(text: string) {
+  return text
+    .replace(/\\n/g, '\n')
+    .split(/\n+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function stringifyMap(value: Record<string, string> | undefined) {
+  return Object.entries(value ?? {})
+    .map(([key, item]) => `${key}=${item}`)
+    .join('\n');
+}
+
+function parseMap(text: string) {
+  const entries: Record<string, string> = {};
+  for (const line of text.split(/\n+/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const separatorIndex = trimmed.indexOf('=');
+    if (separatorIndex < 0) {
+      entries[trimmed] = '';
+      continue;
+    }
+    const key = trimmed.slice(0, separatorIndex).trim();
+    if (!key) continue;
+    entries[key] = trimmed.slice(separatorIndex + 1).trim();
+  }
+  return entries;
+}
+
 function toEditableProvider(provider?: UIModelProvider): EditableProvider {
   return {
     id: provider?.id ?? null,
@@ -101,7 +165,46 @@ function toEditableProvider(provider?: UIModelProvider): EditableProvider {
     models: provider?.models ?? [],
     provider: provider?.provider ?? null,
     apiMode: provider?.apiMode ?? 'chat_completions',
-    modelsText: (provider?.models ?? []).join('\n'),
+    modelsText: modelRecordIds(provider?.models ?? []).join('\n'),
+  };
+}
+
+function createMcpServerId() {
+  return `mcp-${crypto.randomUUID().slice(0, 8)}`;
+}
+
+function toEditableMcpServer(server?: MCPServerConfig): EditableMCPServer {
+  const id = server?.id ?? createMcpServerId();
+  return {
+    id,
+    name: server?.name ?? '',
+    enabled: server?.enabled ?? true,
+    transport: server?.transport ?? 'stdio',
+    command: server?.command ?? '',
+    args: server?.args ?? [],
+    env: server?.env ?? {},
+    url: server?.url ?? '',
+    bearerToken: server?.bearerToken ?? '',
+    headers: server?.headers ?? {},
+    status: server?.status,
+    argsText: (server?.args ?? []).join('\n'),
+    envText: stringifyMap(server?.env),
+    headersText: stringifyMap(server?.headers),
+  };
+}
+
+function serializeMcpServer(server: EditableMCPServer): MCPServerConfig {
+  return {
+    id: server.id ?? createMcpServerId(),
+    name: server.name.trim() || '未命名 MCP',
+    enabled: server.enabled,
+    transport: server.transport,
+    command: server.command.trim(),
+    args: normalizeLines(server.argsText),
+    env: parseMap(server.envText),
+    url: server.url.trim(),
+    bearerToken: server.bearerToken.trim(),
+    headers: parseMap(server.headersText),
   };
 }
 
@@ -138,27 +241,41 @@ export function SettingsDialog({
   providers,
   envConfigs,
   configPath,
+  mcpServers,
+  mcpConfigPath,
   settings,
   currentWorkspace,
   onSaveProviders,
   onDiscoverModels,
+  onSaveMcpServers,
+  onTestMcpServer,
   onTestEmbedding,
   onSaveSettings,
 }: SettingsDialogProps) {
   const [draftProviders, setDraftProviders] = useState<EditableProvider[]>(
     providers.length > 0 ? providers.map((p) => toEditableProvider(p)) : [toEditableProvider()],
   );
+  const [draftMcpServers, setDraftMcpServers] = useState<EditableMCPServer[]>(
+    mcpServers.map((server) => toEditableMcpServer(server)),
+  );
   const [draftSettings, setDraftSettings] = useState<AppSettings>(() => withSettingsDefaults(settings));
   const [activeTab, setActiveTab] = useState('providers');
   const [isSaving, setIsSaving] = useState(false);
   const [refreshingId, setRefreshingId] = useState<string | null>(null);
+  const [mcpTestingId, setMcpTestingId] = useState<string | null>(null);
   const [isTestingEmbedding, setIsTestingEmbedding] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [visibleKeys, setVisibleKeys] = useState<Set<string>>(new Set());
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  const [deleteMcpConfirmId, setDeleteMcpConfirmId] = useState<string | null>(null);
   const [selectedProviderIndex, setSelectedProviderIndex] = useState(0);
+  const [selectedMcpIndex, setSelectedMcpIndex] = useState(0);
   const [draggingProviderIndex, setDraggingProviderIndex] = useState<number | null>(null);
+  const [mcpTestResults, setMcpTestResults] = useState<Record<string, MCPServerTestResult>>({});
+  const didInitializeOpenDraftRef = useRef(false);
+  const isMountedRef = useRef(false);
+  const isOpenRef = useRef(open);
   const activeTextSize =
     BODY_TEXT_SIZE_OPTIONS.find(
       (option) =>
@@ -174,16 +291,44 @@ export function SettingsDialog({
       : [];
 
   useEffect(() => {
-    if (!open) return;
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    isOpenRef.current = open;
+  }, [open]);
+
+  const canUpdateAsyncState = () => isMountedRef.current && isOpenRef.current;
+
+  useEffect(() => {
+    if (!open) {
+      didInitializeOpenDraftRef.current = false;
+      return;
+    }
+    if (didInitializeOpenDraftRef.current) {
+      return;
+    }
+    didInitializeOpenDraftRef.current = true;
     setDraftProviders(
       providers.length > 0 ? providers.map((p) => toEditableProvider(p)) : [toEditableProvider()],
     );
+    setDraftMcpServers(mcpServers.map((server) => toEditableMcpServer(server)));
     setDraftSettings(withSettingsDefaults(settings));
     setSelectedProviderIndex(0);
+    setSelectedMcpIndex(0);
     setDeleteConfirmId(null);
+    setDeleteMcpConfirmId(null);
+    setMcpTestResults({});
+    setIsSaving(false);
+    setRefreshingId(null);
+    setMcpTestingId(null);
+    setIsTestingEmbedding(false);
     setFeedback(null);
     setError(null);
-  }, [open, providers, settings]);
+  }, [open, providers, mcpServers, settings]);
 
   const toggleKeyVisibility = (key: string) => {
     setVisibleKeys((prev) => {
@@ -200,7 +345,26 @@ export function SettingsDialog({
         if (i !== index) return p;
         const next = { ...p, ...patch };
         if (patch.modelsText !== undefined) {
-          next.models = normalizeModels(patch.modelsText);
+          next.models = buildModelRecords(normalizeModels(patch.modelsText), next.models);
+        }
+        return next;
+      }),
+    );
+  };
+
+  const updateMcpServer = (index: number, patch: Partial<EditableMCPServer>) => {
+    setDraftMcpServers((prev) =>
+      prev.map((server, i) => {
+        if (i !== index) return server;
+        const next = { ...server, ...patch };
+        if (patch.argsText !== undefined) {
+          next.args = normalizeLines(patch.argsText);
+        }
+        if (patch.envText !== undefined) {
+          next.env = parseMap(patch.envText);
+        }
+        if (patch.headersText !== undefined) {
+          next.headers = parseMap(patch.headersText);
         }
         return next;
       }),
@@ -216,6 +380,15 @@ export function SettingsDialog({
     setActiveTab('providers');
   }, []);
 
+  const handleAddMcpServer = useCallback(() => {
+    setDraftMcpServers((prev) => {
+      const next = [...prev, toEditableMcpServer()];
+      setSelectedMcpIndex(next.length - 1);
+      return next;
+    });
+    setActiveTab('mcp');
+  }, []);
+
   const handleDeleteProvider = (index: number) => {
     setDraftProviders((prev) => prev.filter((_, i) => i !== index));
     setSelectedProviderIndex((prev) => {
@@ -226,6 +399,18 @@ export function SettingsDialog({
       return prev;
     });
     setDeleteConfirmId(null);
+  };
+
+  const handleDeleteMcpServer = (index: number) => {
+    setDraftMcpServers((prev) => prev.filter((_, i) => i !== index));
+    setSelectedMcpIndex((prev) => {
+      const nextCount = draftMcpServers.length - 1;
+      if (nextCount === 0) return 0;
+      if (prev >= nextCount) return nextCount - 1;
+      if (prev > index) return prev - 1;
+      return prev;
+    });
+    setDeleteMcpConfirmId(null);
   };
 
   const handleProviderDragStart = (event: DragEvent<HTMLButtonElement>, index: number) => {
@@ -267,7 +452,7 @@ export function SettingsDialog({
     setFeedback(null);
     setRefreshingId(provider.id ?? `draft-${index}`);
     try {
-      const models = await onDiscoverModels({
+      const catalog = await onDiscoverModels({
         id: provider.id ?? null,
         name: provider.name,
         baseUrl: provider.baseUrl,
@@ -276,12 +461,20 @@ export function SettingsDialog({
         provider: provider.provider ?? null,
         apiMode: provider.apiMode ?? 'chat_completions',
       });
-      updateProvider(index, { models, modelsText: models.join('\n') });
-      setFeedback(`已拉取 ${models.length} 个模型`);
+      if (!canUpdateAsyncState()) return;
+      updateProvider(index, {
+        models: catalog.models,
+        modelsText: modelRecordIds(catalog.models).join('\n'),
+      });
+      const contextCount = catalog.models.filter((model) => model.contextWindow).length;
+      setFeedback(`已拉取 ${catalog.models.length} 个模型，缓存 ${contextCount} 个上下文窗口`);
     } catch (e) {
+      if (!canUpdateAsyncState()) return;
       setError(e instanceof Error ? e.message : '拉取模型失败');
     } finally {
-      setRefreshingId(null);
+      if (canUpdateAsyncState()) {
+        setRefreshingId(null);
+      }
     }
   };
 
@@ -296,11 +489,51 @@ export function SettingsDialog({
         apiKey: draftSettings.embedding?.apiKey ?? '',
         model: draftSettings.embedding?.model ?? '',
       });
+      if (!canUpdateAsyncState()) return;
       setFeedback(message);
     } catch (e) {
+      if (!canUpdateAsyncState()) return;
       setError(e instanceof Error ? e.message : 'Embedding 测试失败');
     } finally {
-      setIsTestingEmbedding(false);
+      if (canUpdateAsyncState()) {
+        setIsTestingEmbedding(false);
+      }
+    }
+  };
+
+  const handleTestMcpServer = async (server: EditableMCPServer, index: number) => {
+    const key = server.id ?? `draft-mcp-${index}`;
+    setError(null);
+    setFeedback(null);
+    setMcpTestingId(key);
+    try {
+      const serialized = serializeMcpServer(server);
+      const result = await onTestMcpServer(serialized);
+      if (!canUpdateAsyncState()) return;
+      setMcpTestResults((prev) => ({ ...prev, [key]: result }));
+      updateMcpServer(index, {
+        status: {
+          state: 'ok',
+          message: `已发现 ${result.toolCount} 个工具`,
+          toolCount: result.toolCount,
+        },
+      });
+      setFeedback(`MCP 连接成功，发现 ${result.toolCount} 个工具`);
+    } catch (e) {
+      if (!canUpdateAsyncState()) return;
+      const message = e instanceof Error ? e.message : 'MCP 连接测试失败';
+      updateMcpServer(index, {
+        status: {
+          state: 'error',
+          message,
+          toolCount: 0,
+        },
+      });
+      setError(message);
+    } finally {
+      if (canUpdateAsyncState()) {
+        setMcpTestingId(null);
+      }
     }
   };
 
@@ -412,22 +645,30 @@ export function SettingsDialog({
     setIsSaving(true);
     try {
       await onSaveProviders(
-        draftProviders.map((p) => ({
-          id: p.id ?? null,
-          name: p.name.trim() || '未命名供应商',
-          baseUrl: p.baseUrl.trim(),
-          apiKey: p.apiKey.trim(),
-          models: normalizeModels(p.modelsText),
-          provider: p.provider ?? null,
-          apiMode: p.apiMode ?? 'chat_completions',
-        })),
+        draftProviders.map((p) => {
+          const models = buildModelRecords(normalizeModels(p.modelsText), p.models);
+          return {
+            id: p.id ?? null,
+            name: p.name.trim() || '未命名供应商',
+            baseUrl: p.baseUrl.trim(),
+            apiKey: p.apiKey.trim(),
+            models,
+            provider: p.provider ?? null,
+            apiMode: p.apiMode ?? 'chat_completions',
+          };
+        }),
       );
+      await onSaveMcpServers(draftMcpServers.map((server) => serializeMcpServer(server)));
       await onSaveSettings(draftSettings);
+      if (!canUpdateAsyncState()) return;
       setFeedback('设置已保存');
     } catch (e) {
+      if (!canUpdateAsyncState()) return;
       setError(e instanceof Error ? e.message : '保存设置失败');
     } finally {
-      setIsSaving(false);
+      if (canUpdateAsyncState()) {
+        setIsSaving(false);
+      }
     }
   };
 
@@ -467,6 +708,10 @@ export function SettingsDialog({
               <TabsTrigger value="env" className="flex-1 gap-1.5">
                 <Lock className="size-3.5" />
                 .env 来源
+              </TabsTrigger>
+              <TabsTrigger value="mcp" className="flex-1 gap-1.5">
+                <Server className="size-3.5" />
+                MCP
               </TabsTrigger>
               <TabsTrigger value="memory" className="flex-1 gap-1.5">
                 <MemoryStick className="size-3.5" />
@@ -711,6 +956,322 @@ export function SettingsDialog({
                   ))}
                 </div>
               )}
+            </div>
+          </TabsContent>
+
+          <TabsContent value="mcp" className="mt-0 min-h-0 flex-1 overflow-hidden px-6 py-4">
+            <div className="flex h-full gap-0 -mx-6 px-6">
+              <div className="flex w-40 shrink-0 flex-col border-r pr-0">
+                <div className="flex items-center justify-between pb-2">
+                  <span className="text-xs font-medium text-muted-foreground">MCP Servers</span>
+                  <Button
+                    variant="ghost"
+                    size="icon-xs"
+                    className="size-5"
+                    onClick={handleAddMcpServer}
+                    title="添加 MCP server"
+                  >
+                    <Plus className="size-3" />
+                  </Button>
+                </div>
+                <div className="flex-1 overflow-y-auto">
+                  {draftMcpServers.length === 0 ? (
+                    <div className="px-2 py-6 text-center text-xs text-muted-foreground">
+                      暂无 MCP server
+                    </div>
+                  ) : (
+                    draftMcpServers.map((server, index) => {
+                      const key = server.id ?? `draft-mcp-${index}`;
+                      const isSelected = selectedMcpIndex === index;
+                      const statusState = server.status?.state ?? 'unknown';
+                      const dotClass =
+                        statusState === 'ok'
+                          ? 'bg-emerald-500'
+                          : statusState === 'error'
+                            ? 'bg-destructive'
+                            : 'bg-muted-foreground/40';
+                      return (
+                        <button
+                          key={key}
+                          type="button"
+                          onClick={() => setSelectedMcpIndex(index)}
+                          className={`flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-xs transition-colors ${
+                            isSelected
+                              ? 'bg-primary/10 font-medium text-primary'
+                              : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+                          }`}
+                        >
+                          <span className={`size-1.5 shrink-0 rounded-full ${dotClass}`} />
+                          <Server className="size-3 shrink-0" />
+                          <span className="truncate">{server.name || `MCP ${index + 1}`}</span>
+                          {!server.enabled ? (
+                            <Badge variant="outline" className="ml-auto shrink-0 px-1 py-0 text-[10px]">
+                              off
+                            </Badge>
+                          ) : server.status?.toolCount != null ? (
+                            <Badge variant="secondary" className="ml-auto shrink-0 px-1 py-0 text-[10px]">
+                              {server.status.toolCount}
+                            </Badge>
+                          ) : null}
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+
+              <div className="flex min-w-0 flex-1 flex-col overflow-y-auto pl-4">
+                {draftMcpServers.length === 0 ? (
+                  <div className="flex flex-1 items-center justify-center rounded-lg border border-dashed bg-muted/20 text-sm text-muted-foreground">
+                    点击左侧 + 添加一个 MCP server
+                  </div>
+                ) : (
+                  (() => {
+                    const index = Math.min(selectedMcpIndex, draftMcpServers.length - 1);
+                    const server = draftMcpServers[index];
+                    const key = server.id ?? `draft-mcp-${index}`;
+                    const bearerKey = `${key}-bearer`;
+                    const isBearerVisible = visibleKeys.has(bearerKey);
+                    const isTesting = mcpTestingId === key;
+                    const isConfirmingDelete = deleteMcpConfirmId === key;
+                    const testResult = mcpTestResults[key];
+                    const statusState = server.status?.state ?? 'unknown';
+                    const statusText =
+                      server.status?.message ||
+                      (statusState === 'ok'
+                        ? '连接可用'
+                        : statusState === 'error'
+                          ? '连接失败'
+                          : '尚未测试');
+
+                    return (
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <Switch
+                                checked={server.enabled}
+                                onCheckedChange={(enabled) => updateMcpServer(index, { enabled })}
+                              />
+                              <span className="text-sm font-medium">
+                                {server.enabled ? '已启用' : '已停用'}
+                              </span>
+                              <Badge
+                                variant={statusState === 'ok' ? 'secondary' : statusState === 'error' ? 'destructive' : 'outline'}
+                                className="text-[10px]"
+                              >
+                                {statusText}
+                              </Badge>
+                            </div>
+                          </div>
+                          <div className="flex shrink-0 items-center gap-1.5">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="h-7 gap-1.5 text-xs"
+                              onClick={() => void handleTestMcpServer(server, index)}
+                              disabled={isTesting}
+                            >
+                              <RefreshCcw className={`size-3 ${isTesting ? 'animate-spin' : ''}`} />
+                              {isTesting ? '测试中...' : '测试连接'}
+                            </Button>
+                            {isConfirmingDelete ? (
+                              <div className="flex items-center gap-1">
+                                <Button
+                                  variant="destructive"
+                                  size="sm"
+                                  className="h-7 px-2 text-xs"
+                                  onClick={() => handleDeleteMcpServer(index)}
+                                >
+                                  确认
+                                </Button>
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  className="h-7 px-2 text-xs"
+                                  onClick={() => setDeleteMcpConfirmId(null)}
+                                >
+                                  取消
+                                </Button>
+                              </div>
+                            ) : (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-7 gap-1 text-xs text-muted-foreground"
+                                onClick={() => setDeleteMcpConfirmId(key)}
+                              >
+                                <Trash2 className="size-3" />
+                                删除
+                              </Button>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-3">
+                          <div className="space-y-1">
+                            <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+                              <Server className="size-2.5" />
+                              名称
+                            </label>
+                            <Input
+                              value={server.name}
+                              onChange={(e) => updateMcpServer(index, { name: e.target.value })}
+                              placeholder="filesystem"
+                              className="h-7 text-xs"
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+                              <Globe className="size-2.5" />
+                              传输
+                            </label>
+                            <Select
+                              value={server.transport}
+                              onValueChange={(transport) =>
+                                updateMcpServer(index, {
+                                  transport: transport as 'stdio' | 'streamable_http',
+                                })
+                              }
+                            >
+                              <SelectTrigger className="h-7 text-xs">
+                                <SelectValue placeholder="选择传输方式" />
+                              </SelectTrigger>
+                              <SelectContent align="start">
+                                <SelectItem value="stdio">stdio 本地进程</SelectItem>
+                                <SelectItem value="streamable_http">Streamable HTTP</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        </div>
+
+                        {server.transport === 'stdio' ? (
+                          <>
+                            <div className="space-y-1">
+                              <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+                                <CodeXml className="size-2.5" />
+                                Command
+                              </label>
+                              <Input
+                                value={server.command}
+                                onChange={(e) => updateMcpServer(index, { command: e.target.value })}
+                                placeholder="npx"
+                                className="h-7 font-mono text-xs"
+                              />
+                            </div>
+                            <div className="grid grid-cols-2 gap-3">
+                              <div className="space-y-1">
+                                <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+                                  <List className="size-2.5" />
+                                  Args
+                                </label>
+                                <Textarea
+                                  value={server.argsText}
+                                  onChange={(e) => updateMcpServer(index, { argsText: e.target.value })}
+                                  className="min-h-[80px] font-mono text-[11px] leading-snug"
+                                  placeholder={'每行一个参数\n-y\n@modelcontextprotocol/server-filesystem\nD:\\\\workspace'}
+                                />
+                              </div>
+                              <div className="space-y-1">
+                                <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+                                  <Key className="size-2.5" />
+                                  Env
+                                </label>
+                                <Textarea
+                                  value={server.envText}
+                                  onChange={(e) => updateMcpServer(index, { envText: e.target.value })}
+                                  className="min-h-[80px] font-mono text-[11px] leading-snug"
+                                  placeholder={'KEY=value\nTOKEN=...'}
+                                />
+                              </div>
+                            </div>
+                          </>
+                        ) : (
+                          <>
+                            <div className="space-y-1">
+                              <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+                                <Globe className="size-2.5" />
+                                URL
+                              </label>
+                              <Input
+                                value={server.url}
+                                onChange={(e) => updateMcpServer(index, { url: e.target.value })}
+                                placeholder="https://example.com/mcp"
+                                className="h-7 text-xs"
+                              />
+                            </div>
+                            <div className="space-y-1">
+                              <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+                                <Key className="size-2.5" />
+                                Bearer Token
+                              </label>
+                              <div className="relative">
+                                <Input
+                                  type={isBearerVisible ? 'text' : 'password'}
+                                  value={server.bearerToken}
+                                  onChange={(e) => updateMcpServer(index, { bearerToken: e.target.value })}
+                                  placeholder="可选"
+                                  className="h-7 pr-8 text-xs"
+                                />
+                                <Button
+                                  variant="ghost"
+                                  size="icon-xs"
+                                  className="absolute top-1/2 right-1 size-5 -translate-y-1/2"
+                                  onClick={() => toggleKeyVisibility(bearerKey)}
+                                >
+                                  {isBearerVisible ? <EyeOff className="size-3" /> : <Eye className="size-3" />}
+                                </Button>
+                              </div>
+                            </div>
+                            <div className="space-y-1">
+                              <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+                                <List className="size-2.5" />
+                                Headers
+                              </label>
+                              <Textarea
+                                value={server.headersText}
+                                onChange={(e) => updateMcpServer(index, { headersText: e.target.value })}
+                                className="min-h-[72px] font-mono text-[11px] leading-snug"
+                                placeholder={'X-API-Key=value\nX-Org=team'}
+                              />
+                            </div>
+                          </>
+                        )}
+
+                        {(testResult?.tools?.length ?? 0) > 0 ? (
+                          <div className="rounded-lg border bg-card p-3">
+                            <div className="mb-2 flex items-center justify-between">
+                              <span className="text-xs font-medium">发现的工具</span>
+                              <Badge variant="secondary" className="text-[10px]">
+                                {testResult.toolCount}
+                              </Badge>
+                            </div>
+                            <div className="space-y-1.5">
+                              {testResult.tools.slice(0, 8).map((tool) => (
+                                <div key={tool.name} className="flex items-start gap-2 text-xs">
+                                  <code className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px]">
+                                    {tool.name}
+                                  </code>
+                                  <span className="line-clamp-2 text-muted-foreground">
+                                    {tool.description || '无描述'}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
+
+                        {mcpConfigPath ? (
+                          <div className="flex items-center gap-2 rounded-lg border bg-card p-3">
+                            <Server className="size-3.5 text-muted-foreground" />
+                            <span className="truncate text-xs text-muted-foreground">{mcpConfigPath}</span>
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  })()
+                )}
+              </div>
             </div>
           </TabsContent>
 

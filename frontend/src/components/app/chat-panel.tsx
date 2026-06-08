@@ -1380,7 +1380,41 @@ function dedupeAdjacentThoughtText(value: string) {
     previousParagraphKey = paragraphKey;
   }
 
-  return dedupedParagraphs.join("\n\n").trim();
+  return dedupeAdjacentMarkdownListItems(dedupedParagraphs.join("\n\n")).trim();
+}
+
+function dedupeAdjacentMarkdownListItems(value: string) {
+  const lines = value.replace(/\r\n/g, "\n").split("\n");
+  const blocks: string[][] = [];
+  let currentBlock: string[] = [];
+
+  for (const line of lines) {
+    const startsListItem = /^\s*[-*]\s+/.test(line);
+    if (startsListItem && currentBlock.length > 0) {
+      blocks.push(currentBlock);
+      currentBlock = [line];
+    } else {
+      currentBlock.push(line);
+    }
+  }
+
+  if (currentBlock.length > 0) {
+    blocks.push(currentBlock);
+  }
+
+  const dedupedBlocks: string[][] = [];
+  let previousBlockKey = "";
+  for (const block of blocks) {
+    const blockText = block.join("\n").trimEnd();
+    const blockKey = getThoughtTextKey(blockText);
+    if (blockKey && blockKey === previousBlockKey) {
+      continue;
+    }
+    dedupedBlocks.push(block);
+    previousBlockKey = blockKey;
+  }
+
+  return dedupedBlocks.map((block) => block.join("\n")).join("\n");
 }
 
 function parseGitStatus(raw: string): {
@@ -3484,17 +3518,91 @@ const MessageList = memo(function MessageList({
   );
   const [hoveredMsgId, setHoveredMsgId] = useState<string | null>(null);
 
+  const getMessageToolCalls = useCallback((message: ChatMessage) => {
+    const partToolCalls =
+      message.parts
+        ?.filter(
+          (part): part is Extract<ContentBlock, { type: "tool_call" }> =>
+            part.type === "tool_call",
+        )
+        .map((part) => part.toolCall) ?? [];
+    return message.toolCalls?.length ? message.toolCalls : partToolCalls;
+  }, []);
+
+  const buildAssistantDisplayMessage = useCallback(
+    (message: ChatMessage): ChatMessage => {
+      if (message.role !== "assistant") {
+        return message;
+      }
+      if (Array.isArray(message.parts) && message.parts.length > 0) {
+        return message;
+      }
+
+      const thoughtText = normalizeThoughtText(message.thoughts);
+      const toolCalls = getMessageToolCalls(message);
+      if (!thoughtText && toolCalls.length === 0) {
+        return message;
+      }
+
+      const parts: ContentBlock[] = [];
+      if (thoughtText) {
+        parts.push({ type: "thinking", text: thoughtText });
+      }
+      for (const toolCall of toolCalls) {
+        parts.push({ type: "tool_call", toolCall });
+      }
+      if (message.content) {
+        parts.push({ type: "text", text: message.content });
+      }
+
+      return {
+        ...message,
+        thoughts: thoughtText,
+        toolCalls,
+        parts,
+      };
+    },
+    [getMessageToolCalls],
+  );
+
+  const latestRunningToolId = useMemo(() => {
+    for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
+      const toolCalls = getMessageToolCalls(messages[messageIndex]);
+      for (let toolIndex = toolCalls.length - 1; toolIndex >= 0; toolIndex -= 1) {
+        if (toolCalls[toolIndex].state === "running") {
+          return toolCalls[toolIndex].id;
+        }
+      }
+    }
+    return null;
+  }, [getMessageToolCalls, messages]);
+
   useEffect(() => {
     setTaskOpenState((prev) => {
       let changed = false;
       const next = { ...prev };
 
       for (const message of messages) {
-        for (const toolCall of message.toolCalls ?? []) {
-          const shouldAutoCollapse =
-            toolCall.name === "save_plan" &&
+        for (const toolCall of getMessageToolCalls(message)) {
+          if (latestRunningToolId && toolCall.id === latestRunningToolId) {
+            if (next[toolCall.id] !== true) {
+              next[toolCall.id] = true;
+              changed = true;
+            }
+            continue;
+          }
+
+          const shouldCollapseBeforeNextTool =
+            latestRunningToolId !== null &&
             (toolCall.state === "completed" ||
-              toolCall.state === "output-available");
+              toolCall.state === "output-available" ||
+              toolCall.state === "output-denied" ||
+              toolCall.state === "error");
+          const shouldAutoCollapse =
+            shouldCollapseBeforeNextTool ||
+            (toolCall.name === "save_plan" &&
+              (toolCall.state === "completed" ||
+                toolCall.state === "output-available"));
           if (shouldAutoCollapse && next[toolCall.id] !== false) {
             next[toolCall.id] = false;
             changed = true;
@@ -3504,7 +3612,7 @@ const MessageList = memo(function MessageList({
 
       return changed ? next : prev;
     });
-  }, [messages]);
+  }, [getMessageToolCalls, latestRunningToolId, messages]);
 
   const statusLabelMap: Record<ToolCallRecord["state"], string> = {
     running: "执行中",
@@ -3532,10 +3640,13 @@ const MessageList = memo(function MessageList({
       tc.name === "ask_plan_questions" ||
       tc.inputRequest?.kind === "plan_questions";
     const toolTitle = `${getToolTitle(tc.name, tc.arguments ?? {})} · ${statusLabel}`;
-    const hasControlledOpen = Object.prototype.hasOwnProperty.call(
-      taskOpenState,
-      tc.id,
-    );
+    const hasControlledOpen =
+      latestRunningToolId !== null ||
+      Object.prototype.hasOwnProperty.call(taskOpenState, tc.id);
+    const controlledOpen =
+      latestRunningToolId !== null && tc.id !== latestRunningToolId
+        ? false
+        : (taskOpenState[tc.id] ?? shouldOpen);
 
     return (
       <Task
@@ -3543,7 +3654,7 @@ const MessageList = memo(function MessageList({
         defaultOpen={shouldOpen}
         {...(hasControlledOpen
           ? {
-              open: taskOpenState[tc.id],
+              open: controlledOpen,
               onOpenChange: (open: boolean) =>
                 setTaskOpenState((prev) => ({ ...prev, [tc.id]: open })),
             }
@@ -3830,6 +3941,27 @@ const MessageList = memo(function MessageList({
         ? { type: "cot", blocks: merged, hasThinking: true }
         : { type: "tools", blocks: merged };
       groups.splice(gi, 1);
+    }
+
+    for (const group of groups) {
+      if (group.type !== "cot") {
+        continue;
+      }
+      const seenThinkingKeys = new Set<string>();
+      group.blocks = group.blocks.filter((block) => {
+        if (block.type !== "thinking") {
+          return true;
+        }
+        const thoughtKey = getThoughtTextKey(normalizeThoughtText(block.text));
+        if (!thoughtKey) {
+          return false;
+        }
+        if (seenThinkingKeys.has(thoughtKey)) {
+          return false;
+        }
+        seenThinkingKeys.add(thoughtKey);
+        return true;
+      });
     }
 
     const activeCotGroupIdx =
@@ -4252,6 +4384,7 @@ const MessageList = memo(function MessageList({
   return (
     <>
       {messages.map((msg, idx) => {
+        const displayMessage = buildAssistantDisplayMessage(msg);
         const isLast = idx === messages.length - 1;
         const isLastAssistant = idx === lastAssistantIdx;
         const showInlineActions = msg.role === "assistant" && !isLastAssistant;
@@ -4284,10 +4417,15 @@ const MessageList = memo(function MessageList({
           >
             <MessageContent>
               {msg.role === "assistant" &&
-                (msg.parts
-                  ? renderPartsAssistant(msg, isLast)
-                  : renderLegacyAssistant(msg, isLast))}
-              {!msg.parts && msg.content
+                (displayMessage.parts?.length
+                  ? renderPartsAssistant(displayMessage, isLast)
+                  : renderLegacyAssistant(displayMessage, isLast))}
+              {msg.role === "user" && msg.content
+                ? renderFinalAnswerContent(msg.content, new Map(), {
+                    finalAnswerRendering: "markdown",
+                  })
+                : null}
+              {msg.role === "assistant" && !displayMessage.parts?.length && msg.content
                 ? renderFinalAnswerContent(msg.content, new Map(), {
                     className:
                       isLast && isLoading ? "streaming-tail-fade" : undefined,

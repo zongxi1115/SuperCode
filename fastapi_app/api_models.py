@@ -173,12 +173,17 @@ class CreateSessionRequest(BaseModel):
     agent_type: str | None = None
 
 
+class UIModelRecordPayload(BaseModel):
+    id: str
+    contextWindow: int | None = None
+
+
 class UIModelProviderPayload(BaseModel):
     id: str | None = None
     name: str
     baseUrl: str
     apiKey: str
-    models: list[str] = Field(default_factory=list)
+    models: list[UIModelRecordPayload] = Field(default_factory=list)
     provider: str | None = None
     apiMode: Literal["chat_completions", "responses"] | None = None
 
@@ -192,6 +197,27 @@ class EmbeddingSettingsPayload(BaseModel):
     baseUrl: str = ""
     apiKey: str = ""
     model: str = ""
+
+
+class MCPServerPayload(BaseModel):
+    id: str | None = None
+    name: str = ""
+    enabled: bool = True
+    transport: Literal["stdio", "streamable_http"] = "stdio"
+    command: str = ""
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    url: str = ""
+    bearerToken: str = ""
+    headers: dict[str, str] = Field(default_factory=dict)
+
+
+class MCPServersPayload(BaseModel):
+    servers: list[MCPServerPayload] = Field(default_factory=list)
+
+
+class MCPServerTestRequest(BaseModel):
+    server: MCPServerPayload | None = None
 
 
 class MemoryItemPayload(BaseModel):

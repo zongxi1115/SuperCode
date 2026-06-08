@@ -1,6 +1,7 @@
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { apiFetch } from '@/lib/api-client';
+import type { FileTreeNode } from '@/lib/app-types';
 import { PROJECT_DOC_STYLES, type ProjectDocStyle } from '@/lib/project-docs';
 import { cn } from '@/lib/utils';
 import type { Editor } from '@tiptap/core';
@@ -30,7 +31,6 @@ import {
   Quote,
   Save,
   TableIcon,
-  Tag,
   Text as TextIcon,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -39,6 +39,7 @@ import { createPortal } from 'react-dom';
 type ProjectDocsPageProps = {
   sessionId: string | null;
   workspace: string;
+  fileTree?: FileTreeNode[];
 };
 
 type ProjectDocSummary = {
@@ -83,6 +84,7 @@ type InlineBlockSuggestion = {
   label: string;
   description: string;
   value: string;
+  kind: 'file' | 'custom';
 };
 
 type InlineBlockAttrs = {
@@ -162,10 +164,45 @@ function decodeInlineBlockTokenValue(value: string) {
 }
 
 function inlineBlockLabel(value: string) {
+  if (value.startsWith('file:')) {
+    return getPathLeaf(value.slice(5));
+  }
   const normalized = value.replace(/\\/g, '/').trim();
   if (!normalized) return '@';
   const parts = normalized.split('/').filter(Boolean);
   return parts.at(-1) ?? normalized;
+}
+
+function getPathLeaf(input: string) {
+  const normalized = input.replace(/\\/g, '/');
+  return normalized.split('/').filter(Boolean).pop() ?? input;
+}
+
+function buildFileInlineBlockSuggestions(fileTree: FileTreeNode[]) {
+  const suggestions: InlineBlockSuggestion[] = [];
+  const seen = new Set<string>();
+
+  const visit = (nodes: FileTreeNode[]) => {
+    for (const node of nodes) {
+      if (node.type === 'file' && node.path) {
+        const key = node.path.toLowerCase();
+        if (!seen.has(key)) {
+          seen.add(key);
+          suggestions.push({
+            id: `file:${node.path}`,
+            label: node.name || getPathLeaf(node.path),
+            description: node.path,
+            value: node.path,
+            kind: 'file',
+          });
+        }
+      }
+      if (node.children) visit(node.children);
+    }
+  };
+
+  visit(fileTree);
+  return suggestions;
 }
 
 function decorateInlineBlockTokens(html: string) {
@@ -418,7 +455,7 @@ function InlineBlockView(props: { node: { attrs: InlineBlockAttrs } }) {
       data-project-doc-inline-block-label={attrs.label}
     >
       <span className="project-docs-inline-block-icon">
-        <Tag className="size-3" />
+        <FileText className="size-3" />
       </span>
       <span className="truncate">{attrs.label || inlineBlockLabel(attrs.id)}</span>
     </NodeViewWrapper>
@@ -472,7 +509,7 @@ const InlineBlockNode = TiptapNode.create({
   },
 });
 
-export function ProjectDocsPage({ sessionId, workspace }: ProjectDocsPageProps) {
+export function ProjectDocsPage({ sessionId, workspace, fileTree = [] }: ProjectDocsPageProps) {
   const lastMarkdownRef = useRef('');
   const serverMarkdownRef = useRef('');
   const syncTimerRef = useRef<number | null>(null);
@@ -530,41 +567,10 @@ export function ProjectDocsPage({ sessionId, workspace }: ProjectDocsPageProps) 
     );
   }, [slashMenu?.query]);
 
-  const inlineBlockSuggestions = useMemo<InlineBlockSuggestion[]>(() => {
-    const date = new Date().toISOString().slice(0, 10);
-    return [
-      {
-        id: 'current-doc',
-        label: activeDocument?.title || '当前文档',
-        description: activeDocument?.relativePath || '当前项目文档',
-        value: `doc:${activeDocument?.id || 'main'}`,
-      },
-      {
-        id: 'workspace',
-        label: '工作区',
-        description: workspace,
-        value: `workspace:${workspace}`,
-      },
-      {
-        id: 'decision',
-        label: '决策',
-        description: '标记一条设计或实现决策',
-        value: 'block:decision',
-      },
-      {
-        id: 'todo',
-        label: '待办',
-        description: '标记一项后续工作',
-        value: 'block:todo',
-      },
-      {
-        id: 'date',
-        label: date,
-        description: '今天的日期',
-        value: `date:${date}`,
-      },
-    ];
-  }, [activeDocument?.id, activeDocument?.relativePath, activeDocument?.title, workspace]);
+  const inlineBlockSuggestions = useMemo<InlineBlockSuggestion[]>(
+    () => buildFileInlineBlockSuggestions(fileTree),
+    [fileTree],
+  );
 
   const filteredInlineBlockSuggestions = useMemo(() => {
     const query = inlineBlockMenu?.query.trim().toLowerCase() ?? '';
@@ -583,6 +589,7 @@ export function ProjectDocsPage({ sessionId, workspace }: ProjectDocsPageProps) 
             label: rawQuery,
             description: '创建行内块',
             value: `custom:${rawQuery}`,
+            kind: 'custom',
           },
         ]
       : [];
@@ -1378,7 +1385,7 @@ export function ProjectDocsPage({ sessionId, workspace }: ProjectDocsPageProps) 
           )
         : null}
 
-      {inlineBlockMenu && filteredInlineBlockSuggestions.length > 0
+      {inlineBlockMenu
         ? createPortal(
             <div
               key="inline-block-menu"
@@ -1389,35 +1396,41 @@ export function ProjectDocsPage({ sessionId, workspace }: ProjectDocsPageProps) 
                 transformOrigin: 'top left',
               }}
             >
-              {filteredInlineBlockSuggestions.map((suggestion, index) => (
-                <button
-                  key={suggestion.id}
-                  type="button"
-                  className={cn(
-                    'flex w-full items-start gap-2.5 rounded-md px-2.5 py-2 text-left text-sm outline-none transition-colors',
-                    index === inlineBlockIndex
-                      ? 'bg-accent text-accent-foreground'
-                      : 'text-popover-foreground hover:bg-accent/50',
-                  )}
-                  onMouseEnter={() => setInlineBlockIndex(index)}
-                  onMouseDown={(event) => {
-                    event.preventDefault();
-                    insertInlineBlockSuggestion(suggestion, inlineBlockMenu);
-                  }}
-                >
-                  <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
-                    {suggestion.id === 'current-doc' ? (
-                      <FileText className="size-3.5" />
-                    ) : (
-                      <Hash className="size-3.5" />
+              {filteredInlineBlockSuggestions.length > 0 ? (
+                filteredInlineBlockSuggestions.map((suggestion, index) => (
+                  <button
+                    key={suggestion.id}
+                    type="button"
+                    className={cn(
+                      'flex w-full items-start gap-2.5 rounded-md px-2.5 py-2 text-left text-sm outline-none transition-colors',
+                      index === inlineBlockIndex
+                        ? 'bg-accent text-accent-foreground'
+                        : 'text-popover-foreground hover:bg-accent/50',
                     )}
-                  </span>
-                  <span className="flex min-w-0 flex-col">
-                    <span className="truncate font-medium">{suggestion.label}</span>
-                    <span className="truncate text-xs text-muted-foreground">{suggestion.description}</span>
-                  </span>
-                </button>
-              ))}
+                    onMouseEnter={() => setInlineBlockIndex(index)}
+                    onMouseDown={(event) => {
+                      event.preventDefault();
+                      insertInlineBlockSuggestion(suggestion, inlineBlockMenu);
+                    }}
+                  >
+                    <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
+                      {suggestion.kind === 'file' ? (
+                        <FileText className="size-3.5" />
+                      ) : (
+                        <Hash className="size-3.5" />
+                      )}
+                    </span>
+                    <span className="flex min-w-0 flex-col">
+                      <span className="truncate font-medium">{suggestion.label}</span>
+                      <span className="truncate text-xs text-muted-foreground">{suggestion.description}</span>
+                    </span>
+                  </button>
+                ))
+              ) : (
+                <div className="rounded-md px-2.5 py-2 text-xs text-muted-foreground">
+                  暂无可引用文件
+                </div>
+              )}
             </div>,
             document.body,
           )

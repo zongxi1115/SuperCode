@@ -161,6 +161,15 @@ def token_bar(est, mx, width=20):
     return f"[{color}]{'█' * filled}{'░' * (width - filled)}[/] {est}/{mx} ({ratio:.0%})"
 
 
+def _context_usage_tokens(usage):
+    if not isinstance(usage, dict):
+        return 0
+    try:
+        return max(int(usage.get("inputTokens", 0) or 0), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _parse_usage(raw):
     if not isinstance(raw, str):
         return {}
@@ -247,7 +256,7 @@ def cmd_context(session_id: str):
 
     usage = _parse_usage(row.get("token_usage", "{}"))
     cum = _parse_usage(row.get("cumulative_token_usage", "{}"))
-    est = sum(usage.values()) if usage else 0
+    est = _context_usage_tokens(usage)
     mx = row.get("max_context_tokens") or 0
 
     t.append(f"\nToken: {token_bar(est, mx, 25)}\n")
@@ -449,7 +458,7 @@ class MonitorState:
 
         usage = _parse_usage(row.get("token_usage", "{}"))
         cum = _parse_usage(row.get("cumulative_token_usage", "{}"))
-        est = sum(usage.values()) if usage else 0
+        est = _context_usage_tokens(usage)
         mx = row.get("max_context_tokens") or 0
         header.append(f"Token: {token_bar(est, mx)}\n")
         header.append(f"累计: in={cum.get('inputTokens',0)} out={cum.get('outputTokens',0)}  ")

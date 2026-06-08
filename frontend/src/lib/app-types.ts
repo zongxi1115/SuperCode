@@ -386,7 +386,13 @@ export type ModelOption = {
   label: string;
   sourceType?: 'env' | 'ui' | string;
   sourceLabel?: string;
+  contextWindow?: number | null;
   readOnly?: boolean;
+};
+
+export type UIModelRecord = {
+  id: string;
+  contextWindow?: number | null;
 };
 
 export type UIModelProvider = {
@@ -394,7 +400,7 @@ export type UIModelProvider = {
   name: string;
   baseUrl: string;
   apiKey: string;
-  models: string[];
+  models: UIModelRecord[];
   provider?: string | null;
   apiMode?: 'chat_completions' | 'responses' | null;
 };
@@ -403,6 +409,44 @@ export type ModelConfigPayload = {
   providers: UIModelProvider[];
   envConfigs: ModelOption[];
   configPath: string;
+};
+
+export type MCPTransport = 'stdio' | 'streamable_http';
+
+export type MCPServerStatus = {
+  state: 'unknown' | 'ok' | 'error' | string;
+  message: string;
+  toolCount?: number | null;
+};
+
+export type MCPServerConfig = {
+  id?: string | null;
+  name: string;
+  enabled: boolean;
+  transport: MCPTransport;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  url: string;
+  bearerToken: string;
+  headers: Record<string, string>;
+  status?: MCPServerStatus;
+};
+
+export type MCPServersPayload = {
+  servers: MCPServerConfig[];
+  configPath: string;
+};
+
+export type MCPToolSummary = {
+  name: string;
+  description: string;
+  parametersSchema?: Record<string, unknown>;
+};
+
+export type MCPServerTestResult = {
+  toolCount: number;
+  tools: MCPToolSummary[];
 };
 
 export type MemoryItem = {

@@ -1547,10 +1547,10 @@ class ReadFileTool(CodingBaseTool):
         "type": "object",
         "properties": {
             "filename": {"type": "string"},
-            "offset": {"type": "integer"},
-            "limit": {"type": "integer"},
-            "start_line": {"type": "integer"},
-            "end_line": {"type": "integer"},
+            "offset": {"type": "integer", "minimum": 0},
+            "limit": {"type": "integer", "minimum": 1},
+            "start_line": {"type": "integer", "minimum": 1},
+            "end_line": {"type": "integer", "minimum": 1},
         },
         "required": ["filename"],
         "additionalProperties": False,
@@ -1558,39 +1558,9 @@ class ReadFileTool(CodingBaseTool):
 
     def run(self, arguments: dict[str, object], context: ToolContext) -> str:
         filename = str(arguments["filename"])
-        has_offset_limit = "offset" in arguments or "limit" in arguments
-        has_line_range = "start_line" in arguments or "end_line" in arguments
-        if has_offset_limit and has_line_range:
-            raise ValueError(
-                "read_file 不能同时混用 offset/limit 和 start_line/end_line。"
-            )
-
-        if has_offset_limit:
-            offset = _parse_int_argument(
-                arguments.get("offset", 0), field_name="offset", minimum=0
-            )
-            limit_raw = arguments.get("limit")
-            limit = (
-                _parse_int_argument(limit_raw, field_name="limit", minimum=1)
-                if limit_raw is not None
-                else None
-            )
-            start_line = offset + 1
-            end_line = offset + limit if limit is not None else None
-        else:
-            start_line = _parse_int_argument(
-                arguments.get("start_line", 1), field_name="start_line", minimum=1
-            )
-            end_line_raw = arguments.get("end_line")
-            end_line = (
-                _parse_int_argument(
-                    end_line_raw, field_name="end_line", minimum=start_line
-                )
-                if end_line_raw is not None
-                else None
-            )
-            offset = start_line - 1
-            limit = (end_line - start_line + 1) if end_line is not None else None
+        offset, limit, start_line, end_line = self._normalize_range_arguments(
+            arguments
+        )
 
         target = self._resolve_path(filename, context)
         if not target.exists():
@@ -1700,6 +1670,113 @@ class ReadFileTool(CodingBaseTool):
                 return truncated_rendered
             actual_end_line = last_rendered_line
 
+    def _normalize_range_arguments(
+        self, arguments: dict[str, object]
+    ) -> tuple[int, int | None, int, int | None]:
+        offset_was_provided = "offset" in arguments
+        offset = (
+            _parse_int_argument(arguments["offset"], field_name="offset", minimum=0)
+            if offset_was_provided
+            else 0
+        )
+        limit_was_provided = "limit" in arguments
+        raw_limit = arguments.get("limit")
+        limit_is_placeholder = (
+            limit_was_provided and (raw_limit is None or raw_limit == 0)
+        )
+        limit = (
+            _parse_int_argument(arguments["limit"], field_name="limit", minimum=1)
+            if limit_was_provided and not limit_is_placeholder
+            else None
+        )
+        has_active_offset_range = (
+            (offset_was_provided and offset != 0) or limit is not None
+        )
+        has_offset_range_hint = offset_was_provided or limit_was_provided
+
+        def has_active_line_value(field_name: str) -> bool:
+            if field_name not in arguments:
+                return False
+            value = arguments.get(field_name)
+            if value is None:
+                return False
+            if has_offset_range_hint and (value == 0 or value == -1):
+                return False
+            return True
+
+        start_line = (
+            _parse_int_argument(
+                arguments["start_line"], field_name="start_line", minimum=1
+            )
+            if has_active_line_value("start_line")
+            else None
+        )
+        end_line = (
+            _parse_int_argument(arguments["end_line"], field_name="end_line", minimum=1)
+            if has_active_line_value("end_line")
+            else None
+        )
+
+        has_line_range = start_line is not None or end_line is not None
+        offset_is_default_placeholder = (
+            offset_was_provided
+            and offset == 0
+            and limit_is_placeholder
+            and has_line_range
+        )
+        has_offset_limit = (
+            offset_was_provided or limit is not None
+        ) and not offset_is_default_placeholder
+        offset_start_line = offset + 1
+        offset_end_line = offset + limit if limit is not None else None
+        line_start_line = start_line or 1
+        line_end_line = end_line
+
+        if has_line_range and line_end_line is not None and line_end_line < line_start_line:
+            raise ValueError("end_line 必须大于等于 start_line。")
+
+        if has_offset_limit and has_line_range:
+            ranges_match = (
+                limit is not None
+                and offset_start_line == line_start_line
+                and offset_end_line == line_end_line
+            )
+            line_range_is_default_start = (
+                offset == 0
+                and limit is not None
+                and start_line in {None, 1}
+                and end_line is None
+            )
+            offset_range_is_default_start = (
+                offset == 0
+                and limit is None
+                and start_line is not None
+                and limit_is_placeholder
+            )
+            if not (
+                ranges_match
+                or line_range_is_default_start
+                or offset_range_is_default_start
+            ):
+                raise ValueError(
+                    "read_file 不能同时混用 offset/limit 和 start_line/end_line。"
+                )
+
+        if has_line_range and not (
+            has_offset_limit and limit is not None and line_end_line is None
+        ):
+            resolved_start_line = line_start_line
+            resolved_end_line = line_end_line
+            resolved_offset = resolved_start_line - 1
+            resolved_limit = (
+                resolved_end_line - resolved_start_line + 1
+                if resolved_end_line is not None
+                else None
+            )
+            return resolved_offset, resolved_limit, resolved_start_line, resolved_end_line
+
+        return offset, limit, offset_start_line, offset_end_line
+
 
 class GrepFileTool(CodingBaseTool):
     """正则搜索文件内容。"""
@@ -1799,10 +1876,7 @@ class GrepFileTool(CodingBaseTool):
         limit: int,
     ) -> str:
         try:
-            from fastapi_app.rag_index import (
-                schedule_workspace_rag_index,
-                search_workspace_rag,
-            )
+            from fastapi_app.rag_index import search_workspace_rag
         except Exception:
             return ""
 
@@ -1813,7 +1887,6 @@ class GrepFileTool(CodingBaseTool):
             else Path(__file__).resolve().parents[1]
         )
         try:
-            schedule_workspace_rag_index(app_root, context.workspace)
             matches = search_workspace_rag(
                 app_root,
                 context.workspace,

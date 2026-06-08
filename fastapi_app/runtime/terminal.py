@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import base64
 import codecs
+import os
 import re
 import subprocess
 import sys
 import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable
+
+try:
+    from winpty import PtyProcess
+except ImportError:  # pragma: no cover - optional dependency
+    PtyProcess = None
 
 from agent.rolling_text_buffer import RollingTextBuffer
 from fastapi_app.api_models import TerminalSnapshotResponse
@@ -417,3 +423,10 @@ class TerminalRuntimeBase:
                 self.process.kill()
             except Exception:
                 pass
+
+
+class TerminalRuntime(TerminalRuntimeBase):
+    def _get_pty_process_class(self) -> Any | None:
+        if sys.platform == "win32" and os.environ.get("SUPERCODE_DESKTOP", "").strip() == "1":
+            return None
+        return PtyProcess

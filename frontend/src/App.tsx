@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react';
 import { ChatPanel } from '@/components/app/chat-panel';
 import { EditorPanel, type PlanData } from '@/components/app/editor-panel';
 import type { Annotation } from '@/components/app/plan-rich-text-editor';
@@ -20,6 +20,9 @@ import type {
   DirectoryNode,
   FileTreeNode,
   ManagedProcessPayload,
+  MCPServerConfig,
+  MCPServersPayload,
+  MCPServerTestResult,
   ModelConfigPayload,
   ModelOption,
   PlanStep,
@@ -67,6 +70,12 @@ const DEFAULT_WEB_PREVIEW_URL = 'http://localhost:8888';
 const CONTEXT_COMPRESSION_USAGE_THRESHOLD = 0.8;
 const STREAM_RETRY_LIMIT = 10;
 const RETRYABLE_STREAM_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
+
+type ViewTransitionDocument = Document & {
+  startViewTransition?: (callback: () => void) => {
+    ready: Promise<void>;
+  };
+};
 
 type UrlAppState = {
   sessionId: string | null;
@@ -455,6 +464,16 @@ function isAbortError(error: unknown) {
   return error instanceof DOMException && error.name === 'AbortError';
 }
 
+function isCanceledError(error: unknown) {
+  if (error instanceof DOMException) {
+    return error.name === 'AbortError' || error.name === 'Canceled';
+  }
+  if (error instanceof Error) {
+    return error.name === 'AbortError' || error.name === 'Canceled' || error.message === 'Canceled';
+  }
+  return false;
+}
+
 function getRetryDelayMs(retryIndex: number) {
   return 1000 * 2 ** retryIndex;
 }
@@ -625,6 +644,8 @@ export default function App() {
   const [visualModelProviders, setVisualModelProviders] = useState<UIModelProvider[]>([]);
   const [envModelConfigs, setEnvModelConfigs] = useState<ModelOption[]>([]);
   const [modelConfigPath, setModelConfigPath] = useState<string | null>(null);
+  const [mcpServers, setMcpServers] = useState<MCPServerConfig[]>([]);
+  const [mcpConfigPath, setMcpConfigPath] = useState<string | null>(null);
   const [completionActionState, setCompletionActionState] = useState<{
     messageId: string;
     action: CompletionActionKey;
@@ -646,10 +667,58 @@ export default function App() {
     currentSessionIdRef.current = sessionId;
   }, [sessionId]);
 
+  const applyTheme = useCallback((darkMode: boolean) => {
+    document.documentElement.classList.toggle('dark', darkMode);
+    localStorage.setItem('theme', darkMode ? 'dark' : 'light');
+  }, []);
+
   useEffect(() => {
-    document.documentElement.classList.toggle('dark', isDarkMode);
-    localStorage.setItem('theme', isDarkMode ? 'dark' : 'light');
-  }, [isDarkMode]);
+    applyTheme(isDarkMode);
+  }, [applyTheme, isDarkMode]);
+
+  const handleThemeToggle = useCallback((event: MouseEvent<HTMLButtonElement>) => {
+    const nextIsDarkMode = !isDarkMode;
+    const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const viewTransitionDocument = document as ViewTransitionDocument;
+
+    if (!viewTransitionDocument.startViewTransition || prefersReducedMotion) {
+      setIsDarkMode(nextIsDarkMode);
+      return;
+    }
+
+    const { clientX, clientY } = event;
+    const endRadius = Math.hypot(
+      Math.max(clientX, window.innerWidth - clientX),
+      Math.max(clientY, window.innerHeight - clientY),
+    );
+
+    const transition = viewTransitionDocument.startViewTransition(() => {
+      setIsDarkMode(nextIsDarkMode);
+      applyTheme(nextIsDarkMode);
+    });
+
+    transition.ready
+      .then(() => {
+        document.documentElement.animate(
+          {
+            clipPath: [
+              `circle(0px at ${clientX}px ${clientY}px)`,
+              `circle(${endRadius}px at ${clientX}px ${clientY}px)`,
+            ],
+          },
+          {
+            duration: 520,
+            easing: 'cubic-bezier(0.16, 1, 0.3, 1)',
+            pseudoElement: '::view-transition-new(root)',
+          },
+        );
+      })
+      .catch((error) => {
+        if (!isCanceledError(error)) {
+          console.error(error);
+        }
+      });
+  }, [applyTheme, isDarkMode]);
 
   useEffect(() => {
     document.documentElement.style.setProperty('--font-sans', appSettings.bodyFontFamily);
@@ -1068,6 +1137,17 @@ export default function App() {
     setAppSettings(normalizeAppSettings(data));
   }, []);
 
+  const loadMcpServers = useCallback(async () => {
+    const res = await apiFetch('/api/mcp/servers');
+    const data: MCPServersPayload = await res.json();
+    if (!res.ok) {
+      throw new Error(String((data as { detail?: unknown }).detail ?? '读取 MCP 配置失败'));
+    }
+    setMcpServers(data.servers ?? []);
+    setMcpConfigPath(data.configPath ?? null);
+    return data;
+  }, []);
+
   const loadModelConfigs = useCallback(async () => {
     const res = await apiFetch('/api/model-configs');
     const data: ModelConfigPayload = await res.json();
@@ -1075,8 +1155,9 @@ export default function App() {
     setEnvModelConfigs(data.envConfigs ?? []);
     setModelConfigPath(data.configPath ?? null);
     await loadAppSettings();
+    await loadMcpServers();
     return data;
-  }, [loadAppSettings]);
+  }, [loadAppSettings, loadMcpServers]);
 
   useEffect(() => {
     apiFetch('/api/workspaces')
@@ -1110,6 +1191,14 @@ export default function App() {
         setVisualModelProviders(data.providers ?? []);
         setEnvModelConfigs(data.envConfigs ?? []);
         setModelConfigPath(data.configPath ?? null);
+      })
+      .catch(console.error);
+
+    apiFetch('/api/mcp/servers')
+      .then((res) => res.json())
+      .then((data: MCPServersPayload) => {
+        setMcpServers(data.servers ?? []);
+        setMcpConfigPath(data.configPath ?? null);
       })
       .catch(console.error);
 
@@ -1842,7 +1931,37 @@ export default function App() {
     if (!res.ok) {
       throw new Error(String(data.detail ?? '拉取模型列表失败'));
     }
-    return Array.isArray(data.models) ? (data.models as string[]) : [];
+    return {
+      models: Array.isArray(data.models) ? (data.models as UIModelProvider['models']) : [],
+    };
+  }, []);
+
+  const saveMcpServers = useCallback(async (servers: MCPServerConfig[]) => {
+    const res = await apiFetch('/api/mcp/servers', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ servers }),
+    });
+    const data: MCPServersPayload = await res.json();
+    if (!res.ok) {
+      throw new Error(String((data as { detail?: unknown }).detail ?? '保存 MCP 配置失败'));
+    }
+    setMcpServers(data.servers ?? []);
+    setMcpConfigPath(data.configPath ?? null);
+  }, []);
+
+  const testMcpServer = useCallback(async (server: MCPServerConfig) => {
+    const serverId = encodeURIComponent(server.id || 'draft');
+    const res = await apiFetch(`/api/mcp/servers/${serverId}/test`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ server }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(String(data.detail ?? 'MCP 连接测试失败'));
+    }
+    return data as MCPServerTestResult;
   }, []);
 
   const testEmbeddingSettings = useCallback(async (embedding: AppSettings['embedding']) => {
@@ -2123,6 +2242,98 @@ export default function App() {
             }
             return [...parts, { type: partType, text: delta }];
           };
+          const normalizeThoughtKey = (value: string) => value.trim().replace(/\s+/g, ' ');
+          const mergeThinkingDelta = (message: ChatMessage, delta: string): ChatMessage => {
+            if (!delta) return message;
+            const parts = message.parts ?? [];
+            const nextThoughts = `${message.thoughts ?? ''}${delta}`;
+            const lastMergeableThinkingIndex = [...parts]
+              .map((part, index) => ({ part, index }))
+              .reverse()
+              .find(({ part, index }) => {
+                if (part.type !== 'thinking') return false;
+                return !parts
+                  .slice(index + 1)
+                  .some((nextPart) => nextPart.type === 'tool_call' || nextPart.type === 'text');
+              })?.index;
+
+            if (lastMergeableThinkingIndex !== undefined) {
+              const existingPart = parts[lastMergeableThinkingIndex] as Extract<ContentBlock, { type: 'thinking' }>;
+              const nextText = `${existingPart.text}${delta}`;
+              const nextParts = [...parts];
+              nextParts[lastMergeableThinkingIndex] = { ...existingPart, text: nextText };
+              return {
+                ...message,
+                thoughts: nextThoughts,
+                parts: nextParts,
+              };
+            }
+
+            const textIdx = parts.findIndex((p) => p.type === 'text');
+            const nextParts = textIdx === -1
+              ? [...parts, { type: 'thinking' as const, text: delta }]
+              : [...parts.slice(0, textIdx), { type: 'thinking' as const, text: delta }, ...parts.slice(textIdx)];
+            return {
+              ...message,
+              thoughts: nextThoughts,
+              parts: nextParts,
+            };
+          };
+          const mergeThinkingSnapshot = (message: ChatMessage, nextThought: string): ChatMessage => {
+            if (!nextThought) return message;
+            const parts = message.parts ?? [];
+            const nextThoughtKey = normalizeThoughtKey(nextThought);
+            const thinkingEntries = parts
+              .map((part, index) => ({ part, index }))
+              .filter(
+                (entry): entry is { part: Extract<ContentBlock, { type: 'thinking' }>; index: number } =>
+                  entry.part.type === 'thinking',
+              );
+            const matchingEntry = [...thinkingEntries]
+              .reverse()
+              .find(({ part }) => {
+                const existingKey = normalizeThoughtKey(part.text);
+                return (
+                  existingKey === nextThoughtKey ||
+                  nextThoughtKey.startsWith(existingKey) ||
+                  existingKey.startsWith(nextThoughtKey)
+                );
+              });
+
+            if (matchingEntry) {
+              const nextParts = parts.filter(
+                (part, index) =>
+                  part.type !== 'thinking' ||
+                  index === matchingEntry.index ||
+                  normalizeThoughtKey(part.text) !== nextThoughtKey,
+              );
+              const adjustedIndex = nextParts.findIndex(
+                (part) => part.type === 'thinking' && normalizeThoughtKey(part.text) === normalizeThoughtKey(matchingEntry.part.text),
+              );
+              if (adjustedIndex >= 0 && nextParts[adjustedIndex].type === 'thinking') {
+                nextParts[adjustedIndex] = { ...nextParts[adjustedIndex], text: nextThought };
+              }
+              return {
+                ...message,
+                thoughts: nextThought,
+                parts: nextParts,
+              };
+            }
+
+            if (message.thoughts?.trim()) {
+              return message;
+            }
+
+            const textIdx = parts.findIndex((p) => p.type === 'text');
+            const nextParts = textIdx === -1
+              ? [...parts, { type: 'thinking' as const, text: nextThought }]
+              : [...parts.slice(0, textIdx), { type: 'thinking' as const, text: nextThought }, ...parts.slice(textIdx)];
+            return {
+              ...message,
+              thoughts: nextThought,
+              parts: nextParts,
+            };
+          };
 
           const updateToolPart = (
             assistantId: string,
@@ -2269,25 +2480,7 @@ export default function App() {
             if (!assistantId) return;
             updateAssistantMessage(assistantId, (message) => {
               const delta = data.delta ?? '';
-              if (!delta) return message;
-              const parts = message.parts ?? [];
-              const last = parts[parts.length - 1];
-              if (last && last.type === 'thinking') {
-                return {
-                  ...message,
-                  thoughts: `${message.thoughts ?? ''}${delta}`,
-                  parts: [...parts.slice(0, -1), { ...last, text: last.text + delta }],
-                };
-              }
-              const textIdx = parts.findIndex((p) => p.type === 'text');
-              const nextParts = textIdx === -1
-                ? [...parts, { type: 'thinking' as const, text: delta }]
-                : [...parts.slice(0, textIdx), { type: 'thinking' as const, text: delta }, ...parts.slice(textIdx)];
-              return {
-                ...message,
-                thoughts: `${message.thoughts ?? ''}${delta}`,
-                parts: nextParts,
-              };
+              return mergeThinkingDelta(message, delta);
             }, false);
           } else if (data.type === 'tool-input-available') {
             const assistantId = currentAssistantId;
@@ -2573,25 +2766,7 @@ export default function App() {
             currentAssistantId = assistantId;
             updateAssistantMessage(assistantId, (message) => {
               const delta = data.payload.delta ?? '';
-              if (!delta) return message;
-              const parts = message.parts ?? [];
-              const last = parts[parts.length - 1];
-              if (last && last.type === 'thinking') {
-                return {
-                  ...message,
-                  thoughts: `${message.thoughts ?? ''}${delta}`,
-                  parts: [...parts.slice(0, -1), { ...last, text: last.text + delta }],
-                };
-              }
-              const textIdx = parts.findIndex((p) => p.type === 'text');
-              const nextParts = textIdx === -1
-                ? [...parts, { type: 'thinking' as const, text: delta }]
-                : [...parts.slice(0, textIdx), { type: 'thinking' as const, text: delta }, ...parts.slice(textIdx)];
-              return {
-                ...message,
-                thoughts: `${message.thoughts ?? ''}${delta}`,
-                parts: nextParts,
-              };
+              return mergeThinkingDelta(message, delta);
             }, false);
           } else if (data.type === 'thought') {
             const assistantId = data.payload.assistant_id || currentAssistantId;
@@ -2599,19 +2774,7 @@ export default function App() {
             currentAssistantId = assistantId;
             updateAssistantMessage(assistantId, (message) => {
               const nextThought = String(data.payload.thought ?? '');
-              if (!nextThought || message.thoughts?.trim()) {
-                return message;
-              }
-              const parts = message.parts ?? [];
-              const textIdx = parts.findIndex((p) => p.type === 'text');
-              const nextParts = textIdx === -1
-                ? [...parts, { type: 'thinking' as const, text: nextThought }]
-                : [...parts.slice(0, textIdx), { type: 'thinking' as const, text: nextThought }, ...parts.slice(textIdx)];
-              return {
-                ...message,
-                thoughts: nextThought,
-                parts: nextParts
-              };
+              return mergeThinkingSnapshot(message, nextThought);
             }, true);
           } else if (data.type === 'tool_call') {
             const assistantId = data.payload.assistant_id || currentAssistantId;
@@ -3415,11 +3578,7 @@ export default function App() {
         {...(window.__TAURI__ ? { 'data-tauri-drag-region': '' } : {})}
       >
         <div className="flex items-center gap-2 select-none">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" className="text-primary">
-            <path d="M8 4L2 12L8 20" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/>
-            <path d="M16 4L22 12L16 20" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/>
-            <path d="M14 3L10 21" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
-          </svg>
+          <img src="/supercode-logo.svg" alt="SuperCode" className="h-5 w-5 rounded-[4px]" />
           <span className="text-sm font-bold tracking-tight">Super Code</span>
         </div>
         <div className="flex-1 min-w-0" />
@@ -3440,8 +3599,9 @@ export default function App() {
           size="sm"
           className="h-7 gap-2 rounded-full px-3 text-xs"
           onClick={() => {
-            void loadModelConfigs().catch(console.error);
-            setIsModelConfigOpen(true);
+            void loadModelConfigs()
+              .catch(console.error)
+              .finally(() => setIsModelConfigOpen(true));
           }}
           title="模型与供应商设置"
         >
@@ -3452,7 +3612,7 @@ export default function App() {
           variant="ghost"
           size="icon"
           className="h-7 w-7 rounded-full"
-          onClick={() => setIsDarkMode((prev) => !prev)}
+          onClick={handleThemeToggle}
           title={isDarkMode ? '切换到浅色模式' : '切换到深色模式'}
         >
           {isDarkMode ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
@@ -3517,7 +3677,7 @@ export default function App() {
         </div>
       ) : activePlugin === 'project-docs' ? (
         <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-          <ProjectDocsPage sessionId={sessionId} workspace={selectedWorkspace} />
+          <ProjectDocsPage sessionId={sessionId} workspace={selectedWorkspace} fileTree={fileTree} />
         </div>
       ) : (
       <>
@@ -3722,21 +3882,23 @@ export default function App() {
       </>
       )}
       </div>
-      {isModelConfigOpen ? (
-        <SettingsDialog
-          open={isModelConfigOpen}
-          onOpenChange={setIsModelConfigOpen}
-          providers={visualModelProviders}
-          envConfigs={envModelConfigs}
-          configPath={modelConfigPath}
-          settings={appSettings}
-          currentWorkspace={selectedWorkspace}
-          onSaveProviders={saveModelProviders}
-          onDiscoverModels={discoverProviderModels}
-          onTestEmbedding={testEmbeddingSettings}
-          onSaveSettings={saveAppSettings}
-        />
-      ) : null}
+      <SettingsDialog
+        open={isModelConfigOpen}
+        onOpenChange={setIsModelConfigOpen}
+        providers={visualModelProviders}
+        envConfigs={envModelConfigs}
+        configPath={modelConfigPath}
+        mcpServers={mcpServers}
+        mcpConfigPath={mcpConfigPath}
+        settings={appSettings}
+        currentWorkspace={selectedWorkspace}
+        onSaveProviders={saveModelProviders}
+        onDiscoverModels={discoverProviderModels}
+        onSaveMcpServers={saveMcpServers}
+        onTestMcpServer={testMcpServer}
+        onTestEmbedding={testEmbeddingSettings}
+        onSaveSettings={saveAppSettings}
+      />
       <Dialog open={isAboutOpen} onOpenChange={setIsAboutOpen}>
         <DialogContent className="sm:max-w-md overflow-hidden">
           <div
@@ -3768,31 +3930,14 @@ export default function App() {
           </div>
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              <motion.svg
-                width="20" height="20" viewBox="0 0 24 24" fill="none" className="text-primary"
+              <motion.img
+                src="/supercode-logo.svg"
+                alt="SuperCode"
+                className="h-5 w-5 rounded-[4px]"
                 initial={{ scale: 0.3, opacity: 0 }}
                 animate={{ scale: 1, opacity: 1 }}
                 transition={{ type: 'spring', stiffness: 200, damping: 15 }}
-              >
-                <motion.path
-                  d="M8 4L2 12L8 20" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
-                  initial={{ pathLength: 0, opacity: 0 }}
-                  animate={{ pathLength: 1, opacity: 1 }}
-                  transition={{ duration: 0.5, delay: 0.15, ease: 'easeOut' }}
-                />
-                <motion.path
-                  d="M16 4L22 12L16 20" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
-                  initial={{ pathLength: 0, opacity: 0 }}
-                  animate={{ pathLength: 1, opacity: 1 }}
-                  transition={{ duration: 0.5, delay: 0.3, ease: 'easeOut' }}
-                />
-                <motion.path
-                  d="M14 3L10 21" stroke="currentColor" strokeWidth="2" strokeLinecap="round"
-                  initial={{ pathLength: 0, opacity: 0 }}
-                  animate={{ pathLength: 1, opacity: 1 }}
-                  transition={{ duration: 0.4, delay: 0.45, ease: 'easeOut' }}
-                />
-              </motion.svg>
+              />
               <motion.span
                 initial={{ opacity: 0, x: -8 }}
                 animate={{ opacity: 1, x: 0 }}
@@ -3830,14 +3975,14 @@ export default function App() {
           </motion.div>
           <motion.div
             className="relative h-1 mt-2 rounded-full overflow-hidden"
-            style={{ background: 'rgba(168, 85, 247, 0.1)' }}
+            style={{ background: 'rgba(0, 156, 255, 0.12)' }}
             initial={{ opacity: 0, scaleX: 0 }}
             animate={{ opacity: 1, scaleX: 1 }}
             transition={{ delay: 0.7, duration: 0.5, ease: [0.25, 0.1, 0.25, 1] }}
           >
             <motion.div
               className="absolute inset-y-0 w-2/5 rounded-full"
-              style={{ background: 'linear-gradient(90deg, transparent, rgba(168, 85, 247, 0.6), rgba(200, 140, 255, 0.8), transparent)' }}
+              style={{ background: 'linear-gradient(90deg, transparent, rgba(0, 156, 255, 0.65), rgba(120, 215, 255, 0.85), transparent)' }}
               animate={{ x: ['-100%', '350%'] }}
               transition={{ duration: 1.8, repeat: Infinity, ease: [0.4, 0, 0.2, 1], repeatDelay: 0.3 }}
             />

@@ -1347,7 +1347,7 @@ class OpenAICompatibleClient:
         *,
         attempt: int,
         attempts: int,
-        error_message: str,
+        error_message: object,
     ) -> None:
         if on_reasoning_delta is None:
             return
@@ -1356,7 +1356,7 @@ class OpenAICompatibleClient:
         if retry_number > max_retries:
             return
         delay = self._retry_delay_seconds(attempt)
-        compact_error = " ".join(error_message.split())
+        compact_error = " ".join(str(error_message).split())
         if len(compact_error) > 800:
             compact_error = f"{compact_error[:800].rstrip()}..."
         on_reasoning_delta(
@@ -1381,10 +1381,15 @@ class OpenAICompatibleClient:
             BrokenPipeError,
         )
 
-    def _format_connection_error(self, exc: BaseException) -> object:
+    def _format_connection_error(self, exc: BaseException) -> str:
         if isinstance(exc, error.URLError):
-            return exc.reason
-        return exc
+            reason = exc.reason
+            if isinstance(reason, BaseException):
+                return self._format_connection_error(reason)
+            return str(reason)
+        message = str(exc).strip()
+        exc_name = type(exc).__name__
+        return f"{exc_name}: {message}" if message else exc_name
 
     def _should_fallback_to_non_tool_calling(self, status_code: int, error_body: str) -> bool:
         if status_code not in {400, 404, 405, 415, 422, 501}:

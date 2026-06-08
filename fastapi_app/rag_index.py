@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import re
 import sqlite3
 import threading
@@ -68,6 +67,7 @@ MAX_STRUCTURAL_CHUNK_CHARS = 12_000
 EMBEDDING_BATCH_SIZE = 16
 BACKGROUND_MAX_FILES_PER_RUN = 400
 CHUNKER_VERSION = "tree-sitter-v1"
+RAG_SCHEMA_VERSION = "sqlite-vec-v1"
 
 LANGUAGE_BY_EXTENSION = {
     ".css": "css",
@@ -122,6 +122,10 @@ CONTROL_FLOW_WORDS = {
 
 _BACKGROUND_LOCK = threading.Lock()
 _BACKGROUND_KEYS: set[str] = set()
+
+
+class RagIndexUnavailable(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,6 +187,7 @@ def test_embedding_config(raw_config: dict[str, Any]) -> dict[str, Any]:
     if not config.model:
         raise ValueError("Embedding Model 不能为空。")
 
+    _require_sqlite_vec()
     index = RagCodeIndex(Path.cwd(), Path.cwd(), config)
     embeddings = index._embed_texts(["SuperCode embedding connectivity test"])
     if not embeddings:
@@ -197,6 +202,10 @@ def test_embedding_config(raw_config: dict[str, Any]) -> dict[str, Any]:
 def schedule_workspace_rag_index(app_root: Path, workspace: str | Path) -> None:
     config = load_embedding_config(app_root)
     if not config.is_configured:
+        return
+    try:
+        _require_sqlite_vec()
+    except RagIndexUnavailable:
         return
 
     workspace_path = Path(workspace).resolve()
@@ -232,7 +241,6 @@ def search_workspace_rag(
         return []
 
     index = RagCodeIndex(app_root, Path(workspace).resolve(), config)
-    index.ensure_index(max_changed_files=24)
     return index.search(query, search_path=search_path, limit=limit)
 
 
@@ -246,13 +254,24 @@ class RagCodeIndex:
     def ensure_index(self, *, max_changed_files: int | None = None) -> None:
         if not self.config.is_configured or not self.workspace.exists():
             return
+        _require_sqlite_vec()
 
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as connection:
+        connection = self._connect()
+        try:
             self._init_db(connection)
             known_files = self._load_known_files(connection)
+            force_reindex = (
+                self._get_meta(connection, "schema_version") != RAG_SCHEMA_VERSION
+                or (
+                    bool(self._get_meta(connection, "model"))
+                    and self._get_meta(connection, "model") != self.config.model
+                )
+            )
+            if force_reindex:
+                known_files = {}
             current_files = list(self._iter_indexable_files())
-            current_paths = {path for path, _, _, _ in current_files}
+            current_paths = {path for path, _, _, _, _ in current_files}
             self._remove_deleted_files(connection, set(known_files) - current_paths)
 
             changed: list[tuple[str, Path, int, int, str]] = []
@@ -266,52 +285,96 @@ class RagCodeIndex:
 
             for relative_path, absolute_path, mtime_ns, size, digest in changed:
                 self._index_file(connection, relative_path, absolute_path, mtime_ns, size, digest)
+            connection.commit()
+        finally:
+            connection.close()
 
     def search(self, query: str, *, search_path: str = ".", limit: int = 8) -> list[RagSearchMatch]:
         query = query.strip()
         if not query:
             return []
+        _require_sqlite_vec()
 
         query_embedding = self._embed_texts([query])
         if not query_embedding:
             return []
 
         normalized_prefix = self._normalize_search_path(search_path)
-        matches: list[RagSearchMatch] = []
-        with self._connect() as connection:
+        connection = self._connect()
+        try:
             self._init_db(connection)
+            if not self._vectors_ready(connection, len(query_embedding[0])):
+                return []
+            scoped_rowids = self._scoped_rowids(connection, normalized_prefix)
+            if normalized_prefix and not scoped_rowids:
+                return []
+            matches: list[RagSearchMatch] = []
+            query_sql = """
+                    SELECT
+                        chunks.path,
+                        chunks.start_line,
+                        chunks.end_line,
+                        chunks.content,
+                        chunks.kind,
+                        chunks.symbol,
+                        chunks.language,
+                        chunk_vectors.distance
+                    FROM chunk_vectors
+                    JOIN chunks ON chunks.rowid = chunk_vectors.rowid
+                    WHERE chunk_vectors.embedding MATCH ?
+                        AND k = ?
+                    ORDER BY chunk_vectors.distance
+                    """
+            if scoped_rowids is not None:
+                self._load_scope_table(connection, scoped_rowids)
+                query_sql = """
+                    SELECT
+                        chunks.path,
+                        chunks.start_line,
+                        chunks.end_line,
+                        chunks.content,
+                        chunks.kind,
+                        chunks.symbol,
+                        chunks.language,
+                        chunk_vectors.distance
+                    FROM chunk_vectors
+                    JOIN chunks ON chunks.rowid = chunk_vectors.rowid
+                    WHERE chunk_vectors.embedding MATCH ?
+                        AND k = ?
+                        AND chunk_vectors.rowid IN (SELECT rowid FROM temp.rag_scope)
+                    ORDER BY chunk_vectors.distance
+                    """
+            search_k = min(
+                max(32, limit * 16),
+                max(1, len(scoped_rowids) if scoped_rowids is not None else 10_000),
+            )
             for row in connection.execute(
-                """
-                SELECT path, start_line, end_line, content, embedding
-                    , kind, symbol, language
-                FROM chunks
-                WHERE (? = '' OR path = ? OR path LIKE ?)
-                """,
-                (normalized_prefix, normalized_prefix, f"{normalized_prefix}/%"),
+                    query_sql,
+                    (_serialize_float32(query_embedding[0]), search_k),
             ):
-                embedding = _parse_embedding(row["embedding"])
-                score = _cosine_similarity(query_embedding[0], embedding)
-                if score <= 0:
-                    continue
+                path = str(row["path"])
                 matches.append(
                     RagSearchMatch(
-                        path=str(row["path"]),
+                        path=path,
                         start_line=int(row["start_line"]),
                         end_line=int(row["end_line"]),
-                        score=score,
+                        score=1.0 / (1.0 + max(0.0, float(row["distance"]))),
                         content=str(row["content"]),
                         kind=str(row["kind"] or "text"),
                         symbol=str(row["symbol"] or ""),
                         language=str(row["language"] or ""),
                     )
                 )
-
-        matches.sort(key=lambda item: item.score, reverse=True)
+                if len(matches) >= limit * 2:
+                    break
+        finally:
+            connection.close()
         return _dedupe_matches(matches, limit=max(1, limit))
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path, timeout=30)
         connection.row_factory = sqlite3.Row
+        _load_sqlite_vec(connection)
         return connection
 
     def _init_db(self, connection: sqlite3.Connection) -> None:
@@ -330,14 +393,22 @@ class RagCodeIndex:
         self._ensure_file_columns(connection)
         connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """
+        )
+        self._drop_legacy_chunks_table(connection)
+        connection.execute(
+            """
             CREATE TABLE IF NOT EXISTS chunks (
-                id TEXT PRIMARY KEY,
+                id TEXT NOT NULL UNIQUE,
                 path TEXT NOT NULL,
                 start_line INTEGER NOT NULL,
                 end_line INTEGER NOT NULL,
                 content TEXT NOT NULL,
                 content_hash TEXT NOT NULL,
-                embedding TEXT NOT NULL,
                 kind TEXT NOT NULL DEFAULT 'text',
                 symbol TEXT NOT NULL DEFAULT '',
                 language TEXT NOT NULL DEFAULT ''
@@ -382,7 +453,7 @@ class RagCodeIndex:
 
     def _remove_deleted_files(self, connection: sqlite3.Connection, deleted_paths: set[str]) -> None:
         for path in deleted_paths:
-            connection.execute("DELETE FROM chunks WHERE path = ?", (path,))
+            self._delete_chunks_for_path(connection, path)
             connection.execute("DELETE FROM files WHERE path = ?", (path,))
 
     def _iter_indexable_files(self) -> list[tuple[str, Path, int, int, str]]:
@@ -433,6 +504,16 @@ class RagCodeIndex:
             for chunk in chunks
             if chunk.content.strip()
         ]
+        if not chunk_payloads:
+            self._delete_chunks_for_path(connection, relative_path)
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO files(path, mtime_ns, size, sha256, indexed_at, chunker_version)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (relative_path, mtime_ns, size, digest, time.time(), CHUNKER_VERSION),
+            )
+            return
         embeddings = self._embed_texts(
             [
                 "\n".join(
@@ -450,15 +531,21 @@ class RagCodeIndex:
             ]
         )
         if len(embeddings) != len(chunk_payloads):
+            self._delete_chunks_for_path(connection, relative_path)
+            connection.execute("DELETE FROM files WHERE path = ?", (relative_path,))
             return
 
-        connection.execute("DELETE FROM chunks WHERE path = ?", (relative_path,))
+        dimension = len(embeddings[0]) if embeddings else 0
+        if not self._ensure_vector_table(connection, dimension):
+            return
+
+        self._delete_chunks_for_path(connection, relative_path)
         for payload, embedding in zip(chunk_payloads, embeddings):
-            connection.execute(
+            cursor = connection.execute(
                 """
                 INSERT OR REPLACE INTO chunks
-                    (id, path, start_line, end_line, content, content_hash, embedding, kind, symbol, language)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, path, start_line, end_line, content, content_hash, kind, symbol, language)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     payload["id"],
@@ -467,11 +554,14 @@ class RagCodeIndex:
                     payload["end_line"],
                     payload["content"],
                     payload["content_hash"],
-                    json.dumps(embedding, separators=(",", ":")),
                     payload["kind"],
                     payload["symbol"],
                     payload["language"],
                 ),
+            )
+            connection.execute(
+                "INSERT INTO chunk_vectors(rowid, embedding) VALUES (?, ?)",
+                (cursor.lastrowid, _serialize_float32(embedding)),
             )
         connection.execute(
             """
@@ -480,6 +570,116 @@ class RagCodeIndex:
             """,
             (relative_path, mtime_ns, size, digest, time.time(), CHUNKER_VERSION),
         )
+
+    def _ensure_vector_table(self, connection: sqlite3.Connection, dimension: int) -> bool:
+        if dimension <= 0:
+            return False
+        current_schema = self._get_meta(connection, "schema_version")
+        current_model = self._get_meta(connection, "model")
+        current_dimension = self._get_meta(connection, "dimension")
+        if (
+            current_schema == RAG_SCHEMA_VERSION
+            and current_model == self.config.model
+            and current_dimension == str(dimension)
+            and self._table_exists(connection, "chunk_vectors")
+        ):
+            return True
+
+        self._reset_chunks(connection)
+        connection.execute(
+            f"CREATE VIRTUAL TABLE chunk_vectors USING vec0(embedding float[{dimension}])"
+        )
+        self._set_meta(connection, "schema_version", RAG_SCHEMA_VERSION)
+        self._set_meta(connection, "model", self.config.model)
+        self._set_meta(connection, "dimension", str(dimension))
+        return True
+
+    def _vectors_ready(self, connection: sqlite3.Connection, dimension: int) -> bool:
+        return (
+            dimension > 0
+            and self._get_meta(connection, "schema_version") == RAG_SCHEMA_VERSION
+            and self._get_meta(connection, "model") == self.config.model
+            and self._get_meta(connection, "dimension") == str(dimension)
+            and self._table_exists(connection, "chunk_vectors")
+        )
+
+    def _delete_chunks_for_path(self, connection: sqlite3.Connection, path: str) -> None:
+        rowids = [
+            int(row["rowid"])
+            for row in connection.execute("SELECT rowid FROM chunks WHERE path = ?", (path,))
+        ]
+        if rowids and self._table_exists(connection, "chunk_vectors"):
+            connection.executemany(
+                "DELETE FROM chunk_vectors WHERE rowid = ?",
+                [(rowid,) for rowid in rowids],
+            )
+        connection.execute("DELETE FROM chunks WHERE path = ?", (path,))
+
+    def _scoped_rowids(self, connection: sqlite3.Connection, normalized_prefix: str) -> list[int] | None:
+        if not normalized_prefix:
+            return None
+        return [
+            int(row["rowid"])
+            for row in connection.execute(
+                """
+                SELECT rowid
+                FROM chunks
+                WHERE path = ? OR path LIKE ?
+                """,
+                (normalized_prefix, f"{normalized_prefix}/%"),
+            )
+        ]
+
+    def _load_scope_table(self, connection: sqlite3.Connection, rowids: list[int]) -> None:
+        connection.execute("DROP TABLE IF EXISTS temp.rag_scope")
+        connection.execute("CREATE TEMP TABLE rag_scope(rowid INTEGER PRIMARY KEY)")
+        connection.executemany(
+            "INSERT INTO temp.rag_scope(rowid) VALUES (?)",
+            [(rowid,) for rowid in rowids],
+        )
+
+    def _reset_chunks(self, connection: sqlite3.Connection) -> None:
+        if self._table_exists(connection, "chunk_vectors"):
+            connection.execute("DROP TABLE chunk_vectors")
+        connection.execute("DELETE FROM chunks")
+        connection.execute("DELETE FROM files")
+        connection.execute("DELETE FROM meta WHERE key IN ('schema_version', 'model', 'dimension')")
+
+    def _drop_legacy_chunks_table(self, connection: sqlite3.Connection) -> None:
+        existing_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(chunks)").fetchall()
+        }
+        if "embedding" not in existing_columns:
+            return
+        if self._table_exists(connection, "chunk_vectors"):
+            connection.execute("DROP TABLE chunk_vectors")
+        connection.execute("DROP TABLE chunks")
+        connection.execute("DELETE FROM files")
+        connection.execute("DELETE FROM meta WHERE key IN ('schema_version', 'model', 'dimension')")
+
+    def _get_meta(self, connection: sqlite3.Connection, key: str) -> str:
+        row = connection.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return str(row["value"]) if row is not None else ""
+
+    def _set_meta(self, connection: sqlite3.Connection, key: str, value: str) -> None:
+        connection.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            (key, value),
+        )
+
+    def _table_exists(self, connection: sqlite3.Connection, table_name: str) -> bool:
+        row = connection.execute(
+            """
+            SELECT 1
+            FROM sqlite_master
+            WHERE name = ?
+                AND type IN ('table', 'virtual table', 'shadow table')
+            LIMIT 1
+            """,
+            (table_name,),
+        ).fetchone()
+        return row is not None
 
     def _embed_texts(self, texts: list[str]) -> list[list[float]]:
         embeddings: list[list[float]] = []
@@ -540,6 +740,39 @@ class RagCodeIndex:
 
 def _workspace_key(workspace: Path) -> str:
     return hashlib.sha256(str(workspace.resolve()).encode("utf-8")).hexdigest()
+
+
+def _require_sqlite_vec() -> None:
+    try:
+        import sqlite_vec  # type: ignore
+    except ImportError as exc:
+        raise RagIndexUnavailable(
+            "缺少 sqlite-vec 依赖，请在 conda base 环境安装 fastapi_app/requirements.txt。"
+        ) from exc
+
+
+def _load_sqlite_vec(connection: sqlite3.Connection) -> None:
+    try:
+        import sqlite_vec  # type: ignore
+    except ImportError as exc:
+        raise RagIndexUnavailable(
+            "缺少 sqlite-vec 依赖，请在 conda base 环境安装 fastapi_app/requirements.txt。"
+        ) from exc
+    try:
+        connection.enable_load_extension(True)
+        sqlite_vec.load(connection)
+    finally:
+        connection.enable_load_extension(False)
+
+
+def _serialize_float32(vector: list[float]) -> bytes:
+    try:
+        import sqlite_vec  # type: ignore
+    except ImportError as exc:
+        raise RagIndexUnavailable(
+            "缺少 sqlite-vec 依赖，请在 conda base 环境安装 fastapi_app/requirements.txt。"
+        ) from exc
+    return sqlite_vec.serialize_float32(vector)
 
 
 def _embedding_endpoint(base_url: str) -> str:
@@ -1103,27 +1336,6 @@ def _chunk_by_line_windows(lines: list[str], language: str) -> list[CodeChunk]:
         if end_index >= len(lines):
             break
     return chunks
-
-
-def _parse_embedding(value: str) -> list[float]:
-    try:
-        raw = json.loads(value)
-    except json.JSONDecodeError:
-        return []
-    if not isinstance(raw, list):
-        return []
-    return [float(item) for item in raw if isinstance(item, (int, float))]
-
-
-def _cosine_similarity(left: list[float], right: list[float]) -> float:
-    if not left or not right or len(left) != len(right):
-        return 0.0
-    dot = sum(a * b for a, b in zip(left, right))
-    left_norm = math.sqrt(sum(a * a for a in left))
-    right_norm = math.sqrt(sum(b * b for b in right))
-    if left_norm <= 0 or right_norm <= 0:
-        return 0.0
-    return dot / (left_norm * right_norm)
 
 
 def _dedupe_matches(matches: list[RagSearchMatch], *, limit: int) -> list[RagSearchMatch]:

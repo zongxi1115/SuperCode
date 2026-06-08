@@ -40,6 +40,13 @@ const useContextValue = () => {
   return context;
 };
 
+function clampPercent(value: number) {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.min(Math.max(value, 0), 1);
+}
+
 export type ContextProps = ComponentProps<typeof HoverCard> & ContextSchema;
 
 export const Context = ({
@@ -64,7 +71,7 @@ export const Context = ({
 const ContextIcon = () => {
   const { usedTokens, maxTokens } = useContextValue();
   const circumference = 2 * Math.PI * ICON_RADIUS;
-  const usedPercent = usedTokens / maxTokens;
+  const usedPercent = clampPercent(usedTokens / maxTokens);
   const dashOffset = circumference * (1 - usedPercent);
 
   return (
@@ -106,7 +113,7 @@ export type ContextTriggerProps = ComponentProps<typeof Button>;
 
 export const ContextTrigger = ({ children, ...props }: ContextTriggerProps) => {
   const { usedTokens, maxTokens } = useContextValue();
-  const usedPercent = usedTokens / maxTokens;
+  const usedPercent = clampPercent(usedTokens / maxTokens);
   const renderedPercent = new Intl.NumberFormat("en-US", {
     maximumFractionDigits: 1,
     style: "percent",
@@ -146,7 +153,7 @@ export const ContextContentHeader = ({
   ...props
 }: ContextContentHeaderProps) => {
   const { usedTokens, maxTokens } = useContextValue();
-  const usedPercent = usedTokens / maxTokens;
+  const usedPercent = clampPercent(usedTokens / maxTokens);
   const displayPct = new Intl.NumberFormat("en-US", {
     maximumFractionDigits: 1,
     style: "percent",

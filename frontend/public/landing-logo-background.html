@@ -1,0 +1,678 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Logo Recursive Self-Improvement Animation</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --paper: #000000;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: var(--paper);
+    }
+
+    .spark-canvas {
+      position: fixed;
+      inset: 0;
+      display: block;
+      width: 100vw;
+      height: 100svh;
+    }
+  </style>
+</head>
+<body>
+  <canvas class="spark-canvas" id="sparkCanvas" aria-hidden="true"></canvas>
+
+  <script>
+    (() => {
+      const canvas = document.getElementById("sparkCanvas");
+      const ctx = canvas.getContext("2d", { alpha: true, willReadFrequently: false });
+      const TILE_COLORS = ["#00A7FF", "#069BFF", "#008BF5", "#17B6FF", "#028CFF", "#31C4FF"];
+      const SOLID_COLORS = ["#008EF8", "#009DFF", "#007FEA", "#18B8FF"];
+      const WHITE_TILE_COLORS = ["#FFFFFF", "#F6F8FA", "#E9EEF5", "#FDFDFD"];
+      const WHITE_SOLID_COLORS = ["#FFFFFF", "#F2F5F9", "#E8EDF4", "#FAFAFA"];
+      const LOGO_PATHS = [
+        { part: "blue", d: "M 655 256 C 666 256 674 259 684 265 L 729 293 C 744 302 745 319 731 328 L 479 493 C 459 506 459 516 478 529 L 574 592 C 584 599 588 611 588 624 L 588 671 C 588 684 574 691 562 684 L 391 576 C 373 565 363 547 363 526 L 363 468 C 363 449 373 431 390 420 L 626 265 C 636 259 645 256 655 256 Z" },
+        { part: "blue", d: "M 628 459 C 618 459 611 467 611 478 L 611 536 C 611 554 620 570 637 581 L 797 686 C 813 697 813 714 797 725 L 489 892 C 480 897 479 911 489 918 L 557 959 C 570 967 586 966 599 956 L 868 759 C 890 743 899 721 897 694 L 897 646 C 896 624 885 606 867 594 L 642 464 C 637 461 633 459 628 459 Z" },
+        { part: "white", d: "M 623 610 C 616 606 610 611 610 619 L 610 635 L 648 658 L 610 683 L 610 700 C 610 708 617 712 624 708 L 688 670 C 697 665 697 654 688 649 L 623 610 Z" },
+      ];
+      const LOGO_BOUNDS = { minX: 363, minY: 256, maxX: 899, maxY: 967 };
+      const LOGO_FIT = 0.9;
+      const LOGO_SCALE = LOGO_FIT / Math.max(LOGO_BOUNDS.maxX - LOGO_BOUNDS.minX, LOGO_BOUNDS.maxY - LOGO_BOUNDS.minY);
+      const LOGO_OFFSET_X = (1 - (LOGO_BOUNDS.maxX - LOGO_BOUNDS.minX) * LOGO_SCALE) / 2 - LOGO_BOUNDS.minX * LOGO_SCALE;
+      const LOGO_OFFSET_Y = (1 - (LOGO_BOUNDS.maxY - LOGO_BOUNDS.minY) * LOGO_SCALE) / 2 - LOGO_BOUNDS.minY * LOGO_SCALE;
+      const LOGO_MATRIX = new DOMMatrix([LOGO_SCALE, 0, 0, LOGO_SCALE, LOGO_OFFSET_X, LOGO_OFFSET_Y]);
+      const NORMALIZED_LOGO_PATHS = LOGO_PATHS.map((item) => {
+        const raw = new Path2D(item.d);
+        const path = new Path2D();
+        path.addPath(raw, LOGO_MATRIX);
+        return { part: item.part, path };
+      });
+      const state = {
+        running: true,
+        width: 0,
+        height: 0,
+        dpr: 1,
+        baseScale: 1,
+        centerX: 0,
+        centerY: 0,
+        cycle: 0,
+        phaseCycles: 3,
+        cells: new Map(),
+        agents: [],
+        lastTick: 0,
+        startedAt: 0,
+        doneAt: 0,
+        ticks: 0,
+        zoom: 0,
+        zoomVelocity: 0,
+        lastFrameTime: 0,
+        raf: 0,
+      };
+
+      const palette = {
+        paper: "#000000",
+        grid: "#063558",
+      };
+
+      function mulberry32(seed) {
+        return function random() {
+          seed |= 0;
+          seed = seed + 0x6d2b79f5 | 0;
+          let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+          t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+          return ((t ^ t >>> 14) >>> 0) / 4294967296;
+        };
+      }
+
+      function clamp(value, min = 0, max = 1) {
+        return Math.max(min, Math.min(max, value));
+      }
+
+      function easeOutCubic(value) {
+        return 1 - Math.pow(1 - clamp(value), 3);
+      }
+
+      function makeCanvas(size) {
+        const item = document.createElement("canvas");
+        item.width = size;
+        item.height = size;
+        return item;
+      }
+
+      function roundedPath(context, x, y, width, height, radius) {
+        const r = Math.min(radius, width / 2, height / 2);
+        context.beginPath();
+        context.moveTo(x + r, y);
+        context.lineTo(x + width - r, y);
+        context.quadraticCurveTo(x + width, y, x + width, y + r);
+        context.lineTo(x + width, y + height - r);
+        context.quadraticCurveTo(x + width, y + height, x + width - r, y + height);
+        context.lineTo(x + r, y + height);
+        context.quadraticCurveTo(x, y + height, x, y + height - r);
+        context.lineTo(x, y + r);
+        context.quadraticCurveTo(x, y, x + r, y);
+        context.closePath();
+      }
+
+      function renderLogoMask(part) {
+        const mask = makeCanvas(152);
+        const maskContext = mask.getContext("2d", { willReadFrequently: true });
+        maskContext.save();
+        maskContext.scale(152, 152);
+        maskContext.fillStyle = "#000";
+        for (const item of NORMALIZED_LOGO_PATHS) {
+          if (item.part === part) maskContext.fill(item.path);
+        }
+        maskContext.restore();
+        return maskContext.getImageData(0, 0, 152, 152).data;
+      }
+
+      function buildShapeCells() {
+        const bluePixels = renderLogoMask("blue");
+        const whitePixels = renderLogoMask("white");
+        const cells = [];
+        for (let row = 0; row < 19; row += 1) {
+          for (let col = 0; col < 19; col += 1) {
+            let blue = 0;
+            let white = 0;
+            for (let py = 0; py < 8; py += 1) {
+              for (let px = 0; px < 8; px += 1) {
+                const offset = ((row * 8 + py) * 152 + (col * 8 + px)) * 4 + 3;
+                if (bluePixels[offset] > 8) blue += 1;
+                if (whitePixels[offset] > 8) white += 1;
+              }
+            }
+            if (white >= 4 || blue >= 6) {
+              const dx = col - 9;
+              const dy = row - 9;
+              const part = white >= 4 ? "white" : "blue";
+              cells.push({ idx: row * 19 + col, gx: col, gy: row, dist: Math.hypot(dx, dy), part });
+            }
+          }
+        }
+        cells.sort((a, b) => a.dist - b.dist || a.idx - b.idx);
+        return cells;
+      }
+
+      const shapeCells = buildShapeCells();
+      const shapeSet = new Set(shapeCells.map((cell) => cell.idx));
+      const shapeByIndex = new Map(shapeCells.map((cell) => [cell.idx, cell]));
+      const totalReachable = shapeCells.length;
+      let random = mulberry32(0xc1a0de);
+      const textures = {
+        blue: Array.from({ length: 12 }, (_, index) => makeTexture(index + 1, "blue")),
+        white: Array.from({ length: 8 }, (_, index) => makeTexture(index + 101, "white")),
+      };
+      const tileSprites = {
+        blue: Array.from({ length: 8 }, (_, index) => makeTileSet(index + 1, "blue")),
+        white: Array.from({ length: 8 }, (_, index) => makeTileSet(index + 101, "white")),
+      };
+      const agentSprite = makeMipMaps(makeGridSprite(608, shapeCells, shapeCells.length, 199, "blue"));
+      const zoomSpan = Math.log(19 / 0.78);
+
+      function neighbors(idx) {
+        const col = idx % 19;
+        const row = Math.floor(idx / 19);
+        const result = [];
+        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const nextCol = col + dx;
+          const nextRow = row + dy;
+          const next = nextRow * 19 + nextCol;
+          if (nextCol >= 0 && nextRow >= 0 && nextCol < 19 && nextRow < 19 && shapeSet.has(next)) {
+            result.push(next);
+          }
+        }
+        return result;
+      }
+
+      function buildComponents() {
+        const unvisited = new Set(shapeCells.map((cell) => cell.idx));
+        const components = [];
+        while (unvisited.size) {
+          const first = unvisited.values().next().value;
+          const queue = [first];
+          const component = [];
+          unvisited.delete(first);
+          for (let head = 0; head < queue.length; head += 1) {
+            const idx = queue[head];
+            component.push(idx);
+            for (const next of neighbors(idx)) {
+              if (unvisited.has(next)) {
+                unvisited.delete(next);
+                queue.push(next);
+              }
+            }
+          }
+          components.push(component);
+        }
+        return components;
+      }
+
+      const shapeComponents = buildComponents();
+      const componentSeeds = shapeComponents.map((component) => component
+        .map((idx) => shapeByIndex.get(idx))
+        .sort((a, b) => a.dist - b.dist || a.idx - b.idx)[0]
+      );
+
+      function makeTexture(seed, part = "blue") {
+        const rand = mulberry32(9301 * seed + 49297);
+        const colors = part === "white" ? WHITE_TILE_COLORS : TILE_COLORS;
+        const outline = part === "white" ? "#EAF2FF" : "#009CFF";
+        const tile = makeCanvas(128);
+        const tileContext = tile.getContext("2d");
+        tileContext.globalAlpha = 0.9;
+        tileContext.fillStyle = colors[Math.floor(rand() * colors.length)];
+        tileContext.fillRect(0, 0, 128, 128);
+
+        for (let i = 0; i < 5; i += 1) {
+          const x = 128 * rand();
+          const y = 128 * rand();
+          const radius = 128 * (0.25 + 0.35 * rand());
+          const gradient = tileContext.createRadialGradient(x, y, 0, x, y, radius);
+          gradient.addColorStop(0, colors[Math.floor(rand() * colors.length)]);
+          gradient.addColorStop(1, "rgba(0,0,0,0)");
+          tileContext.globalAlpha = 0.14 + 0.14 * rand();
+          tileContext.fillStyle = gradient;
+          tileContext.fillRect(0, 0, 128, 128);
+        }
+
+        tileContext.globalAlpha = 0.07;
+        for (let i = 0; i < 220; i += 1) {
+          const size = 1 + 2 * rand();
+          tileContext.fillStyle = colors[Math.floor(rand() * colors.length)];
+          tileContext.fillRect(128 * rand(), 128 * rand(), size, size);
+        }
+
+        tileContext.globalAlpha = 0.14;
+        tileContext.strokeStyle = outline;
+        tileContext.lineWidth = 6.4;
+        tileContext.shadowColor = outline;
+        tileContext.shadowBlur = 12.8;
+        roundedPath(tileContext, 8.96, 8.96, 110.08, 110.08, 25.6);
+        tileContext.stroke();
+        tileContext.shadowBlur = 0;
+        tileContext.globalAlpha = 1;
+
+        tileContext.globalCompositeOperation = "destination-in";
+        tileContext.fillStyle = "#000";
+        tileContext.beginPath();
+        const wobbleA = rand() * Math.PI * 2;
+        const wobbleB = rand() * Math.PI * 2;
+        const wobbleC = rand() * Math.PI * 2;
+        for (let step = 0; step <= 56; step += 1) {
+          const angle = step / 56 * Math.PI * 2;
+          const cos = Math.cos(angle);
+          const sin = Math.sin(angle);
+          const squareRadius = 1 / Math.pow(cos ** 4 + sin ** 4, 0.25);
+          const radius = squareRadius * 58.88 * (1 + 0.03 * Math.sin(3 * angle + wobbleA) + 0.018 * Math.sin(7 * angle + wobbleB) + 0.01 * Math.sin(11 * angle + wobbleC));
+          const x = 64 + cos * radius;
+          const y = 64 + sin * radius;
+          if (step === 0) tileContext.moveTo(x, y);
+          else tileContext.lineTo(x, y);
+        }
+        tileContext.closePath();
+        tileContext.fill();
+        tileContext.globalCompositeOperation = "source-over";
+        return tile;
+      }
+
+      function makeMipMaps(source) {
+        const levels = [source];
+        let current = source;
+        while (current.width > 38) {
+          const nextSize = Math.max(19, current.width >> 1);
+          const next = makeCanvas(nextSize);
+          const nextContext = next.getContext("2d");
+          nextContext.imageSmoothingEnabled = true;
+          nextContext.imageSmoothingQuality = "high";
+          nextContext.drawImage(current, 0, 0, nextSize, nextSize);
+          levels.push(next);
+          current = next;
+        }
+        return levels;
+      }
+
+      function pickMipMap(levels, size) {
+        for (let i = levels.length - 1; i >= 0; i -= 1) {
+          if (levels[i].width >= size) return levels[i];
+        }
+        return levels[0];
+      }
+
+      function drawTexture(context, x, y, size, seed, part = "blue") {
+        const textureSet = textures[part] || textures.blue;
+        const texture = textureSet[seed % textureSet.length];
+        context.save();
+        context.translate(x + size / 2, y + size / 2);
+        context.scale((seed >> 4) & 1 ? -1 : 1, (seed >> 5) & 1 ? -1 : 1);
+        context.drawImage(texture, -size / 2, -size / 2, size, size);
+        context.restore();
+      }
+
+      function makeGridOrder(seed) {
+        const rand = mulberry32(0x9e3779b1 * seed >>> 0);
+        const index = (x, y) => 19 * y + x;
+        const added = new Set();
+        const cells = [];
+        const frontier = [];
+        const add = (x, y) => {
+          const idx = index(x, y);
+          if (added.has(idx)) return false;
+          added.add(idx);
+          cells.push({ gx: x, gy: y });
+          return true;
+        };
+        const addFrontier = (x, y) => {
+          for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+            const nextX = x + dx;
+            const nextY = y + dy;
+            if (nextX >= 0 && nextY >= 0 && nextX < 19 && nextY < 19 && !added.has(index(nextX, nextY))) {
+              frontier.push({ gx: nextX, gy: nextY });
+            }
+          }
+        };
+
+        add(9, 9);
+        for (let arm = 0; arm < 5 + Math.floor(3 * rand()); arm += 1) {
+          let x = 9;
+          let y = 9;
+          for (let step = 0; step < 38; step += 1) {
+            const options = [[1, 0], [-1, 0], [0, 1], [0, -1]].filter(([dx, dy]) => {
+              const nextX = x + dx;
+              const nextY = y + dy;
+              return nextX >= 0 && nextY >= 0 && nextX < 19 && nextY < 19 && !added.has(index(nextX, nextY));
+            });
+            if (!options.length) break;
+            let chosen = options[0];
+            let score = -Infinity;
+            for (const option of options) {
+              const optionScore = Math.hypot(x + option[0] - 9, y + option[1] - 9) + 1.2 * rand();
+              if (optionScore > score) {
+                score = optionScore;
+                chosen = option;
+              }
+            }
+            x += chosen[0];
+            y += chosen[1];
+            add(x, y);
+            if (x === 0 || y === 0 || x === 18 || y === 18) break;
+          }
+        }
+
+        for (const cell of cells) addFrontier(cell.gx, cell.gy);
+        while (cells.length < 361 && frontier.length) {
+          const picked = Math.floor(rand() * frontier.length);
+          const next = frontier[picked];
+          frontier[picked] = frontier[frontier.length - 1];
+          frontier.pop();
+          if (next && add(next.gx, next.gy)) addFrontier(next.gx, next.gy);
+        }
+        return cells;
+      }
+
+      function makeGridSprite(size, order, count, seed, part = "blue") {
+        const sprite = makeCanvas(size);
+        const spriteContext = sprite.getContext("2d");
+        const gap = size / 19;
+        const tileSize = 0.78 * gap;
+        const offset = (gap - tileSize) / 2;
+        for (let i = 0; i < count && i < order.length; i += 1) {
+          const cell = order[i];
+          const textureSeed = (0x466f45d * cell.gx ^ 0x127409f * cell.gy ^ 0x4f9ffb7 * seed) >>> 0;
+          drawTexture(spriteContext, cell.gx * gap + offset, cell.gy * gap + offset, tileSize, textureSeed, part);
+        }
+        spriteContext.globalCompositeOperation = "destination-in";
+        spriteContext.fillStyle = "#000";
+        roundedPath(spriteContext, 0, 0, size, size, 0.18 * size);
+        spriteContext.fill();
+        return sprite;
+      }
+
+      function makeSolidTile(seed, part = "blue") {
+        const rand = mulberry32(0x165667b1 * seed >>> 0);
+        const colors = part === "white" ? WHITE_SOLID_COLORS : SOLID_COLORS;
+        const tile = makeCanvas(152);
+        const tileContext = tile.getContext("2d");
+        roundedPath(tileContext, 0, 0, 152, 152, 27.36);
+        tileContext.fillStyle = colors[seed % colors.length];
+        tileContext.fill();
+        tileContext.save();
+        tileContext.clip();
+        for (let i = 0; i < 4; i += 1) {
+          const x = 152 * rand();
+          const y = 152 * rand();
+          const radius = 152 * (0.35 + 0.35 * rand());
+          const gradient = tileContext.createRadialGradient(x, y, 0, x, y, radius);
+          gradient.addColorStop(0, colors[Math.floor(rand() * colors.length)]);
+          gradient.addColorStop(1, "rgba(0,0,0,0)");
+          tileContext.globalAlpha = 0.22;
+          tileContext.fillStyle = gradient;
+          tileContext.fillRect(0, 0, 152, 152);
+        }
+        tileContext.restore();
+        tileContext.globalAlpha = 1;
+        return tile;
+      }
+
+      function makeTileSet(seed, part = "blue") {
+        const order = makeGridOrder(seed);
+        return {
+          full: makeMipMaps(makeGridSprite(608, order, 361, seed, part)),
+          flip: Array.from({ length: 8 }, (_, frame) => makeGridSprite(152, order, Math.ceil((frame + 1) / 8 * 361), seed, part)),
+          solid: makeSolidTile(seed, part),
+        };
+      }
+
+      function resetAnimation(time, final = false, restart = true) {
+        if (restart) {
+          random = mulberry32(0xc1a0de);
+          state.cycle = final ? state.phaseCycles - 1 : 0;
+          state.zoom = (state.cycle + (final ? 0.3 : -0.04)) * zoomSpan;
+          state.zoomVelocity = 0;
+        }
+        state.cells = new Map();
+        state.agents = [];
+        state.startedAt = time;
+        state.lastTick = time;
+        state.doneAt = 0;
+        state.ticks = 0;
+        state.lastFrameTime = time;
+        if (final) {
+          for (const cell of shapeCells) state.cells.set(cell.idx, time - 2400);
+          state.doneAt = time;
+        } else {
+          for (const seed of componentSeeds) spawnAgent(seed.idx, time, true);
+        }
+      }
+
+      function spawnAgent(idx, time, instant = false) {
+        state.agents.push({ idx, prev: idx, since: time, bornAt: instant ? -Infinity : time, dieAt: 0 });
+      }
+
+      function frontierCells(liveSet) {
+        const frontier = [];
+        const seen = new Set();
+        for (const idx of state.cells.keys()) {
+          for (const next of neighbors(idx)) {
+            if (!state.cells.has(next) && !liveSet.has(next) && !seen.has(next)) {
+              seen.add(next);
+              frontier.push(next);
+            }
+          }
+        }
+        return frontier;
+      }
+
+      function advanceGrowth(time) {
+        if (state.doneAt) return;
+        while (time - state.lastTick >= 450) {
+          state.lastTick += 450;
+          state.ticks += 1;
+          const tickTime = state.lastTick;
+          const liveSet = new Set(state.agents.filter((agent) => !agent.dieAt).map((agent) => agent.idx));
+          const nextAgents = [];
+
+          for (const agent of state.agents) {
+            if (agent.dieAt) {
+              if (tickTime - agent.dieAt < 350) nextAgents.push(agent);
+              continue;
+            }
+
+            const options = neighbors(agent.idx).filter((idx) => !state.cells.has(idx) && !liveSet.has(idx));
+            state.cells.set(agent.idx, tickTime);
+            if (!options.length) {
+              agent.dieAt = tickTime;
+              nextAgents.push(agent);
+              continue;
+            }
+
+            const next = options[Math.floor(random() * options.length)];
+            agent.prev = agent.idx;
+            agent.idx = next;
+            agent.since = tickTime;
+            liveSet.add(next);
+            nextAgents.push(agent);
+          }
+
+          state.agents = nextAgents;
+          const active = state.agents.filter((agent) => !agent.dieAt).length;
+          const frontier = frontierCells(liveSet);
+          const phaseCycle = state.cycle % state.phaseCycles;
+          const speed = 7 / (1 + 0.25 * phaseCycle);
+          const targetAgents = Math.min(48, Math.max(1, Math.floor((state.ticks / speed) ** 2)));
+          for (let count = active; count < targetAgents && frontier.length; count += 1) {
+            const picked = Math.floor(random() * frontier.length);
+            const idx = frontier[picked];
+            frontier[picked] = frontier[frontier.length - 1];
+            frontier.pop();
+            spawnAgent(idx, tickTime, false);
+            liveSet.add(idx);
+          }
+
+          if (!frontier.length && !state.agents.some((agent) => !agent.dieAt)) {
+            state.doneAt = tickTime;
+            break;
+          }
+        }
+      }
+
+      function resize() {
+        const rect = canvas.getBoundingClientRect();
+        state.dpr = Math.min(window.devicePixelRatio || 1, 2);
+        state.width = Math.max(1, Math.floor(rect.width));
+        state.height = Math.max(1, Math.floor(rect.height));
+        canvas.width = Math.floor(state.width * state.dpr);
+        canvas.height = Math.floor(state.height * state.dpr);
+        canvas.style.width = `${state.width}px`;
+        canvas.style.height = `${state.height}px`;
+        ctx.setTransform(state.dpr, 0, 0, state.dpr, 0, 0);
+        state.centerX = 0.74 * state.width;
+        state.centerY = 0.58 * state.height;
+        state.baseScale = 0.5 * Math.min(state.width, state.height);
+        draw(performance.now());
+      }
+
+      function drawGrid(originX, originY, spacing, opacity) {
+        if (spacing < 2 || (state.width / spacing + 2) * (state.height / spacing + 2) > 12000) return;
+        const visible = clamp((spacing - 2) / 7);
+        const alpha = (0.45 + 0.45 * Math.min(1, spacing / 90)) * opacity * visible;
+        if (alpha < 0.01) return;
+        const startX = ((originX + spacing / 2) % spacing + spacing) % spacing;
+        const startY = ((originY + spacing / 2) % spacing + spacing) % spacing;
+        ctx.fillStyle = palette.grid;
+        ctx.globalAlpha = alpha;
+        for (let y = startY; y <= state.height; y += spacing) {
+          for (let x = startX; x <= state.width; x += spacing) {
+            ctx.fillRect(x - 1, y - 1, 2, 2);
+          }
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      function cellPosition(idx, scale) {
+        const unit = scale / 19;
+        return [
+          state.centerX + 2 * unit * (idx % 19 - 9),
+          state.centerY + 2 * unit * (Math.floor(idx / 19) - 9),
+        ];
+      }
+
+      function drawSprite(sprite, x, y, size) {
+        if (size < 0.4) return;
+        ctx.drawImage(sprite, x - size / 2, y - size / 2, size, size);
+      }
+
+      function drawCells(time, scale) {
+        const unit = scale / 19;
+        if (unit < 0.4) return;
+        const size = 2 * unit * 0.78;
+        for (const [idx, born] of state.cells) {
+          const [x, y] = cellPosition(idx, scale);
+          const cell = shapeByIndex.get(idx);
+          const part = cell && cell.part === "white" ? "white" : "blue";
+          const spriteSet = tileSprites[part][idx % tileSprites[part].length];
+          const age = time - born;
+          if (age < 700) {
+            const frame = Math.min(7, Math.max(0, Math.floor(age / 700 * 8)));
+            drawSprite(spriteSet.flip[frame], x, y, size);
+          } else {
+            if (age < 2300) drawSprite(pickMipMap(spriteSet.full, size * state.dpr), x, y, size);
+            const solidAlpha = clamp((age - 700) / 1600);
+            if (solidAlpha > 0) {
+              ctx.globalAlpha = solidAlpha;
+              drawSprite(spriteSet.solid, x, y, size);
+              ctx.globalAlpha = 1;
+            }
+          }
+        }
+      }
+
+      function drawAgents(time, scale) {
+        const unit = scale / 19;
+        if (unit < 0.4) return;
+        for (const agent of state.agents) {
+          const travel = easeOutCubic((time - agent.since) / 450);
+          const [fromX, fromY] = cellPosition(agent.prev, scale);
+          const [toX, toY] = cellPosition(agent.idx, scale);
+          const x = fromX + (toX - fromX) * travel;
+          const y = fromY + (toY - fromY) * travel;
+          let alpha = 1;
+          if (agent.dieAt) alpha = Math.pow(1 - clamp((time - agent.dieAt) / 350), 2);
+          else alpha = 1 - Math.pow(1 - clamp((time - agent.bornAt) / 350), 3);
+          if (alpha <= 0) continue;
+          ctx.globalAlpha = alpha;
+          drawSprite(pickMipMap(agentSprite, 2 * unit * 0.78 * state.dpr), x, y, 2 * unit * 0.78);
+          ctx.globalAlpha = 1;
+        }
+      }
+
+      function updateZoom(time) {
+        const filled = clamp(state.cells.size / totalReachable);
+        const phaseTarget = -0.04 + 0.34 * filled;
+        const target = (state.cycle + (state.doneAt ? 1 : phaseTarget)) * zoomSpan;
+        const elapsed = state.lastFrameTime ? Math.min(50, time - state.lastFrameTime) : 16;
+        state.lastFrameTime = time;
+        const steps = Math.max(1, Math.ceil(elapsed / 12));
+        const step = elapsed / steps;
+        for (let i = 0; i < steps; i += 1) {
+          const force = 0.00000081 * (target - state.zoom) - 0.00153 * state.zoomVelocity;
+          state.zoomVelocity += force * step;
+          state.zoom += state.zoomVelocity * step;
+        }
+      }
+
+      function normalizeCycleWindow() {
+        if (state.cycle < 24) return;
+        const shift = 12;
+        state.cycle -= shift;
+        state.zoom -= shift * zoomSpan;
+      }
+
+      function draw(time = performance.now()) {
+        ctx.clearRect(0, 0, state.width, state.height);
+        ctx.fillStyle = palette.paper;
+        ctx.fillRect(0, 0, state.width, state.height);
+        updateZoom(time);
+        const scale = state.baseScale * Math.exp(state.cycle * zoomSpan - state.zoom);
+        const spacing = scale / 19 * 2;
+        drawGrid(state.centerX, state.centerY, spacing, 1);
+        drawGrid(state.centerX, state.centerY, 0.78 * spacing / 19, 1);
+        drawCells(time, scale);
+        drawAgents(time, scale);
+      }
+
+      function loop(time) {
+        advanceGrowth(time);
+        if (state.doneAt && time - state.doneAt >= 500) {
+          state.cycle += 1;
+          normalizeCycleWindow();
+          resetAnimation(time, false, false);
+        }
+        draw(time);
+        if (state.running) {
+          state.raf = requestAnimationFrame(loop);
+        }
+      }
+
+      window.addEventListener("resize", resize, { passive: true });
+
+      resize();
+      resetAnimation(performance.now(), false);
+      state.raf = requestAnimationFrame(loop);
+    })();
+  </script>
+</body>
+</html>
