@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,7 +25,7 @@ from urllib.request import Request, urlopen
 from agent.core import Agent
 from agent.llm_client import OpenAICompatibleClient
 from agent.rolling_text_buffer import RollingTextBuffer
-from agent.schema import AgentResponse, AgentState, StepRecord, ToolCall
+from agent.schema import AgentEvent, AgentResponse, AgentState, StepRecord, ToolCall, ToolResult
 from agent.tools import BaseTool, ToolContext
 from coding_agent.model import CodeExplorationPromptModel
 from fastapi_app.memory_store import remember_preference
@@ -2668,6 +2669,7 @@ class DelegateCodeExplorationTool(CodingBaseTool):
     """委派只读代码探索子智能体。"""
 
     name = "delegate_code_exploration"
+    supports_parallel = True
     description = (
         "委派一个只读代码探索子智能体查找相关模块、调用链、数据流和测试入口。"
         "参数：task 必填，focus_paths 可选路径数组，max_steps 可选默认 8。"
@@ -2698,22 +2700,45 @@ class DelegateCodeExplorationTool(CodingBaseTool):
             ),
             CODE_EXPLORATION_MAX_STEPS,
         )
+        subagent_id = f"code-exploration-{uuid.uuid4().hex[:10]}"
+        subagent_meta = self._build_subagent_meta(
+            context,
+            subagent_id=subagent_id,
+            task=task,
+        )
 
         snapshot = self._build_snapshot(
+            subagent_id=subagent_id,
             task=task,
             focus_paths=focus_paths,
             status="running",
             steps=[],
         )
+        snapshot = self._with_parent_metadata(snapshot, subagent_meta)
         self._emit_snapshot(context, snapshot)
+        self._emit_subagent_event(context, subagent_meta, "assistant_started")
 
         try:
             subagent = self._build_subagent(context, max_steps=max_steps)
             response = self._run_subagent(
+                context,
                 subagent,
                 task=self._build_subagent_task(task, focus_paths),
+                meta=subagent_meta,
             )
         except Exception as exc:  # noqa: BLE001 - 工具输出要把失败状态给 UI 展示
+            self._emit_subagent_event(
+                context,
+                subagent_meta,
+                "error",
+                {"message": str(exc)},
+            )
+            self._emit_subagent_event(
+                context,
+                subagent_meta,
+                "assistant_done",
+                {"final_output": "", "status": "error", "error": str(exc)},
+            )
             snapshot = {
                 **snapshot,
                 "status": "error",
@@ -2731,9 +2756,17 @@ class DelegateCodeExplorationTool(CodingBaseTool):
 
         final_snapshot = self._snapshot_from_response(
             response=response,
+            subagent_id=subagent_id,
             task=task,
             focus_paths=focus_paths,
             max_steps=max_steps,
+        )
+        final_snapshot = self._with_parent_metadata(final_snapshot, subagent_meta)
+        self._emit_subagent_event(
+            context,
+            subagent_meta,
+            "assistant_done",
+            {"final_output": final_snapshot["finalOutput"], "status": final_snapshot["status"]},
         )
         self._emit_snapshot(context, final_snapshot)
         return {
@@ -2746,6 +2779,36 @@ class DelegateCodeExplorationTool(CodingBaseTool):
             "recommended_files": final_snapshot["recommendedFiles"],
             "final_output": final_snapshot["finalOutput"],
             "data_part": {"type": "data-subagent-task", "data": final_snapshot},
+        }
+
+    def _build_subagent_meta(
+        self,
+        context: ToolContext,
+        *,
+        subagent_id: str,
+        task: str,
+    ) -> dict[str, Any]:
+        parent_tool_call_id = str(context.metadata.get("current_tool_call_id") or "").strip()
+        parent_assistant_id = str(context.metadata.get("runtime_assistant_id") or "").strip()
+        return {
+            "subagent_id": subagent_id,
+            "message_id": f"subagent-message-{subagent_id}",
+            "title": "代码探索",
+            "agent_type": "code_exploration",
+            "task": task,
+            "parent_tool_call_id": parent_tool_call_id or None,
+            "parent_assistant_id": parent_assistant_id or None,
+        }
+
+    def _with_parent_metadata(
+        self,
+        snapshot: dict[str, Any],
+        meta: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            **snapshot,
+            "parentToolCallId": meta.get("parent_tool_call_id"),
+            "parentAssistantId": meta.get("parent_assistant_id"),
         }
 
     def _normalize_focus_paths(self, raw_value: object) -> list[str]:
@@ -2810,18 +2873,30 @@ class DelegateCodeExplorationTool(CodingBaseTool):
         )
         return "\n".join(lines)
 
-    def _run_subagent(self, subagent: Agent, *, task: str) -> AgentResponse:
+    def _run_subagent(
+        self,
+        context: ToolContext,
+        subagent: Agent,
+        *,
+        task: str,
+        meta: dict[str, Any],
+    ) -> AgentResponse:
         state = AgentState(
             task="你是一个只读代码探索子智能体，请围绕主智能体委派的任务收集代码事实。",
             current_input=task,
             conversation_messages=[],
         )
-        return subagent.run_turn(state)
+
+        def on_event(event: AgentEvent) -> None:
+            self._emit_agent_event(context, meta, event)
+
+        return subagent.run_turn(state, on_event=on_event)
 
     def _snapshot_from_response(
         self,
         *,
         response: AgentResponse,
+        subagent_id: str,
         task: str,
         focus_paths: list[str],
         max_steps: int,
@@ -2845,6 +2920,7 @@ class DelegateCodeExplorationTool(CodingBaseTool):
             "",
         )
         return self._build_snapshot(
+            subagent_id=subagent_id,
             task=task,
             focus_paths=focus_paths,
             status=status,
@@ -2861,6 +2937,7 @@ class DelegateCodeExplorationTool(CodingBaseTool):
     def _build_snapshot(
         self,
         *,
+        subagent_id: str,
         task: str,
         focus_paths: list[str],
         status: str,
@@ -2873,8 +2950,10 @@ class DelegateCodeExplorationTool(CodingBaseTool):
         tool_names: list[str] | None = None,
         final_output: str = "",
     ) -> dict[str, Any]:
+        message_id = f"subagent-message-{subagent_id}"
         return {
-            "id": f"code-exploration-{abs(hash((task, tuple(focus_paths))))}",
+            "id": subagent_id,
+            "messageId": message_id,
             "kind": "code_exploration",
             "title": "代码探索",
             "agentType": "code_exploration",
@@ -3001,6 +3080,67 @@ class DelegateCodeExplorationTool(CodingBaseTool):
             emitter("data-subagent-task", {"data": snapshot})
         except TypeError:
             emitter("data-subagent-task", snapshot)
+
+    def _emit_agent_event(
+        self,
+        context: ToolContext,
+        meta: dict[str, Any],
+        event: AgentEvent,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "event": event.type,
+            "step_index": event.step_index,
+            "message": event.message,
+        }
+        if event.delta is not None:
+            payload["delta"] = event.delta
+        if event.thought is not None:
+            payload["thought"] = event.thought
+        if event.final_answer is not None:
+            payload["final_answer"] = event.final_answer
+        if event.usage is not None:
+            payload["usage"] = event.usage
+        if event.tool_call is not None:
+            payload["tool_call"] = self._tool_call_payload(event.tool_call)
+        if event.tool_result is not None:
+            payload["tool_result"] = self._tool_result_payload(event.tool_result)
+        self._emit_subagent_event(context, meta, event.type, payload)
+
+    def _emit_subagent_event(
+        self,
+        context: ToolContext,
+        meta: dict[str, Any],
+        event: str,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        emitter = context.metadata.get("runtime_event_emitter")
+        if not callable(emitter):
+            return
+        event_payload = {
+            **meta,
+            **(payload or {}),
+            "event": event,
+        }
+        try:
+            emitter("subagent_event", event_payload)
+        except TypeError:
+            emitter("data-subagent-event", {"data": event_payload})
+
+    def _tool_call_payload(self, tool_call: ToolCall) -> dict[str, Any]:
+        return {
+            "id": tool_call.id,
+            "name": tool_call.name,
+            "arguments": tool_call.arguments,
+        }
+
+    def _tool_result_payload(self, tool_result: ToolResult) -> dict[str, Any]:
+        return {
+            "name": tool_result.name,
+            "tool_call_id": tool_result.tool_call_id,
+            "output": tool_result.output,
+            "success": tool_result.success,
+            "error_message": tool_result.error_message,
+        }
 
 
 class WriteFileTool(CodingBaseTool):

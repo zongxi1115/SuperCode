@@ -37,7 +37,16 @@ class ToolExecutor:
         self.registry = registry
 
     def execute_tool(self, tool_call: ToolCall, context: ToolContext) -> ToolResult:
-        if self.is_cancelled(context):
+        tool_context = ToolContext(
+            workspace=context.workspace,
+            metadata={
+                **context.metadata,
+                "current_tool_call_id": tool_call.id,
+                "current_tool_name": tool_call.name,
+            },
+        )
+
+        if self.is_cancelled(tool_context):
             return ToolResult(
                 name=tool_call.name,
                 output=None,
@@ -57,7 +66,7 @@ class ToolExecutor:
             )
 
         try:
-            output = tool.run(tool_call.arguments, context)
+            output = tool.run(tool_call.arguments, tool_context)
             return ToolResult(
                 name=tool_call.name,
                 output=output,

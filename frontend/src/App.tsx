@@ -34,6 +34,7 @@ import type {
   SessionExecutionMode,
   SessionPayload,
   SkillSummary,
+  SubagentSnapshot,
   TerminalInfo,
   TerminalSnapshotPayload,
   ToolCallRecord,
@@ -459,6 +460,35 @@ class StreamHttpError extends Error {
     this.retryable = RETRYABLE_STREAM_STATUS.has(status);
   }
 }
+
+type SubagentStreamEvent = {
+  event?: string;
+  messageId?: string;
+  subagentId?: string;
+  title?: string;
+  agentType?: string;
+  task?: string;
+  parentToolCallId?: string | null;
+  parentAssistantId?: string | null;
+  stepIndex?: number | null;
+  message?: string;
+  delta?: string;
+  thought?: string;
+  finalAnswer?: string;
+  finalOutput?: string;
+  toolCall?: Partial<ToolCallRecord> | null;
+  toolResult?: {
+    name?: string;
+    tool_call_id?: string | null;
+    toolCallId?: string | null;
+    output?: unknown;
+    success?: boolean | null;
+    error_message?: string | null;
+    errorMessage?: string | null;
+  } | null;
+  status?: string;
+  error?: string | null;
+};
 
 function isAbortError(error: unknown) {
   return error instanceof DOMException && error.name === 'AbortError';
@@ -2193,9 +2223,40 @@ export default function App() {
     const abortController = new AbortController();
     activeRequestRef.current = abortController;
     activeStreamSessionIdRef.current = streamSessionId;
+    const requestStartedAt = Date.now();
+    const optimisticAssistantId =
+      initialAssistantId ??
+      `pending-assistant-${requestStartedAt}-${Math.random().toString(36).slice(2)}`;
+
+    if (currentSessionIdRef.current === streamSessionId) {
+      setMessages((prev) => {
+        if (initialAssistantId) {
+          return prev.map((message) =>
+            message.role === 'assistant' && message.id === initialAssistantId
+              ? { ...message, startTime: message.startTime ?? requestStartedAt }
+              : message,
+          );
+        }
+        if (prev.some((message) => message.id === optimisticAssistantId)) {
+          return prev;
+        }
+        return [
+          ...prev,
+          {
+            id: optimisticAssistantId,
+            role: 'assistant' as const,
+            content: '',
+            thoughts: '',
+            toolCalls: [],
+            parts: [],
+            startTime: requestStartedAt,
+          },
+        ];
+      });
+    }
 
     try {
-      const retryAssistantId = `retry-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const retryAssistantId = optimisticAssistantId;
       let retryThoughtText = '';
       let retryCount = 0;
       let completed = false;
@@ -2230,6 +2291,7 @@ export default function App() {
               thoughts: retryThoughtText,
               toolCalls: [],
               parts: [{ type: 'thinking' as const, text: retryThoughtText }],
+              startTime: requestStartedAt,
             },
           ];
         });
@@ -2257,11 +2319,25 @@ export default function App() {
           const reader = res.body.getReader();
           const decoder = new TextDecoder();
           let buffer = '';
-          let currentAssistantId = initialAssistantId ?? '';
+          let currentAssistantId = optimisticAssistantId;
           const toolNamesById = new Map<string, string>();
           const toolInputBuffersById = new Map<string, string>();
           const assistantTextById = new Map<string, string>();
           let hadStreamError = false;
+
+      const ensureMessageStartTime = (message: ChatMessage): ChatMessage => {
+        if (typeof message.startTime === 'number' && Number.isFinite(message.startTime)) {
+          return message;
+        }
+        const elapsedOffset =
+          typeof message.thinkingTime === 'number' && Number.isFinite(message.thinkingTime)
+            ? message.thinkingTime * 1000
+            : 0;
+        return {
+          ...message,
+          startTime: requestStartedAt - elapsedOffset,
+        };
+      };
 
       const pendingUpdates = new Map<string, ((message: ChatMessage) => ChatMessage)[]>();
       let rafHandle: number | null = null;
@@ -2279,7 +2355,7 @@ export default function App() {
           const next = prev.map((message) => {
             if (message.role === 'assistant' && updates.has(message.id)) {
               const updaters = updates.get(message.id)!;
-              let updated = message;
+              let updated = ensureMessageStartTime(message);
               for (const fn of updaters) {
                 updated = fn(updated);
               }
@@ -2290,7 +2366,7 @@ export default function App() {
           });
           for (const [id, updaters] of updates) {
             if (!next.some((m) => m.id === id)) {
-              let msg: ChatMessage = { id, role: 'assistant', content: '', thoughts: '', toolCalls: [], parts: [] };
+              let msg: ChatMessage = ensureMessageStartTime({ id, role: 'assistant', content: '', thoughts: '', toolCalls: [], parts: [] });
               for (const fn of updaters) {
                 msg = fn(msg);
               }
@@ -2334,6 +2410,53 @@ export default function App() {
         } else {
           scheduleFlush();
         }
+      };
+
+      const adoptAssistantId = (nextAssistantId: string) => {
+        const normalizedNextId = String(nextAssistantId || '').trim();
+        if (!normalizedNextId || normalizedNextId === currentAssistantId) {
+          return;
+        }
+        const previousAssistantId = currentAssistantId;
+        currentAssistantId = normalizedNextId;
+        const previousText = assistantTextById.get(previousAssistantId);
+        if (previousText !== undefined && !assistantTextById.has(normalizedNextId)) {
+          assistantTextById.set(normalizedNextId, previousText);
+        }
+        assistantTextById.delete(previousAssistantId);
+        if (!isVisibleStreamSession()) {
+          return;
+        }
+        setMessages((prev) => {
+          const hasNext = prev.some(
+            (message) => message.role === 'assistant' && message.id === normalizedNextId,
+          );
+          if (hasNext) {
+            return prev
+              .filter(
+                (message) =>
+                  !(message.role === 'assistant' && message.id === previousAssistantId),
+              )
+              .map((message) =>
+                message.role === 'assistant' && message.id === normalizedNextId
+                  ? { ...message, startTime: message.startTime ?? requestStartedAt }
+                  : message,
+              );
+          }
+          let renamed = false;
+          const next = prev.map((message) => {
+            if (message.role !== 'assistant' || message.id !== previousAssistantId) {
+              return message;
+            }
+            renamed = true;
+            return {
+              ...message,
+              id: normalizedNextId,
+              startTime: message.startTime ?? requestStartedAt,
+            };
+          });
+          return renamed ? next : prev;
+        });
       };
 
       const processEvent = async (eventStr: string) => {
@@ -2540,6 +2663,225 @@ export default function App() {
             }, immediate);
           };
 
+          const buildSubagentMetadata = (
+            event: Pick<
+              SubagentStreamEvent,
+              'subagentId' | 'parentToolCallId' | 'parentAssistantId' | 'title' | 'task'
+            >,
+          ) => ({
+            agentScope: 'subagent' as const,
+            subagentId: event.subagentId ?? null,
+            parentToolCallId: event.parentToolCallId ?? null,
+            parentAssistantId: event.parentAssistantId ?? null,
+            subagentTitle: event.title ?? '子智能体',
+            subagentTask: event.task ?? '',
+          });
+
+          const upsertSubagentDataPart = (snapshot: SubagentSnapshot) => {
+            const subagentId = String(snapshot.id ?? '').trim();
+            const messageId = String(snapshot.messageId ?? (subagentId ? `subagent-message-${subagentId}` : '')).trim();
+            if (!subagentId || !messageId) return;
+            const metadata = buildSubagentMetadata({
+              subagentId,
+              parentToolCallId: snapshot.parentToolCallId,
+              parentAssistantId: snapshot.parentAssistantId,
+              title: snapshot.title,
+              task: snapshot.task,
+            });
+            updateAssistantMessage(messageId, (message) => {
+              const parts = message.parts ?? [];
+              let replaced = false;
+              const nextParts = parts.map((part) => {
+                if (
+                  part.type === 'data' &&
+                  part.dataType === 'data-subagent-task' &&
+                  typeof part.data === 'object' &&
+                  part.data !== null &&
+                  !Array.isArray(part.data) &&
+                  String((part.data as { id?: unknown }).id ?? '') === subagentId
+                ) {
+                  replaced = true;
+                  return { type: 'data' as const, dataType: 'data-subagent-task', data: snapshot };
+                }
+                return part;
+              });
+              if (!replaced) {
+                nextParts.push({ type: 'data' as const, dataType: 'data-subagent-task', data: snapshot });
+              }
+              return {
+                ...message,
+                ...metadata,
+                parts: nextParts,
+              };
+            }, true);
+          };
+
+          const replaceSubagentTextPart = (message: ChatMessage, text: string): ChatMessage => ({
+            ...message,
+            content: text,
+            parts: [
+              ...(message.parts ?? []).filter((part) => part.type !== 'text'),
+              ...(text ? [{ type: 'text' as const, text }] : []),
+            ],
+          });
+
+          const applySubagentEvent = (event: SubagentStreamEvent) => {
+            const subagentId = String(event.subagentId ?? '').trim();
+            const messageId = String(event.messageId ?? (subagentId ? `subagent-message-${subagentId}` : '')).trim();
+            if (!subagentId || !messageId) return;
+
+            const metadata = buildSubagentMetadata(event);
+            const eventName = String(event.event ?? '');
+            const ensureMessage = (immediate = true) => {
+              updateAssistantMessage(messageId, (message) => ({
+                ...message,
+                ...metadata,
+              }), immediate);
+            };
+
+            if (eventName === 'assistant_started') {
+              ensureMessage(true);
+              return;
+            }
+
+            if (eventName === 'thought_delta') {
+              const delta = String(event.delta ?? '');
+              updateAssistantMessage(messageId, (message) => ({
+                ...mergeThinkingDelta(message, delta),
+                ...metadata,
+              }), false);
+              return;
+            }
+
+            if (eventName === 'thought') {
+              const thought = String(event.thought ?? '');
+              updateAssistantMessage(messageId, (message) => ({
+                ...mergeThinkingSnapshot(message, thought),
+                ...metadata,
+              }), true);
+              return;
+            }
+
+            if (eventName === 'final_answer_delta') {
+              const delta = String(event.delta ?? '');
+              updateAssistantMessage(messageId, (message) => ({
+                ...message,
+                ...metadata,
+                content: `${message.content}${delta}`,
+                parts: appendToLastPart(message, 'text', delta),
+              }), false);
+              return;
+            }
+
+            if (
+              eventName === 'assistant_done' ||
+              eventName === 'final' ||
+              eventName === 'turn_finished' ||
+              eventName === 'limit_reached'
+            ) {
+              const finalAnswer = String(event.finalAnswer ?? event.finalOutput ?? '');
+              updateAssistantMessage(messageId, (message) => ({
+                ...replaceSubagentTextPart(message, finalAnswer || message.content),
+                ...metadata,
+              }), true);
+              return;
+            }
+
+            if (eventName === 'error') {
+              const errorText = String(event.error ?? event.message ?? '').trim();
+              if (!errorText) {
+                ensureMessage(true);
+                return;
+              }
+              updateAssistantMessage(messageId, (message) => ({
+                ...message,
+                ...metadata,
+                content: `${message.content}${message.content ? '\n' : ''}子智能体执行失败：${errorText}`,
+                parts: appendToLastPart(message, 'text', `${message.content ? '\n' : ''}子智能体执行失败：${errorText}`),
+              }), true);
+              return;
+            }
+
+            if (eventName === 'tool_call' && event.toolCall) {
+              const toolCallId = String(event.toolCall.id ?? '').trim();
+              const toolName = String(event.toolCall.name ?? 'tool');
+              if (!toolCallId) {
+                ensureMessage(true);
+                return;
+              }
+              const args = (
+                event.toolCall.arguments &&
+                typeof event.toolCall.arguments === 'object' &&
+                !Array.isArray(event.toolCall.arguments)
+              ) ? event.toolCall.arguments as Record<string, unknown> : {};
+              upsertToolPart(
+                messageId,
+                toolCallId,
+                () => ({
+                  id: toolCallId,
+                  name: toolName,
+                  arguments: args,
+                  state: 'running',
+                  ...metadata,
+                }),
+                (toolCall) => ({
+                  ...toolCall,
+                  ...metadata,
+                  id: toolCallId,
+                  name: toolName,
+                  arguments: args,
+                  state: 'running',
+                }),
+              );
+              return;
+            }
+
+            if (eventName === 'tool_result' && event.toolResult) {
+              const toolCallId = String(
+                event.toolCall?.id ??
+                event.toolResult.tool_call_id ??
+                event.toolResult.toolCallId ??
+                '',
+              ).trim();
+              const toolName = String(event.toolCall?.name ?? event.toolResult.name ?? 'tool');
+              if (!toolCallId) {
+                ensureMessage(true);
+                return;
+              }
+              const args = (
+                event.toolCall?.arguments &&
+                typeof event.toolCall.arguments === 'object' &&
+                !Array.isArray(event.toolCall.arguments)
+              ) ? event.toolCall.arguments as Record<string, unknown> : {};
+              const nextState: ToolCallRecord['state'] = event.toolResult.success === false ? 'error' : 'completed';
+              upsertToolPart(
+                messageId,
+                toolCallId,
+                () => ({
+                  id: toolCallId,
+                  name: toolName,
+                  arguments: args,
+                  state: nextState,
+                  ...metadata,
+                }),
+                (toolCall) => ({
+                  ...toolCall,
+                  ...metadata,
+                  id: toolCallId,
+                  name: toolName,
+                  arguments: Object.keys(args).length > 0 ? args : toolCall.arguments,
+                  output: event.toolResult?.output,
+                  success: event.toolResult?.success ?? toolCall.success,
+                  errorMessage: event.toolResult?.error_message ?? event.toolResult?.errorMessage ?? toolCall.errorMessage,
+                  state: nextState,
+                }),
+              );
+              return;
+            }
+
+            ensureMessage(false);
+          };
+
           const handleToolResultSideEffects = (payload: Record<string, unknown>) => {
             if (!isVisibleStreamSession()) {
               return;
@@ -2577,9 +2919,12 @@ export default function App() {
           };
 
           if (data.type === 'start') {
-            currentAssistantId = data.messageId || currentAssistantId || Math.random().toString();
+            adoptAssistantId(data.messageId || currentAssistantId);
             assistantTextById.set(currentAssistantId, assistantTextById.get(currentAssistantId) ?? '');
-            updateAssistantMessage(currentAssistantId, (message) => message, true);
+            updateAssistantMessage(currentAssistantId, (message) => ({
+              ...message,
+              startTime: message.startTime ?? requestStartedAt,
+            }), true);
           } else if (data.type === 'text-delta') {
             currentAssistantId = currentAssistantId || Math.random().toString();
             const nextText = `${assistantTextById.get(currentAssistantId) ?? ''}${data.delta ?? ''}`;
@@ -2690,6 +3035,7 @@ export default function App() {
             const assistantId = String(payload.assistant_id ?? currentAssistantId);
             const toolCallId = String(payload.id ?? '');
             if (!assistantId || !toolCallId) return;
+            adoptAssistantId(assistantId);
             const toolName = String(payload.name ?? toolNamesById.get(toolCallId) ?? 'tool');
             toolNamesById.set(toolCallId, toolName);
             if (
@@ -2814,6 +3160,24 @@ export default function App() {
               setWebPreviewUrl(data.data.url);
               setIsWebPreviewOpen(true);
             }
+          } else if (data.type === 'data-subagent-event') {
+            const payload = (
+              data.data &&
+              typeof data.data === 'object' &&
+              !Array.isArray(data.data)
+            ) ? data.data as SubagentStreamEvent : null;
+            if (payload) {
+              applySubagentEvent(payload);
+            }
+          } else if (data.type === 'data-subagent-task') {
+            const payload = (
+              data.data &&
+              typeof data.data === 'object' &&
+              !Array.isArray(data.data)
+            ) ? data.data as SubagentSnapshot : null;
+            if (payload) {
+              upsertSubagentDataPart(payload);
+            }
           } else if (data.type === 'data-plan-draft') {
             showStreamingPlanDraft(normalizePlanDraft(data.data), '计划草案');
             const assistantId = currentAssistantId;
@@ -2823,7 +3187,7 @@ export default function App() {
               parts: [...(message.parts ?? []), { type: 'data' as const, dataType: data.type, data: data.data }]
             }), true);
           } else if (data.type === 'data-assistant-reset') {
-            currentAssistantId = data.data?.id || currentAssistantId || Math.random().toString();
+            adoptAssistantId(data.data?.id || currentAssistantId);
             updateAssistantMessage(currentAssistantId, (message) => ({
               ...message,
               content: '',
@@ -2839,7 +3203,6 @@ export default function App() {
               parts: [...(message.parts ?? []), { type: 'data' as const, dataType: data.type, data: data.data }]
             }), true);
           } else if (data.type === 'error') {
-            currentAssistantId = currentAssistantId || Math.random().toString();
             hadStreamError = true;
             const nextText = `${assistantTextById.get(currentAssistantId) ?? ''}${data.errorText ?? ''}`;
             assistantTextById.set(currentAssistantId, nextText);
@@ -2853,11 +3216,14 @@ export default function App() {
               parts: appendToLastPart(message, 'text', data.errorText ?? '')
             }), true);
           } else if (data.type === 'assistant_started') {
-            currentAssistantId = data.payload.id || currentAssistantId || Math.random().toString();
+            adoptAssistantId(data.payload.id || currentAssistantId);
             assistantTextById.set(currentAssistantId, assistantTextById.get(currentAssistantId) ?? '');
-            updateAssistantMessage(currentAssistantId, (message) => message, true);
+            updateAssistantMessage(currentAssistantId, (message) => ({
+              ...message,
+              startTime: message.startTime ?? requestStartedAt,
+            }), true);
           } else if (data.type === 'assistant_delta') {
-            currentAssistantId = data.payload.id || currentAssistantId || Math.random().toString();
+            adoptAssistantId(data.payload.id || currentAssistantId);
             const nextText = `${assistantTextById.get(currentAssistantId) ?? ''}${data.payload.delta ?? ''}`;
             assistantTextById.set(currentAssistantId, nextText);
             onAssistantTextChange?.(nextText);
@@ -2867,7 +3233,7 @@ export default function App() {
               parts: appendToLastPart(message, 'text', data.payload.delta ?? '')
             }), false);
           } else if (data.type === 'assistant_reset') {
-            currentAssistantId = data.payload.id || currentAssistantId || Math.random().toString();
+            adoptAssistantId(data.payload.id || currentAssistantId);
             assistantTextById.set(currentAssistantId, '');
             onAssistantTextChange?.('');
             updateAssistantMessage(currentAssistantId, (message) => ({
@@ -2878,7 +3244,7 @@ export default function App() {
           } else if (data.type === 'thought_delta') {
             const assistantId = data.payload.assistant_id || currentAssistantId;
             if (!assistantId) return;
-            currentAssistantId = assistantId;
+            adoptAssistantId(assistantId);
             updateAssistantMessage(assistantId, (message) => {
               const delta = data.payload.delta ?? '';
               return mergeThinkingDelta(message, delta);
@@ -2886,7 +3252,7 @@ export default function App() {
           } else if (data.type === 'thought') {
             const assistantId = data.payload.assistant_id || currentAssistantId;
             if (!assistantId) return;
-            currentAssistantId = assistantId;
+            adoptAssistantId(assistantId);
             updateAssistantMessage(assistantId, (message) => {
               const nextThought = String(data.payload.thought ?? '');
               return mergeThinkingSnapshot(message, nextThought);
@@ -2894,7 +3260,7 @@ export default function App() {
           } else if (data.type === 'tool_call') {
             const assistantId = data.payload.assistant_id || currentAssistantId;
             if (!assistantId) return;
-            currentAssistantId = assistantId;
+            adoptAssistantId(assistantId);
             const toolCallRecord = { ...data.payload, state: 'running' as const };
             onToolCallStart?.(String(data.payload.name ?? 'tool'));
             if (data.payload.name === 'save_plan') {
@@ -2916,7 +3282,7 @@ export default function App() {
             handleToolResultSideEffects(data.payload);
             const assistantId = data.payload.assistant_id || currentAssistantId;
             if (!assistantId) return;
-            currentAssistantId = assistantId;
+            adoptAssistantId(assistantId);
             const payloadState = typeof data.payload.state === 'string' ? data.payload.state : undefined;
             const effectiveState: ToolCallRecord['state'] =
               payloadState === 'input-requested' ? 'input-requested' :

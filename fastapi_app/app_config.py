@@ -32,15 +32,15 @@ def _resolve_backend_base_url() -> str:
     explicit = os.environ.get("SUPERCODE_BACKEND_BASE_URL", "").strip()
     if explicit:
         return explicit.rstrip("/")
-    host = os.environ.get("SUPERCODE_HOST", "localhost").strip() or "localhost"
+    host = os.environ.get("SUPERCODE_HOST", "127.0.0.1").strip() or "127.0.0.1"
     if host in {"0.0.0.0", "::"}:
-        host = "localhost"
+        host = "127.0.0.1"
     port = os.environ.get("SUPERCODE_PORT", "3001").strip() or "3001"
     return f"http://{host}:{port}"
 
 
 BACKEND_BASE_URL = _resolve_backend_base_url()
-DEFAULT_BROWSER_PREVIEW_URL = "http://localhost:8888"
+DEFAULT_BROWSER_PREVIEW_URL = "http://127.0.0.1:8888"
 DEFAULT_SELECTED_FILE = None
 DEFAULT_OPEN_FILES = (
     "ChatLayout.tsx",

@@ -55,14 +55,19 @@ def register_config_routes(
 ) -> None:
     @app.get("/api/models")
     async def get_models() -> JSONResponse:
-        return JSONResponse({"models": list_model_options(deps.app_data_root)})
+        models = await asyncio.to_thread(list_model_options, deps.app_data_root)
+        return JSONResponse({"models": models})
 
     @app.get("/api/model-configs")
     async def get_model_configs() -> JSONResponse:
+        providers, env_configs = await asyncio.gather(
+            asyncio.to_thread(load_ui_model_providers, deps.app_data_root),
+            asyncio.to_thread(scan_env_model_sources, deps.app_data_root),
+        )
         return JSONResponse(
             {
-                "providers": load_ui_model_providers(deps.app_data_root),
-                "envConfigs": scan_env_model_sources(deps.app_data_root),
+                "providers": providers,
+                "envConfigs": env_configs,
                 "configPath": str(config_store_path(deps.app_data_root)),
             }
         )

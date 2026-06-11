@@ -8,6 +8,11 @@ from agent import ChatSession, ConversationMessage, StepRecord, ToolResult
 
 MAX_PLANNING_RECORD_CHARS = 1_200
 MAX_STORED_TOOL_RECORDS = 80
+SUBAGENT_SCOPE = "subagent"
+
+
+def is_subagent_record(record: dict[str, Any]) -> bool:
+    return str(record.get("agentScope", record.get("agent_scope")) or "").strip() == SUBAGENT_SCOPE
 
 
 def ensure_user_message_recorded(session: Any, user_message: str) -> None:
@@ -244,6 +249,7 @@ def seed_chat_session_history(
         for message in history_messages
         if str(message.get("role", "")) in {"user", "assistant"}
         and str(message.get("content", "")).strip()
+        and not is_subagent_record(message)
     ]
     tool_records = build_tool_records_from_history(history_messages, history_tools or [])
     if tool_records:
@@ -424,6 +430,8 @@ def build_tool_records_from_history(
         records[existing_index] = {**records[existing_index], **normalized}
 
     for message in history_messages:
+        if is_subagent_record(message):
+            continue
         raw_tool_calls = message.get("toolCalls")
         if isinstance(raw_tool_calls, list):
             for raw_tool_call in raw_tool_calls:
@@ -440,7 +448,7 @@ def build_tool_records_from_history(
                 upsert(raw_tool_call)
 
     for raw_tool in history_tools:
-        if isinstance(raw_tool, dict):
+        if isinstance(raw_tool, dict) and not is_subagent_record(raw_tool):
             upsert(raw_tool)
 
     return records
@@ -449,6 +457,8 @@ def build_tool_records_from_history(
 def build_planning_records_from_history(history_messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for message_index, message in enumerate(history_messages, start=1):
+        if is_subagent_record(message):
+            continue
         if str(message.get("role", "")) != "assistant":
             continue
         thought_text = extract_message_thought_text(message)
@@ -499,7 +509,7 @@ def normalize_tool_record(raw_record: dict[str, Any]) -> dict[str, Any]:
     success = raw_success if isinstance(raw_success, bool) else None
     state = str(raw_record.get("state") or ("completed" if success is True else "error" if success is False else ""))
     arguments = raw_record.get("arguments")
-    return {
+    normalized = {
         "id": str(raw_record.get("id") or ""),
         "step_index": raw_record.get("stepIndex", raw_record.get("step_index")),
         "name": str(raw_record.get("name") or ""),
@@ -509,6 +519,18 @@ def normalize_tool_record(raw_record: dict[str, Any]) -> dict[str, Any]:
         "state": state,
         "error_message": raw_record.get("errorMessage", raw_record.get("error_message")),
     }
+    for key in (
+        "agentScope",
+        "subagentId",
+        "parentToolCallId",
+        "parentAssistantId",
+        "subagentTitle",
+        "subagentTask",
+    ):
+        value = raw_record.get(key)
+        if value is not None:
+            normalized[key] = value
+    return normalized
 
 
 def upsert_tool(current: list[dict[str, Any]], next_tool: dict[str, Any]) -> list[dict[str, Any]]:

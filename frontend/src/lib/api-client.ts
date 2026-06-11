@@ -1,4 +1,4 @@
-const DEFAULT_BACKEND_BASE_URL = 'http://localhost:3001';
+const DEFAULT_BACKEND_BASE_URL = 'http://127.0.0.1:3001';
 
 declare global {
   interface Window {

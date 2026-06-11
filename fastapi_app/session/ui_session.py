@@ -37,6 +37,7 @@ from fastapi_app.session.agent_runtime import (
     normalize_session_phase,
     refresh_session_runtime_state,
 )
+from fastapi_app.session_history import is_subagent_record
 from fastapi_app.skills import list_available_skill_summaries
 from fastapi_app.workspace_utils import (
     build_directory_tree_node,
@@ -441,12 +442,15 @@ class UISession:
 
     def context_snapshot(self) -> SessionContextResponse:
         refresh_session_runtime_state(self)
+        main_messages = [
+            message for message in self.history_messages if not is_subagent_record(message)
+        ]
         recent_messages = [
             SessionContextMessage(
                 role=str(message.get("role", "")),
                 content=str(message.get("content", "")),
             )
-            for message in self.history_messages[-6:]
+            for message in main_messages[-6:]
         ]
         recent_tools = [
             SessionContextTool(
@@ -519,6 +523,8 @@ class UISession:
 
     def summary_preview(self) -> str:
         for message in reversed(self.history_messages):
+            if is_subagent_record(message):
+                continue
             content = compact_text(str(message.get("content", "")), 72)
             if content:
                 return content

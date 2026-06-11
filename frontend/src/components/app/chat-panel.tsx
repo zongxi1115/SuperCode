@@ -7,7 +7,6 @@ import { apiFetch } from "@/lib/api-client";
 import {
   Conversation,
   ConversationContent,
-  ConversationEmptyState,
   ConversationScrollButton,
 } from "@/components/ai-elements/conversation";
 import {
@@ -192,6 +191,7 @@ import {
   Eye,
   Loader2,
   Check,
+  BotIcon,
   MessageSquareIcon,
   MemoryStick,
 } from "lucide-react";
@@ -316,7 +316,89 @@ const TOOL_ICONS: Record<string, React.ReactNode> = {
   get_task_status: <ListChecks className="size-4" />,
   finish_task: <ListChecks className="size-4" />,
   remember_preference: <MemoryStick className="size-4" />,
+  delegate_code_exploration: <BotIcon className="size-4" />,
 };
+
+function isSubagentMessage(message: ChatMessage) {
+  return message.agentScope === "subagent" || Boolean(message.subagentId);
+}
+
+function getSubagentSnapshot(message: ChatMessage): SubagentSnapshot | null {
+  const dataPart = [...(message.parts ?? [])].reverse().find(
+    (part): part is Extract<ContentBlock, { type: "data" }> =>
+      part.type === "data" &&
+      part.dataType === "data-subagent-task" &&
+      Boolean(part.data) &&
+      typeof part.data === "object" &&
+      !Array.isArray(part.data),
+  );
+  return dataPart ? (dataPart.data as SubagentSnapshot) : null;
+}
+
+function getSubagentMessagesForParent(
+  messages: ChatMessage[],
+  parentToolCallId: string,
+) {
+  return messages.filter((message) => {
+    if (message.parentToolCallId === parentToolCallId) {
+      return true;
+    }
+    return getSubagentSnapshot(message)?.parentToolCallId === parentToolCallId;
+  });
+}
+
+function isSubagentMessageRunning(message: ChatMessage) {
+  const snapshot = getSubagentSnapshot(message);
+  if (snapshot?.status === "running") {
+    return true;
+  }
+  if (
+    snapshot?.status === "completed" ||
+    snapshot?.status === "error" ||
+    snapshot?.status === "paused"
+  ) {
+    return false;
+  }
+  return (message.toolCalls ?? []).some((toolCall) => toolCall.state === "running");
+}
+
+function latestSubagentSnapshot(messages: ChatMessage[]) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const snapshot = getSubagentSnapshot(messages[index]);
+    if (snapshot) {
+      return snapshot;
+    }
+  }
+  return null;
+}
+
+function stripSubagentSnapshotParts(messages: ChatMessage[]) {
+  return messages.map((message) => ({
+    ...message,
+    parts: (message.parts ?? []).filter(
+      (part) => !(part.type === "data" && part.dataType === "data-subagent-task"),
+    ),
+  }));
+}
+
+function findToolCallById(messages: ChatMessage[], toolCallId: string) {
+  for (const message of messages) {
+    const toolCalls = [
+      ...(message.toolCalls ?? []),
+      ...((message.parts ?? [])
+        .filter(
+          (part): part is Extract<ContentBlock, { type: "tool_call" }> =>
+            part.type === "tool_call",
+        )
+        .map((part) => part.toolCall) ?? []),
+    ];
+    const match = toolCalls.find((toolCall) => toolCall.id === toolCallId);
+    if (match) {
+      return match;
+    }
+  }
+  return null;
+}
 
 const TOOL_TITLES: Record<string, (args: Record<string, unknown>) => string> = {
   connect: () => "连接部署目标",
@@ -378,6 +460,7 @@ const TOOL_TITLES: Record<string, (args: Record<string, unknown>) => string> = {
   get_task_status: () => "正在读取任务状态",
   finish_task: () => "正在完成步骤",
   remember_preference: () => "正在记录长期记忆",
+  delegate_code_exploration: () => "代码探索",
 };
 
 function getToolTitle(name: string, args: Record<string, unknown>): string {
@@ -1627,6 +1710,101 @@ function GitCommitPreview({
   );
 }
 
+function snapshotFromSubagentToolOutput(output: unknown): SubagentSnapshot | null {
+  if (!output || typeof output !== "object" || Array.isArray(output)) {
+    return null;
+  }
+  const payload = output as Record<string, unknown>;
+  const dataPart = payload.data_part;
+  if (
+    dataPart &&
+    typeof dataPart === "object" &&
+    !Array.isArray(dataPart) &&
+    (dataPart as Record<string, unknown>).type === "data-subagent-task"
+  ) {
+    const data = (dataPart as Record<string, unknown>).data;
+    if (data && typeof data === "object" && !Array.isArray(data)) {
+      return data as SubagentSnapshot;
+    }
+  }
+  return null;
+}
+
+function SubagentToolSummary({
+  toolCall,
+  subagentMessages,
+  onOpenLog,
+}: {
+  toolCall: ToolCallRecord;
+  subagentMessages: ChatMessage[];
+  onOpenLog?: (parentToolCallId: string) => void;
+}) {
+  const relatedMessages = getSubagentMessagesForParent(subagentMessages, toolCall.id);
+  const outputSnapshot = snapshotFromSubagentToolOutput(toolCall.output);
+  const snapshot = latestSubagentSnapshot(relatedMessages) ?? outputSnapshot;
+  const isRunning =
+    toolCall.state === "running" ||
+    relatedMessages.some(isSubagentMessageRunning) ||
+    snapshot?.status === "running";
+  const isError = toolCall.state === "error" || snapshot?.status === "error";
+  const statusLabel = isError ? "失败" : isRunning ? "探索中" : "已完成";
+  const task = String(toolCall.arguments?.task || snapshot?.task || "代码探索");
+  const latestMessage = relatedMessages[relatedMessages.length - 1];
+  const detail = (
+    snapshot?.currentThought ||
+    latestMessage?.thoughts ||
+    snapshot?.finalOutput ||
+    (typeof toolCall.output === "object" && toolCall.output !== null && !Array.isArray(toolCall.output)
+      ? String((toolCall.output as Record<string, unknown>).final_output || "")
+      : "")
+  ).trim();
+  const stepCount = snapshot?.stepCount ?? snapshot?.steps?.length ?? 0;
+  const fileCount = snapshot?.filesRead?.length ?? 0;
+
+  return (
+    <button
+      type="button"
+      onClick={() => onOpenLog?.(toolCall.id)}
+      className={cn(
+        "group flex w-full items-center gap-3 rounded-md border bg-background px-3 py-2 text-left transition-colors",
+        "hover:border-foreground/20 hover:bg-muted/30",
+      )}
+    >
+      <span
+        className={cn(
+          "flex size-7 shrink-0 items-center justify-center rounded-md border text-muted-foreground",
+          isRunning && "text-primary",
+          isError && "text-destructive",
+        )}
+      >
+        {isRunning ? (
+          <Loader2 className="size-3.5 animate-spin" />
+        ) : isError ? (
+          <XIcon className="size-3.5" />
+        ) : (
+          <Check className="size-3.5" />
+        )}
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="flex min-w-0 items-center gap-2">
+          <span className="truncate text-sm font-medium text-foreground">
+            {task}
+          </span>
+          <span className="shrink-0 text-[11px] text-muted-foreground">
+            {statusLabel}
+          </span>
+        </span>
+        <span className="mt-0.5 flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground">
+          {stepCount > 0 ? <span>{stepCount} 步</span> : null}
+          {fileCount > 0 ? <span>{fileCount} 文件</span> : null}
+          {detail ? <span className="truncate">{detail}</span> : null}
+        </span>
+      </span>
+      <ChevronRight className="size-4 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
+    </button>
+  );
+}
+
 function ToolBody({
   toolCall,
   sessionId,
@@ -1635,6 +1813,8 @@ function ToolBody({
   onResolveConnectInput,
   onResolvePlanQuestionsInput,
   onViewPlan,
+  subagentMessages = [],
+  onOpenSubagentLog,
   replaceCompletedPlanQuestionsWithLoading = false,
 }: {
   toolCall: ToolCallRecord;
@@ -1654,6 +1834,8 @@ function ToolBody({
     answers: QuizSubmission,
   ) => void | Promise<void>;
   onViewPlan?: (title: string, markdown: string) => void;
+  subagentMessages?: ChatMessage[];
+  onOpenSubagentLog?: (parentToolCallId: string) => void;
   replaceCompletedPlanQuestionsWithLoading?: boolean;
 }) {
   const args = toolCall.arguments || {};
@@ -1756,6 +1938,16 @@ function ToolBody({
       </Queue>
     );
   };
+
+  if (toolCall.name === "delegate_code_exploration") {
+    return (
+      <SubagentToolSummary
+        toolCall={toolCall}
+        subagentMessages={subagentMessages}
+        onOpenLog={onOpenSubagentLog}
+      />
+    );
+  }
 
   if (toolCall.name === "connect") {
     if (toolCall.inputRequest && toolCall.state === "input-requested") {
@@ -3429,15 +3621,55 @@ const EmptyHeroState = memo(function EmptyHeroState({
   );
 });
 
+const normalizeThinkingStartTime = (startTime?: number) => {
+  if (typeof startTime !== "number" || !Number.isFinite(startTime) || startTime <= 0) {
+    return undefined;
+  }
+  return startTime < 1_000_000_000_000 ? startTime * 1000 : startTime;
+};
+
+const formatThinkingDuration = (seconds: number) => {
+  const totalSeconds = Math.max(0, Math.floor(seconds));
+  if (totalSeconds < 60) {
+    return `${totalSeconds}秒`;
+  }
+  const minutes = Math.floor(totalSeconds / 60);
+  const remainingSeconds = totalSeconds % 60;
+  return `${minutes}分${remainingSeconds.toString().padStart(2, "0")}秒`;
+};
+
 const ThinkingTimeHeader = memo(function ThinkingTimeHeader({
   thinkingTime,
+  startTime,
+  isActive,
 }: {
-  thinkingTime: number;
+  thinkingTime?: number;
+  startTime?: number;
+  isActive: boolean;
 }) {
+  const normalizedStartTime = normalizeThinkingStartTime(startTime);
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!isActive || normalizedStartTime === undefined) {
+      return;
+    }
+    setNow(Date.now());
+    const timer = window.setInterval(() => {
+      setNow(Date.now());
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [isActive, normalizedStartTime]);
+
+  const displaySeconds =
+    isActive && normalizedStartTime !== undefined
+      ? (now - normalizedStartTime) / 1000
+      : thinkingTime ?? 0;
+
   return (
     <div className="mb-3 flex flex-col gap-2">
       <div className="flex items-center gap-2 text-xs text-muted-foreground">
-        <span>已思考 {thinkingTime.toFixed(1)} 秒</span>
+        <span>已思考 {formatThinkingDuration(displaySeconds)}</span>
       </div>
       <div className="h-px bg-border" />
     </div>
@@ -3509,6 +3741,8 @@ const MessageList = memo(function MessageList({
   compressedMessageIds,
   canCompress,
   onEditMessage,
+  subagentMessages = [],
+  onOpenSubagentLog,
   thinkingRendering = "text",
   finalAnswerRendering = "markdown",
 }: {
@@ -3542,6 +3776,8 @@ const MessageList = memo(function MessageList({
   compressedMessageIds: Set<string>;
   canCompress: boolean;
   onEditMessage?: (content: string) => void;
+  subagentMessages?: ChatMessage[];
+  onOpenSubagentLog?: (parentToolCallId: string) => void;
   thinkingRendering?: "text" | "markdown";
   finalAnswerRendering?: "markdown" | "html";
 }) {
@@ -3670,6 +3906,7 @@ const MessageList = memo(function MessageList({
       tc.name.startsWith("git_") ||
       tc.name === "connect" ||
       tc.name === "ask_plan_questions" ||
+      tc.name === "delegate_code_exploration" ||
       tc.inputRequest?.kind === "plan_questions";
     const toolTitle = `${getToolTitle(tc.name, tc.arguments ?? {})} · ${statusLabel}`;
     const hasControlledOpen =
@@ -3712,6 +3949,8 @@ const MessageList = memo(function MessageList({
               onResolveConnectInput={onResolveConnectInput}
               onResolvePlanQuestionsInput={onResolvePlanQuestionsInput}
               onViewPlan={onViewPlan}
+              subagentMessages={subagentMessages}
+              onOpenSubagentLog={onOpenSubagentLog}
               replaceCompletedPlanQuestionsWithLoading={
                 options?.replaceCompletedPlanQuestionsWithLoading
               }
@@ -4419,7 +4658,15 @@ const MessageList = memo(function MessageList({
         const displayMessage = buildAssistantDisplayMessage(msg);
         const isLast = idx === messages.length - 1;
         const isLastAssistant = idx === lastAssistantIdx;
-        const showInlineActions = msg.role === "assistant" && !isLastAssistant;
+        const isActiveAssistant = isLastAssistant && isLoading;
+        const showThinkingTime =
+          msg.role === "assistant" &&
+          (typeof msg.thinkingTime === "number" ||
+            (isActiveAssistant && typeof msg.startTime === "number"));
+        const showInlineActions =
+          Boolean(onCompletionAction) &&
+          msg.role === "assistant" &&
+          !isLastAssistant;
         const isCompressing =
           activeCompletionAction?.action === "compress" &&
           activeCompletionAction.messageId === msg.id;
@@ -4448,8 +4695,12 @@ const MessageList = memo(function MessageList({
             onMouseLeave={() => setHoveredMsgId(null)}
           >
             <MessageContent>
-              {msg.role === "assistant" && msg.thinkingTime && (
-                <ThinkingTimeHeader thinkingTime={msg.thinkingTime} />
+              {showThinkingTime && (
+                <ThinkingTimeHeader
+                  thinkingTime={msg.thinkingTime}
+                  startTime={msg.startTime}
+                  isActive={isActiveAssistant}
+                />
               )}
               {msg.role === "assistant" &&
                 (displayMessage.parts?.length
@@ -4525,6 +4776,8 @@ const ChatStreamBody = memo(function ChatStreamBody({
   activeCompletionAction,
   canCompress,
   onEditMessage,
+  subagentMessages = [],
+  onOpenSubagentLog,
   thinkingRendering = "text",
   finalAnswerRendering = "markdown",
 }: {
@@ -4558,6 +4811,8 @@ const ChatStreamBody = memo(function ChatStreamBody({
   } | null;
   canCompress: boolean;
   onEditMessage?: (content: string) => void;
+  subagentMessages?: ChatMessage[];
+  onOpenSubagentLog?: (parentToolCallId: string) => void;
   thinkingRendering?: "text" | "markdown";
   finalAnswerRendering?: "markdown" | "html";
 }) {
@@ -4609,6 +4864,8 @@ const ChatStreamBody = memo(function ChatStreamBody({
         compressedMessageIds={compressedMessageIds}
         canCompress={canCompress}
         onEditMessage={onEditMessage}
+        subagentMessages={subagentMessages}
+        onOpenSubagentLog={onOpenSubagentLog}
         thinkingRendering={thinkingRendering}
         finalAnswerRendering={finalAnswerRendering}
       />
@@ -4629,6 +4886,122 @@ const ChatStreamBody = memo(function ChatStreamBody({
         }}
       />
     </>
+  );
+});
+
+const SubagentLogDrawer = memo(function SubagentLogDrawer({
+  sessionId,
+  messages,
+  isOpen,
+  isLoading,
+  onOpenChange,
+  onResolveDeleteConfirmation,
+  onResolveGitConfirmation,
+  onResolveConnectInput,
+  onResolvePlanQuestionsInput,
+  onViewPlan,
+  thinkingRendering = "text",
+  finalAnswerRendering = "markdown",
+}: {
+  sessionId: string | null;
+  messages: ChatMessage[];
+  isOpen: boolean;
+  isLoading: boolean;
+  onOpenChange: (open: boolean) => void;
+  onResolveDeleteConfirmation: (toolCallId: string, approved: boolean) => void;
+  onResolveGitConfirmation: (
+    toolCallId: string,
+    type: "commit" | "tag",
+    approved: boolean,
+  ) => void;
+  onResolveConnectInput?: (
+    toolCallId: string,
+    values: Record<string, string>,
+  ) => void;
+  onResolvePlanQuestionsInput?: (
+    toolCallId: string,
+    answers: QuizSubmission,
+  ) => void | Promise<void>;
+  onViewPlan?: (title: string, markdown: string) => void;
+  thinkingRendering?: "text" | "markdown";
+  finalAnswerRendering?: "markdown" | "html";
+}) {
+  const emptyCompressedMessageIds = useMemo(() => new Set<string>(), []);
+  const displayMessages = useMemo(
+    () => stripSubagentSnapshotParts(messages),
+    [messages],
+  );
+  const hasRenderableMessages = displayMessages.some(
+    (message) =>
+      message.content.trim() ||
+      message.thoughts?.trim() ||
+      (message.toolCalls?.length ?? 0) > 0 ||
+      (message.parts?.length ?? 0) > 0,
+  );
+
+  if (!isOpen) {
+    return null;
+  }
+
+  return (
+    <motion.aside
+      key="subagent-log-drawer"
+      initial={{ opacity: 0, x: 28 }}
+      animate={{ opacity: 1, x: 0 }}
+      exit={{ opacity: 0, x: 28 }}
+      transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+      className="absolute inset-y-0 right-0 z-30 flex w-[min(390px,calc(100vw-32px))] flex-col border-l bg-background shadow-2xl"
+    >
+      <div className="flex h-10 shrink-0 items-center justify-end border-b px-2">
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8 shrink-0"
+                onClick={() => onOpenChange(false)}
+                aria-label="收起子智能体日志"
+              >
+                <XIcon className="size-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="left">
+              <p>收起</p>
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      </div>
+      <div className="relative min-h-0 flex-1">
+        {hasRenderableMessages ? (
+          <Conversation className="absolute inset-0">
+            <ConversationContent className="gap-3 p-3">
+              <MessageList
+                sessionId={sessionId}
+                isLoading={isLoading}
+                messages={displayMessages}
+                codeChanges={[]}
+                onResolveDeleteConfirmation={onResolveDeleteConfirmation}
+                onResolveGitConfirmation={onResolveGitConfirmation}
+                onResolveConnectInput={onResolveConnectInput}
+                onResolvePlanQuestionsInput={onResolvePlanQuestionsInput}
+                onViewPlan={onViewPlan}
+                compressedMessageIds={emptyCompressedMessageIds}
+                canCompress={false}
+                thinkingRendering={thinkingRendering}
+                finalAnswerRendering={finalAnswerRendering}
+              />
+            </ConversationContent>
+            <ConversationScrollButton className="bottom-3" />
+          </Conversation>
+        ) : (
+          <div className="flex h-full items-center justify-center text-muted-foreground">
+            <Loader2 className="size-4 animate-spin" />
+          </div>
+        )}
+      </div>
+    </motion.aside>
   );
 });
 
@@ -5187,6 +5560,14 @@ export function ChatPanel({
   finalAnswerRendering = "markdown",
 }: ChatPanelProps) {
   const planSteps = contextData?.planSteps ?? [];
+  const mainMessages = useMemo(
+    () => messages.filter((message) => !isSubagentMessage(message)),
+    [messages],
+  );
+  const subagentMessages = useMemo(
+    () => messages.filter(isSubagentMessage),
+    [messages],
+  );
   const composerRef = useRef<HTMLDivElement>(null);
   const [isFocused, setIsFocused] = useState(false);
   const [attachmentFiles, setAttachmentFiles] = useState<AttachmentData[]>([]);
@@ -5195,6 +5576,10 @@ export function ChatPanel({
   const composerInputId = useId();
   const [isModelSelectorOpen, setIsModelSelectorOpen] = useState(false);
   const [isHandling, setIsHandling] = useState(false);
+  const [isSubagentDrawerOpen, setIsSubagentDrawerOpen] = useState(false);
+  const [activeSubagentParentToolCallId, setActiveSubagentParentToolCallId] =
+    useState<string | null>(null);
+  const [autoCloseSubagentDrawer, setAutoCloseSubagentDrawer] = useState(false);
 
   const handleEmptySend = useCallback(() => {
     if (isHandling) return;
@@ -5247,7 +5632,82 @@ export function ChatPanel({
     null,
   );
 
-  useCompletionNotification(isLoading, messages.length > 0);
+  useCompletionNotification(isLoading, mainMessages.length > 0);
+
+  const activeSubagentMessages = useMemo(
+    () =>
+      activeSubagentParentToolCallId
+        ? getSubagentMessagesForParent(
+            subagentMessages,
+            activeSubagentParentToolCallId,
+          )
+        : [],
+    [activeSubagentParentToolCallId, subagentMessages],
+  );
+  const activeSubagentToolCall = useMemo(
+    () =>
+      activeSubagentParentToolCallId
+        ? findToolCallById(mainMessages, activeSubagentParentToolCallId)
+        : null,
+    [activeSubagentParentToolCallId, mainMessages],
+  );
+  const isActiveSubagentRunning =
+    activeSubagentToolCall?.state === "running" ||
+    activeSubagentMessages.some(isSubagentMessageRunning);
+
+  const handleOpenSubagentLog = useCallback(
+    (parentToolCallId: string) => {
+      const relatedMessages = getSubagentMessagesForParent(
+        subagentMessages,
+        parentToolCallId,
+      );
+      const toolCall = findToolCallById(mainMessages, parentToolCallId);
+      setActiveSubagentParentToolCallId(parentToolCallId);
+      setIsSubagentDrawerOpen(true);
+      setAutoCloseSubagentDrawer(
+        toolCall?.state === "running" ||
+          relatedMessages.some(isSubagentMessageRunning),
+      );
+    },
+    [mainMessages, subagentMessages],
+  );
+
+  const handleSubagentDrawerOpenChange = useCallback((open: boolean) => {
+    setIsSubagentDrawerOpen(open);
+    if (!open) {
+      setAutoCloseSubagentDrawer(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (subagentMessages.length > 0) {
+      return;
+    }
+    setIsSubagentDrawerOpen(false);
+    setActiveSubagentParentToolCallId(null);
+    setAutoCloseSubagentDrawer(false);
+  }, [subagentMessages.length]);
+
+  useEffect(() => {
+    if (
+      !isSubagentDrawerOpen ||
+      !autoCloseSubagentDrawer ||
+      isActiveSubagentRunning ||
+      activeSubagentMessages.length === 0
+    ) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setIsSubagentDrawerOpen(false);
+      setAutoCloseSubagentDrawer(false);
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [
+    activeSubagentMessages.length,
+    autoCloseSubagentDrawer,
+    isActiveSubagentRunning,
+    isSubagentDrawerOpen,
+  ]);
 
   const handleAddFiles = useCallback((fileList: FileList | File[]) => {
     const incoming = Array.from(fileList);
@@ -5423,13 +5883,13 @@ export function ChatPanel({
     Boolean(activeMention) && dismissedMentionKey !== activeMentionKey;
 
   const lastAssistantMessage = useMemo(() => {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].role === "assistant") {
-        return messages[i];
+    for (let i = mainMessages.length - 1; i >= 0; i--) {
+      if (mainMessages[i].role === "assistant") {
+        return mainMessages[i];
       }
     }
     return null;
-  }, [messages]);
+  }, [mainMessages]);
   const canCompress =
     (contextData?.estimatedTokens ?? 0) /
       Math.max(contextData?.maxTokens ?? 1, 1) >=
@@ -5438,7 +5898,7 @@ export function ChatPanel({
   const hasDraftInput = isFocused && input.trim().length > 0;
   const hasStreamingResponse =
     isLoading && Boolean(lastAssistantMessage?.content?.trim());
-  const hasCompletedConversation = messages.length > 0 && !isLoading;
+  const hasCompletedConversation = mainMessages.length > 0 && !isLoading;
 
   const personaState = useMemo<PersonaState>(() => {
     if (hasStreamingResponse) {
@@ -5784,7 +6244,7 @@ export function ChatPanel({
                 suggestions={mentionSuggestions}
                 onChange={onInputChange}
                 onSubmit={
-                  messages.length === 0 ? handleEmptySend : onSendMessage
+                  mainMessages.length === 0 ? handleEmptySend : onSendMessage
                 }
               />
             </div>
@@ -5947,7 +6407,7 @@ export function ChatPanel({
                 <Button
                   size="icon"
                   onClick={
-                    messages.length === 0 ? handleEmptySend : onSendMessage
+                    mainMessages.length === 0 ? handleEmptySend : onSendMessage
                   }
                   disabled={!input.trim() && elementAttachments.length === 0}
                   aria-label="发送消息"
@@ -5967,7 +6427,7 @@ export function ChatPanel({
     <>
       <CanvasEdgeGlow active={edgeGlowActive} />
       <AnimatePresence>
-        {messages.length === 0 && (
+        {mainMessages.length === 0 && (
           <EmptyHeroState state={personaState} isHandling={isHandling}>
             <motion.div
               key="empty-composer"
@@ -5978,52 +6438,74 @@ export function ChatPanel({
             </motion.div>
           </EmptyHeroState>
         )}
-        {messages.length > 0 && (
+        {mainMessages.length > 0 && (
           <motion.div
             key="normal"
-            className="h-full flex flex-col min-w-0 border-r"
+            className="relative h-full flex min-w-0 border-r"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
           >
-            <div className="flex-1 relative min-h-0">
-              <Conversation className="absolute inset-0">
-                <ConversationContent className={cn("mx-auto w-full gap-4 pb-4", CHAT_CONTENT_MAX_WIDTH)}>
-                  <ChatStreamBody
-                    sessionId={sessionId}
-                    isLoading={isLoading}
-                    messages={messages}
-                    codeChanges={codeChanges}
-                    onResolveDeleteConfirmation={onResolveDeleteConfirmation}
-                    onResolveGitConfirmation={onResolveGitConfirmation}
-                    onResolveConnectInput={onResolveConnectInput}
-                    onResolvePlanQuestionsInput={onResolvePlanQuestionsInput}
-                    onViewPlan={onViewPlan}
-                    personaState={personaState}
-                    onCompletionAction={onCompletionAction}
-                    activeCompletionAction={activeCompletionAction}
-                    canCompress={canCompress}
-                    onEditMessage={onEditMessage}
-                    thinkingRendering={thinkingRendering}
-                    finalAnswerRendering={finalAnswerRendering}
-                  />
-                </ConversationContent>
-                <ConversationScrollButton className="bottom-16" />
-              </Conversation>
-              <div className="absolute right-2 top-0 bottom-0 flex items-center pointer-events-none z-10">
-                <div className="pointer-events-auto">
-                  <MessageOutline messages={messages} isLoading={isLoading} />
+            <div className="flex min-w-0 flex-1 flex-col">
+              <div className="flex-1 relative min-h-0">
+                <Conversation className="absolute inset-0">
+                  <ConversationContent className={cn("mx-auto w-full gap-4 pb-4", CHAT_CONTENT_MAX_WIDTH)}>
+                    <ChatStreamBody
+                      sessionId={sessionId}
+                      isLoading={isLoading}
+                      messages={mainMessages}
+                      codeChanges={codeChanges}
+                      onResolveDeleteConfirmation={onResolveDeleteConfirmation}
+                      onResolveGitConfirmation={onResolveGitConfirmation}
+                      onResolveConnectInput={onResolveConnectInput}
+                      onResolvePlanQuestionsInput={onResolvePlanQuestionsInput}
+                      onViewPlan={onViewPlan}
+                      personaState={personaState}
+                      onCompletionAction={onCompletionAction}
+                      activeCompletionAction={activeCompletionAction}
+                      canCompress={canCompress}
+                      onEditMessage={onEditMessage}
+                      subagentMessages={subagentMessages}
+                      onOpenSubagentLog={handleOpenSubagentLog}
+                      thinkingRendering={thinkingRendering}
+                      finalAnswerRendering={finalAnswerRendering}
+                    />
+                  </ConversationContent>
+                  <ConversationScrollButton className="bottom-16" />
+                </Conversation>
+                <div className="absolute right-2 top-0 bottom-0 flex items-center pointer-events-none z-10">
+                  <div className="pointer-events-auto">
+                    <MessageOutline messages={mainMessages} isLoading={isLoading} />
+                  </div>
                 </div>
               </div>
+              <motion.div
+                initial={{ opacity: 1, y: "-32vh" }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.42, ease: [0.22, 1, 0.36, 1] }}
+              >
+                {composer}
+              </motion.div>
             </div>
-            <motion.div
-              initial={{ opacity: 1, y: "-32vh" }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.42, ease: [0.22, 1, 0.36, 1] }}
-            >
-              {composer}
-            </motion.div>
+            <AnimatePresence>
+              {isSubagentDrawerOpen && (
+                <SubagentLogDrawer
+                  sessionId={sessionId}
+                  messages={activeSubagentMessages}
+                  isOpen={isSubagentDrawerOpen}
+                  isLoading={isLoading}
+                  onOpenChange={handleSubagentDrawerOpenChange}
+                  onResolveDeleteConfirmation={onResolveDeleteConfirmation}
+                  onResolveGitConfirmation={onResolveGitConfirmation}
+                  onResolveConnectInput={onResolveConnectInput}
+                  onResolvePlanQuestionsInput={onResolvePlanQuestionsInput}
+                  onViewPlan={onViewPlan}
+                  thinkingRendering={thinkingRendering}
+                  finalAnswerRendering={finalAnswerRendering}
+                />
+              )}
+            </AnimatePresence>
           </motion.div>
         )}
       </AnimatePresence>

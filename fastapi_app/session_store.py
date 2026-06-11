@@ -14,6 +14,22 @@ from typing import Any
 LEGACY_SESSIONS_TABLE = "sessions_legacy_v1"
 SESSION_SCHEMA_VERSION = "session-schema-v2"
 MEMORY_MIGRATION_VERSION = "memory-from-settings-json-v1"
+MESSAGE_METADATA_KEYS = (
+    "agentScope",
+    "subagentId",
+    "parentToolCallId",
+    "parentAssistantId",
+    "subagentTitle",
+    "subagentTask",
+)
+TOOL_METADATA_KEYS = (
+    "agentScope",
+    "subagentId",
+    "parentToolCallId",
+    "parentAssistantId",
+    "subagentTitle",
+    "subagentTask",
+)
 
 
 @dataclass(slots=True)
@@ -261,6 +277,7 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
     def _ensure_runtime_schema(self, connection: sqlite3.Connection) -> None:
         self._create_runtime_tables(connection)
         self._ensure_session_message_columns(connection)
+        self._ensure_session_tool_call_columns(connection)
         self._ensure_indexes(connection)
 
     def _migrate_sessions_schema(self, connection: sqlite3.Connection) -> None:
@@ -366,6 +383,7 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
                 thought_text TEXT NOT NULL DEFAULT '',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
                 created_at INTEGER NOT NULL,
                 turn_index INTEGER,
                 thinking_time REAL,
@@ -403,6 +421,7 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                 output_json TEXT NOT NULL DEFAULT 'null',
                 error_message TEXT,
                 summary TEXT NOT NULL DEFAULT '',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
                 approval_json TEXT,
                 input_request_json TEXT,
                 started_at INTEGER NOT NULL,
@@ -501,6 +520,16 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
         }
         if "thinking_time" not in existing_columns:
             connection.execute("ALTER TABLE session_messages ADD COLUMN thinking_time REAL")
+        if "metadata_json" not in existing_columns:
+            connection.execute("ALTER TABLE session_messages ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'")
+
+    def _ensure_session_tool_call_columns(self, connection: sqlite3.Connection) -> None:
+        existing_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(session_tool_calls)").fetchall()
+        }
+        if "metadata_json" not in existing_columns:
+            connection.execute("ALTER TABLE session_tool_calls ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'")
 
     def _ensure_indexes(self, connection: sqlite3.Connection) -> None:
         statements = [
@@ -722,6 +751,7 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                     str(message.get("role") or ""),
                     str(message.get("content") or ""),
                     self._extract_message_thoughts(message),
+                    self._to_json(self._metadata_payload(message, MESSAGE_METADATA_KEYS)),
                     self._coerce_optional_int(message.get("timestamp")) or state.updated_at,
                     self._coerce_optional_int(message.get("turnIndex", message.get("turn_index"))),
                     self._coerce_optional_float(message.get("thinkingTime", message.get("thinking_time"))),
@@ -732,10 +762,10 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
             connection.executemany(
                 """
                 INSERT INTO session_messages (
-                    id, session_id, role, content, thought_text, created_at, turn_index,
+                    id, session_id, role, content, thought_text, metadata_json, created_at, turn_index,
                     thinking_time, message_index
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -747,14 +777,20 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
             message_id = str(message.get("id") or f"{state.session_id}-message-{message_index}")
             parts = self._message_parts_for_storage(message)
             for part_index, part in enumerate(parts, start=1):
+                part_type = str(part.get("type") or "")
+                stored_part_type = part_type
+                text_value = str(part.get("text") or "") if part_type in {"text", "thinking"} else None
+                if part_type == "data":
+                    stored_part_type = str(part.get("dataType") or "")
+                    text_value = self._to_json(part.get("data"))
                 rows.append(
                     (
                         f"{message_id}-part-{part_index}",
                         state.session_id,
                         message_id,
                         part_index,
-                        str(part.get("type") or ""),
-                        str(part.get("text") or "") if part.get("type") in {"text", "thinking"} else None,
+                        stored_part_type,
+                        text_value,
                         self._extract_tool_call_id(part),
                     )
                 )
@@ -785,6 +821,7 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                     self._to_json(tool.get("output")),
                     str(tool.get("errorMessage", tool.get("error_message")) or "") or None,
                     self._tool_summary(tool),
+                    self._to_json(self._metadata_payload(tool, TOOL_METADATA_KEYS)),
                     self._to_json(tool.get("approval")) if tool.get("approval") is not None else None,
                     self._to_json(tool.get("inputRequest")) if tool.get("inputRequest") is not None else None,
                     self._coerce_optional_int(tool.get("startedAt", tool.get("started_at"))) or state.updated_at,
@@ -799,10 +836,10 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                 """
                 INSERT INTO session_tool_calls (
                     id, session_id, assistant_id, tool_name, state, success, arguments_json, output_json,
-                    error_message, summary, approval_json, input_request_json,
+                    error_message, summary, metadata_json, approval_json, input_request_json,
                     started_at, finished_at, turn_index, step_index, tool_index
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -945,12 +982,22 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
         include_large_fields: bool,
     ) -> PersistedSessionState:
         session_id = str(row["session_id"])
-        history_tools = self._load_tool_calls(connection, session_id)
-        history_messages = self._load_messages(connection, session_id, history_tools)
-        thoughts = self._rebuild_thoughts_from_messages(history_messages)
-        usage_map = self._load_usage_map(connection, session_id)
-        terminal_output = self._load_terminal_output(connection, session_id) if include_large_fields else str(row["terminal_preview"] or "")
-        code_changes = self._load_code_changes(connection, session_id, include_large_fields=include_large_fields)
+        if include_large_fields:
+            history_tools = self._load_tool_calls(connection, session_id)
+            history_messages = self._load_messages(connection, session_id, history_tools)
+            thoughts = self._rebuild_thoughts_from_messages(history_messages)
+            usage_map = self._load_usage_map(connection, session_id)
+            terminal_output = self._load_terminal_output(connection, session_id)
+            code_changes = self._load_code_changes(connection, session_id, include_large_fields=True)
+            plan_steps = self._load_plan_steps(connection, session_id)
+        else:
+            history_tools = []
+            history_messages = []
+            thoughts = []
+            usage_map = {}
+            terminal_output = str(row["terminal_preview"] or "")
+            code_changes = []
+            plan_steps = []
         return PersistedSessionState(
             session_id=session_id,
             workspace=str(row["workspace"]),
@@ -983,7 +1030,7 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
             token_usage=usage_map.get("current", self._empty_usage_payload()),
             cumulative_token_usage=usage_map.get("cumulative", self._empty_usage_payload()),
             max_context_tokens=(int(row["max_context_tokens"]) if row["max_context_tokens"] is not None else None),
-            plan_steps=self._load_plan_steps(connection, session_id),
+            plan_steps=plan_steps,
             plan_state=self._from_json(row["plan_state_json"], {}),
             code_changes=code_changes,
             pending_delete_confirmations=self._from_json(row["pending_delete_confirmations_json"], {}),
@@ -1060,6 +1107,12 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                 if tool_call is None:
                     continue
                 part_payload = {"type": "tool_call", "toolCall": tool_call}
+            elif part_type.startswith("data-"):
+                part_payload = {
+                    "type": "data",
+                    "dataType": part_type,
+                    "data": self._from_json(row["text_value"], {}),
+                }
             else:
                 part_payload = {
                     "type": part_type,
@@ -1069,7 +1122,7 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
 
         rows = connection.execute(
             """
-            SELECT id, role, content, thought_text, created_at, turn_index, thinking_time, message_index
+            SELECT id, role, content, thought_text, metadata_json, created_at, turn_index, thinking_time, message_index
             FROM session_messages
             WHERE session_id = ?
             ORDER BY message_index ASC, created_at ASC, id ASC
@@ -1084,6 +1137,9 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                 "role": str(row["role"]),
                 "content": str(row["content"]),
             }
+            metadata = self._from_json(row["metadata_json"], {})
+            if isinstance(metadata, dict):
+                payload.update(metadata)
             thoughts = str(row["thought_text"] or "")
             if thoughts:
                 payload["thoughts"] = thoughts
@@ -1110,7 +1166,7 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
         rows = connection.execute(
             """
             SELECT id, assistant_id, tool_name, state, success, arguments_json, output_json,
-                   error_message, summary, approval_json, input_request_json,
+                   error_message, summary, metadata_json, approval_json, input_request_json,
                    started_at, finished_at, turn_index, step_index, tool_index
             FROM session_tool_calls
             WHERE session_id = ?
@@ -1127,6 +1183,9 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                 "arguments": self._from_json(row["arguments_json"], {}),
                 "output": self._from_json(row["output_json"], None),
             }
+            metadata = self._from_json(row["metadata_json"], {})
+            if isinstance(metadata, dict):
+                tool.update(metadata)
             if row["assistant_id"] is not None:
                 tool["assistantId"] = row["assistant_id"]
             if row["success"] is not None:
@@ -1454,6 +1513,7 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
         normalized["id"] = str(message.get("id") or f"{session_id}-message-{index}")
         normalized["role"] = str(message.get("role") or "")
         normalized["content"] = str(message.get("content") or "")
+        self._normalize_metadata_aliases(normalized)
         if normalized["role"] != "assistant":
             normalized.pop("parts", None)
             normalized.pop("thoughts", None)
@@ -1512,6 +1572,7 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
             normalized["stepIndex"] = normalized.get("step_index")
         if "turn_index" in normalized and "turnIndex" not in normalized:
             normalized["turnIndex"] = normalized.get("turn_index")
+        self._normalize_metadata_aliases(normalized)
         return normalized
 
     def _normalize_code_change(
@@ -1550,6 +1611,35 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
             "description": str(step.get("description") or ""),
             "status": str(step.get("status") or "pending"),
         }
+
+    def _normalize_metadata_aliases(self, payload: dict[str, Any]) -> None:
+        aliases = {
+            "agent_scope": "agentScope",
+            "subagent_id": "subagentId",
+            "parent_tool_call_id": "parentToolCallId",
+            "parent_assistant_id": "parentAssistantId",
+            "subagent_title": "subagentTitle",
+            "subagent_task": "subagentTask",
+        }
+        for snake_key, camel_key in aliases.items():
+            if snake_key in payload and camel_key not in payload:
+                payload[camel_key] = payload.get(snake_key)
+
+    def _metadata_payload(self, payload: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
+        self._normalize_metadata_aliases(payload)
+        metadata: dict[str, Any] = {}
+        for key in keys:
+            value = payload.get(key)
+            if value is None:
+                continue
+            if isinstance(value, str):
+                if not value:
+                    continue
+                metadata[key] = value
+                continue
+            if isinstance(value, (bool, int, float, list, dict)):
+                metadata[key] = value
+        return metadata
 
     def _normalize_usage_payload(self, payload: object) -> dict[str, int]:
         if not isinstance(payload, dict):
@@ -1603,6 +1693,18 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                                 str(message.get("id") or "message"),
                                 len(normalized_parts) + 1,
                             ),
+                        }
+                    )
+                elif (
+                    part_type == "data"
+                    and isinstance(part.get("dataType"), str)
+                    and str(part.get("dataType")).startswith("data-")
+                ):
+                    normalized_parts.append(
+                        {
+                            "type": "data",
+                            "dataType": str(part.get("dataType")),
+                            "data": part.get("data"),
                         }
                     )
             if normalized_parts:

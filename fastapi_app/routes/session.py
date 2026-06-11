@@ -197,9 +197,10 @@ def register_session_routes(
 
     @app.get("/api/sessions/history")
     async def get_session_history() -> JSONResponse:
+        states = await asyncio.to_thread(deps.session_store.list)
         history = [
             deps.persisted_state_to_history_item(state).model_dump()
-            for state in deps.session_store.list()
+            for state in states
         ]
         return JSONResponse({"sessions": history})
 

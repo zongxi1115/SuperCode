@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -28,7 +29,8 @@ def register_workspace_routes(
 ) -> None:
     @app.get("/api/workspaces")
     async def get_workspaces() -> JSONResponse:
-        return JSONResponse({"workspaces": deps.list_workspace_options()})
+        workspaces = await asyncio.to_thread(deps.list_workspace_options)
+        return JSONResponse({"workspaces": workspaces})
 
     @app.get("/api/workspaces/{workspace_id:path}/kanban/boards")
     async def list_kanban_boards(workspace_id: str) -> JSONResponse:

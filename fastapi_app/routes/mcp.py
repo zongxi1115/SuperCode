@@ -28,9 +28,10 @@ class MCPRouteDeps:
 def register_mcp_routes(app: FastAPI, *, deps: MCPRouteDeps) -> None:
     @app.get("/api/mcp/servers")
     async def get_mcp_servers() -> JSONResponse:
+        servers = await asyncio.to_thread(load_mcp_servers_with_status, deps.app_data_root)
         return JSONResponse(
             {
-                "servers": load_mcp_servers_with_status(deps.app_data_root),
+                "servers": servers,
                 "configPath": str(mcp_servers_store_path(deps.app_data_root)),
             }
         )

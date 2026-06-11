@@ -1,6 +1,12 @@
 export type ToolCallRecord = {
   id: string;
   name: string;
+  agentScope?: 'main' | 'subagent' | string;
+  subagentId?: string | null;
+  parentToolCallId?: string | null;
+  parentAssistantId?: string | null;
+  subagentTitle?: string | null;
+  subagentTask?: string | null;
   arguments?: Record<string, unknown>;
   output?: unknown;
   errorMessage?: string;
@@ -61,9 +67,12 @@ export type SubagentStepSnapshot = {
 
 export type SubagentSnapshot = {
   id?: string;
+  messageId?: string;
   kind?: string;
   title?: string;
   agentType?: string;
+  parentToolCallId?: string | null;
+  parentAssistantId?: string | null;
   status: 'running' | 'completed' | 'error' | 'paused' | string;
   task: string;
   focusPaths?: string[];
@@ -89,11 +98,18 @@ export type ContentBlock =
 export type ChatMessage = {
   id: string;
   role: 'user' | 'assistant';
+  agentScope?: 'main' | 'subagent' | string;
+  subagentId?: string | null;
+  parentToolCallId?: string | null;
+  parentAssistantId?: string | null;
+  subagentTitle?: string | null;
+  subagentTask?: string | null;
   content: string;
   thoughts?: string;
   toolCalls?: ToolCallRecord[];
   parts?: ContentBlock[];
   thinkingTime?: number; // 思考时间（秒）
+  startTime?: number; // 当前流式回复开始时间戳（毫秒）
 };
 
 export type CompletionActionKey =

@@ -10,7 +10,7 @@ from typing import Any, Callable
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
-from agent import AgentEvent
+from agent import Agent, AgentEvent
 from coding_agent.tools import delete_file_in_workspace, execute_git_commit, execute_git_tag
 from fastapi_app.app_config import APP_DATA_ROOT
 from fastapi_app.api_models import ChatStreamRequest, ContinueChatStreamRequest
@@ -113,6 +113,368 @@ async def run_agent_stream(
                 "data": deps.build_session_state_payload(session),
             },
         }
+
+    subagent_metadata_by_id: dict[str, dict[str, Any]] = {}
+
+    def _scope_subagent_tool_id(subagent_id: str, tool_id: str) -> str:
+        normalized_tool_id = tool_id.strip()
+        if not normalized_tool_id:
+            return ""
+        prefix = f"{subagent_id}:"
+        return normalized_tool_id if normalized_tool_id.startswith(prefix) else f"{prefix}{normalized_tool_id}"
+
+    def _normalize_subagent_tool_call_payload(
+        subagent_id: str,
+        raw_tool_call: object,
+    ) -> dict[str, Any] | None:
+        if not isinstance(raw_tool_call, dict):
+            return None
+        tool_call = {**raw_tool_call}
+        tool_id = _scope_subagent_tool_id(subagent_id, str(tool_call.get("id") or ""))
+        if tool_id:
+            tool_call["id"] = tool_id
+        return tool_call
+
+    def _normalize_subagent_tool_result_payload(
+        subagent_id: str,
+        raw_tool_result: object,
+    ) -> dict[str, Any] | None:
+        if not isinstance(raw_tool_result, dict):
+            return None
+        tool_result = {**raw_tool_result}
+        tool_call_id = _scope_subagent_tool_id(
+            subagent_id,
+            str(tool_result.get("tool_call_id", tool_result.get("toolCallId")) or ""),
+        )
+        if tool_call_id:
+            tool_result["tool_call_id"] = tool_call_id
+            tool_result["toolCallId"] = tool_call_id
+        return tool_result
+
+    def _normalize_subagent_event(raw_payload: object) -> dict[str, Any] | None:
+        if not isinstance(raw_payload, dict):
+            return None
+        subagent_id = str(raw_payload.get("subagent_id", raw_payload.get("subagentId")) or "").strip()
+        if not subagent_id:
+            return None
+        event_name = str(raw_payload.get("event") or raw_payload.get("type") or "").strip()
+        message_id = str(
+            raw_payload.get("message_id", raw_payload.get("messageId"))
+            or f"subagent-message-{subagent_id}"
+        ).strip()
+        parent_tool_call_id = str(
+            raw_payload.get("parent_tool_call_id", raw_payload.get("parentToolCallId"))
+            or ""
+        ).strip()
+        parent_assistant_id = str(
+            raw_payload.get("parent_assistant_id", raw_payload.get("parentAssistantId"))
+            or assistant_id
+            or ""
+        ).strip()
+        final_answer = raw_payload.get("final_answer", raw_payload.get("finalAnswer"))
+        if final_answer is None:
+            final_answer = raw_payload.get("final_output", raw_payload.get("finalOutput"))
+        tool_call = _normalize_subagent_tool_call_payload(
+            subagent_id,
+            raw_payload.get("tool_call", raw_payload.get("toolCall")),
+        )
+        tool_result = _normalize_subagent_tool_result_payload(
+            subagent_id,
+            raw_payload.get("tool_result", raw_payload.get("toolResult")),
+        )
+        return {
+            "event": event_name,
+            "messageId": message_id,
+            "subagentId": subagent_id,
+            "title": str(raw_payload.get("title") or raw_payload.get("subagentTitle") or "子智能体"),
+            "agentType": str(raw_payload.get("agent_type", raw_payload.get("agentType")) or "subagent"),
+            "task": str(raw_payload.get("task") or raw_payload.get("subagentTask") or ""),
+            "parentToolCallId": parent_tool_call_id or None,
+            "parentAssistantId": parent_assistant_id or None,
+            "stepIndex": raw_payload.get("step_index", raw_payload.get("stepIndex")),
+            "message": str(raw_payload.get("message") or ""),
+            "delta": raw_payload.get("delta"),
+            "thought": raw_payload.get("thought"),
+            "finalAnswer": final_answer,
+            "usage": raw_payload.get("usage") if isinstance(raw_payload.get("usage"), dict) else None,
+            "toolCall": tool_call,
+            "toolResult": tool_result,
+            "status": raw_payload.get("status"),
+            "error": raw_payload.get("error"),
+        }
+
+    def _subagent_history_metadata(event_payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "agentScope": "subagent",
+            "subagentId": event_payload["subagentId"],
+            "parentToolCallId": event_payload.get("parentToolCallId"),
+            "parentAssistantId": event_payload.get("parentAssistantId"),
+            "subagentTitle": event_payload.get("title") or "子智能体",
+            "subagentTask": event_payload.get("task") or "",
+        }
+
+    def _sync_subagent_message(
+        event_payload: dict[str, Any],
+        updater: Callable[[dict[str, Any]], dict[str, Any]],
+    ) -> None:
+        metadata = _subagent_history_metadata(event_payload)
+        message_id = str(event_payload["messageId"])
+
+        def _updater(message: dict[str, Any]) -> dict[str, Any]:
+            return sync_assistant_message_fields(updater({**message, **metadata}))
+
+        update_assistant_history_message(session, message_id, _updater)
+
+    def _append_subagent_part_delta(event_payload: dict[str, Any], part_type: str, delta: str) -> None:
+        if not delta:
+            return
+
+        def _updater(message: dict[str, Any]) -> dict[str, Any]:
+            parts = list(message.get("parts") or [])
+            last_part = parts[-1] if parts else None
+            if isinstance(last_part, dict) and last_part.get("type") == part_type:
+                parts[-1] = {**last_part, "text": f"{str(last_part.get('text') or '')}{delta}"}
+            else:
+                parts.append({"type": part_type, "text": delta})
+            return {**message, "parts": parts}
+
+        _sync_subagent_message(event_payload, _updater)
+
+    def _replace_subagent_text(event_payload: dict[str, Any], text: str) -> None:
+        def _updater(message: dict[str, Any]) -> dict[str, Any]:
+            parts = [
+                part
+                for part in list(message.get("parts") or [])
+                if not (isinstance(part, dict) and part.get("type") == "text")
+            ]
+            if text:
+                parts.append({"type": "text", "text": text})
+            return {**message, "parts": parts}
+
+        _sync_subagent_message(event_payload, _updater)
+
+    def _upsert_subagent_data_part(event_payload: dict[str, Any], data_type: str, data: Any) -> None:
+        def _updater(message: dict[str, Any]) -> dict[str, Any]:
+            parts = list(message.get("parts") or [])
+            data_id = str(data.get("id") or "") if isinstance(data, dict) else ""
+            replaced = False
+            next_parts: list[dict[str, Any]] = []
+            for part in parts:
+                if not isinstance(part, dict) or part.get("type") != "data":
+                    next_parts.append(part)
+                    continue
+                same_type = str(part.get("dataType") or "") == data_type
+                part_data = part.get("data")
+                part_data_id = str(part_data.get("id") or "") if isinstance(part_data, dict) else ""
+                if same_type and (not data_id or part_data_id == data_id):
+                    next_parts.append({"type": "data", "dataType": data_type, "data": data})
+                    replaced = True
+                else:
+                    next_parts.append(part)
+            if not replaced:
+                next_parts.append({"type": "data", "dataType": data_type, "data": data})
+            return {**message, "parts": next_parts}
+
+        _sync_subagent_message(event_payload, _updater)
+
+    def _upsert_subagent_tool_part(event_payload: dict[str, Any], tool_record: dict[str, Any]) -> None:
+        tool_id = str(tool_record.get("id") or "").strip()
+        if not tool_id:
+            return
+
+        def _updater(message: dict[str, Any]) -> dict[str, Any]:
+            parts = list(message.get("parts") or [])
+            replaced = False
+            next_parts: list[dict[str, Any]] = []
+            for part in parts:
+                if (
+                    isinstance(part, dict)
+                    and part.get("type") == "tool_call"
+                    and isinstance(part.get("toolCall"), dict)
+                    and str(part["toolCall"].get("id") or "") == tool_id
+                ):
+                    next_parts.append({"type": "tool_call", "toolCall": {**part["toolCall"], **tool_record}})
+                    replaced = True
+                else:
+                    next_parts.append(part)
+            if not replaced:
+                next_parts.append({"type": "tool_call", "toolCall": tool_record})
+            return {**message, "parts": next_parts}
+
+        _sync_subagent_message(event_payload, _updater)
+
+    def _record_subagent_event(raw_payload: object) -> dict[str, Any] | None:
+        event_payload = _normalize_subagent_event(raw_payload)
+        if event_payload is None:
+            return None
+
+        subagent_metadata_by_id[event_payload["subagentId"]] = event_payload
+        event_name = event_payload["event"]
+        metadata = _subagent_history_metadata(event_payload)
+
+        if event_name == "assistant_started":
+            _sync_subagent_message(event_payload, lambda message: {**message, **metadata})
+            return event_payload
+
+        if event_name == "thought_delta":
+            _append_subagent_part_delta(event_payload, "thinking", str(event_payload.get("delta") or ""))
+            return event_payload
+
+        if event_name == "thought":
+            thought_text = str(event_payload.get("thought") or "")
+            if thought_text.strip():
+                upsert_assistant_thinking_part(session, str(event_payload["messageId"]), thought_text)
+                _sync_subagent_message(event_payload, lambda message: message)
+            return event_payload
+
+        if event_name == "final_answer_delta":
+            _append_subagent_part_delta(event_payload, "text", str(event_payload.get("delta") or ""))
+            return event_payload
+
+        if event_name in {"final", "turn_finished", "limit_reached", "assistant_done"}:
+            final_output = str(event_payload.get("finalAnswer") or "")
+            if final_output:
+                _replace_subagent_text(event_payload, final_output)
+            return event_payload
+
+        if event_name == "error":
+            error_text = str(event_payload.get("error") or event_payload.get("message") or "").strip()
+            if error_text:
+                _append_subagent_part_delta(event_payload, "text", f"子智能体执行失败：{error_text}")
+            return event_payload
+
+        if event_name == "usage":
+            deps.merge_session_token_usage(session, event_payload.get("usage"))
+            loop.call_soon_threadsafe(queue.put_nowait, _session_state_event())
+            return event_payload
+
+        if event_name == "tool_call":
+            raw_tool_call = event_payload.get("toolCall")
+            if not isinstance(raw_tool_call, dict):
+                return event_payload
+            tool_id = str(raw_tool_call.get("id") or "").strip()
+            tool_name = str(raw_tool_call.get("name") or "").strip()
+            if not tool_id or not tool_name:
+                return event_payload
+            arguments = raw_tool_call.get("arguments")
+            tool_record = {
+                **metadata,
+                "id": tool_id,
+                "stepIndex": event_payload.get("stepIndex"),
+                "name": tool_name,
+                "arguments": arguments if isinstance(arguments, dict) else {},
+                "state": "running",
+            }
+            _upsert_subagent_tool_part(event_payload, tool_record)
+            return event_payload
+
+        if event_name == "tool_result":
+            raw_tool_call = event_payload.get("toolCall")
+            raw_tool_result = event_payload.get("toolResult")
+            if not isinstance(raw_tool_result, dict):
+                return event_payload
+            tool_id = str(
+                (raw_tool_call or {}).get("id")
+                if isinstance(raw_tool_call, dict)
+                else ""
+            ).strip() or str(raw_tool_result.get("tool_call_id", raw_tool_result.get("toolCallId")) or "").strip()
+            tool_name = str(
+                (raw_tool_call or {}).get("name")
+                if isinstance(raw_tool_call, dict)
+                else ""
+            ).strip() or str(raw_tool_result.get("name") or "").strip()
+            if not tool_id or not tool_name:
+                return event_payload
+            arguments = raw_tool_call.get("arguments") if isinstance(raw_tool_call, dict) else {}
+            success = raw_tool_result.get("success")
+            is_success = success if isinstance(success, bool) else None
+            tool_state = "completed" if is_success is not False else "error"
+            tool_record = {
+                **metadata,
+                "id": tool_id,
+                "stepIndex": event_payload.get("stepIndex"),
+                "name": tool_name,
+                "arguments": arguments if isinstance(arguments, dict) else {},
+                "output": raw_tool_result.get("output"),
+                "success": is_success,
+                "errorMessage": raw_tool_result.get("error_message", raw_tool_result.get("errorMessage")),
+                "state": tool_state,
+            }
+            session.history_tools = upsert_tool(session.history_tools, tool_record)
+            _upsert_subagent_tool_part(event_payload, tool_record)
+            session.touch()
+            return event_payload
+
+        return event_payload
+
+    def _record_subagent_snapshot(raw_payload: object) -> dict[str, Any] | None:
+        payload = raw_payload if isinstance(raw_payload, dict) else {}
+        snapshot = payload.get("data", payload)
+        if not isinstance(snapshot, dict):
+            return None
+        subagent_id = str(snapshot.get("id") or "").strip()
+        if not subagent_id:
+            return None
+        base_event = subagent_metadata_by_id.get(subagent_id) or {
+            "event": "snapshot",
+            "messageId": str(snapshot.get("messageId") or f"subagent-message-{subagent_id}"),
+            "subagentId": subagent_id,
+            "title": str(snapshot.get("title") or "子智能体"),
+            "agentType": str(snapshot.get("agentType") or "subagent"),
+            "task": str(snapshot.get("task") or ""),
+            "parentToolCallId": None,
+            "parentAssistantId": assistant_id,
+        }
+        _upsert_subagent_data_part(base_event, "data-subagent-task", snapshot)
+        return snapshot
+
+    def emit_tool_runtime_event(event_type: str, payload: object) -> None:
+        if event_type == "subagent_event":
+            def _handle_subagent_event() -> None:
+                event_payload = _record_subagent_event(payload)
+                if event_payload is None:
+                    return
+                queue.put_nowait(
+                    {
+                        "type": "data-subagent-event",
+                        "payload": {
+                            "assistant_id": assistant_id,
+                            "data": event_payload,
+                        },
+                    }
+                )
+
+            loop.call_soon_threadsafe(_handle_subagent_event)
+            return
+
+        if event_type == "data-subagent-task":
+            def _handle_subagent_snapshot() -> None:
+                snapshot = _record_subagent_snapshot(payload)
+                data_payload = payload.get("data", payload) if isinstance(payload, dict) else payload
+                queue.put_nowait(
+                    {
+                        "type": "data-subagent-task",
+                        "payload": {
+                            "assistant_id": assistant_id,
+                            "data": data_payload if snapshot is not None else payload,
+                        },
+                    }
+                )
+
+            loop.call_soon_threadsafe(_handle_subagent_snapshot)
+            return
+
+        if event_type.startswith("data-"):
+            loop.call_soon_threadsafe(
+                queue.put_nowait,
+                {
+                    "type": event_type,
+                    "payload": {
+                        "assistant_id": assistant_id,
+                        "data": payload.get("data", payload) if isinstance(payload, dict) else payload,
+                    },
+                },
+            )
 
     await queue.put(_session_state_event())
     update_assistant_history_message(session, assistant_id, lambda message: sync_assistant_message_fields(message))
@@ -610,6 +972,19 @@ async def run_agent_stream(
             )
             loop.call_soon_threadsafe(queue.put_nowait, _session_state_event())
 
+    runtime_agent = getattr(session.chat_session, "agent", None) if session.chat_session is not None else None
+    previous_runtime_event_emitter: object = None
+    previous_runtime_assistant_id: object = None
+    had_runtime_event_emitter = False
+    had_runtime_assistant_id = False
+    if isinstance(runtime_agent, Agent):
+        had_runtime_event_emitter = "runtime_event_emitter" in runtime_agent.tool_context_metadata
+        had_runtime_assistant_id = "runtime_assistant_id" in runtime_agent.tool_context_metadata
+        previous_runtime_event_emitter = runtime_agent.tool_context_metadata.get("runtime_event_emitter")
+        previous_runtime_assistant_id = runtime_agent.tool_context_metadata.get("runtime_assistant_id")
+        runtime_agent.tool_context_metadata["runtime_event_emitter"] = emit_tool_runtime_event
+        runtime_agent.tool_context_metadata["runtime_assistant_id"] = assistant_id
+
     try:
         if resume_existing_turn:
             response = await asyncio.to_thread(
@@ -681,6 +1056,16 @@ async def run_agent_stream(
         await queue.put({"type": "assistant_done", "payload": {"id": assistant_id}})
         await queue.put(None)
         return
+    finally:
+        if isinstance(runtime_agent, Agent):
+            if had_runtime_event_emitter:
+                runtime_agent.tool_context_metadata["runtime_event_emitter"] = previous_runtime_event_emitter
+            else:
+                runtime_agent.tool_context_metadata.pop("runtime_event_emitter", None)
+            if had_runtime_assistant_id:
+                runtime_agent.tool_context_metadata["runtime_assistant_id"] = previous_runtime_assistant_id
+            else:
+                runtime_agent.tool_context_metadata.pop("runtime_assistant_id", None)
 
     if session.cancel_event.is_set():
         if session.agent_type == "deploy":
