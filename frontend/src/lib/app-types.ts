@@ -327,6 +327,14 @@ export type SessionHistoryItem = {
   updatedAt: number;
 };
 
+export type SessionHistoryResponse = {
+  sessions: SessionHistoryItem[];
+  limit: number;
+  offset: number;
+  total: number;
+  hasMore: boolean;
+};
+
 export type TerminalSnapshotPayload = {
   sessionId: string;
   output: string;

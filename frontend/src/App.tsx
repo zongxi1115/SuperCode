@@ -31,6 +31,7 @@ import type {
   SessionContextPayload,
   SessionContextCompressionPayload,
   SessionHistoryItem,
+  SessionHistoryResponse,
   SessionExecutionMode,
   SessionPayload,
   SkillSummary,
@@ -70,6 +71,7 @@ import { SplashScreen } from '@/components/app/splash-screen';
 const DEFAULT_WEB_PREVIEW_URL = 'http://localhost:8888';
 const CONTEXT_COMPRESSION_USAGE_THRESHOLD = 0.8;
 const STREAM_RETRY_LIMIT = 10;
+const SESSION_HISTORY_PAGE_SIZE = 30;
 const RETRYABLE_STREAM_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
 
 type ViewTransitionDocument = Document & {
@@ -490,6 +492,11 @@ type SubagentStreamEvent = {
   error?: string | null;
 };
 
+type LoadSessionHistoryOptions = {
+  offset?: number;
+  append?: boolean;
+};
+
 function isAbortError(error: unknown) {
   return error instanceof DOMException && error.name === 'AbortError';
 }
@@ -700,6 +707,8 @@ export default function App() {
   const [chatPanelWidth, setChatPanelWidth] = useState(920);
   const [sessionHistory, setSessionHistory] = useState<SessionHistoryItem[]>([]);
   const [isHistoryLoading, setIsHistoryLoading] = useState(false);
+  const [sessionHistoryHasMore, setSessionHistoryHasMore] = useState(false);
+  const [sessionHistoryNextOffset, setSessionHistoryNextOffset] = useState(0);
   const [recentProjects, setRecentProjects] = useState<RecentProject[]>(() => getRecentProjects());
   const [newSessionExecutionMode, setNewSessionExecutionMode] = useState<SessionExecutionMode>('local');
   const [currentSessionExecutionMode, setCurrentSessionExecutionMode] = useState<SessionExecutionMode>('local');
@@ -1423,21 +1432,39 @@ export default function App() {
     setShowWorkspacePicker(false);
   }, [syncVisibleSessionSnapshot]);
 
-  const loadSessionHistory = useCallback(async () => {
+  const loadSessionHistory = useCallback(async (options: LoadSessionHistoryOptions = {}) => {
+    const offset = options.offset ?? 0;
+    const append = options.append ?? false;
     setIsHistoryLoading(true);
     try {
-      const res = await apiFetch('/api/sessions/history');
+      const params = new URLSearchParams({
+        limit: String(SESSION_HISTORY_PAGE_SIZE),
+        offset: String(offset),
+      });
+      const res = await apiFetch(`/api/sessions/history?${params.toString()}`);
       if (!res.ok) {
         throw new Error('读取历史会话失败');
       }
-      const data = await res.json();
-      setSessionHistory(data.sessions ?? []);
+      const data = (await res.json()) as SessionHistoryResponse;
+      const nextSessions = data.sessions ?? [];
+      setSessionHistory((prev) => {
+        if (!append) return nextSessions;
+        const seen = new Set(prev.map((item) => item.sessionId));
+        return [...prev, ...nextSessions.filter((item) => !seen.has(item.sessionId))];
+      });
+      setSessionHistoryHasMore(Boolean(data.hasMore));
+      setSessionHistoryNextOffset(offset + nextSessions.length);
     } catch (error) {
       console.error(error);
     } finally {
       setIsHistoryLoading(false);
     }
   }, []);
+
+  const loadMoreSessionHistory = useCallback(async () => {
+    if (isHistoryLoading || !sessionHistoryHasMore) return;
+    await loadSessionHistory({ offset: sessionHistoryNextOffset, append: true });
+  }, [isHistoryLoading, loadSessionHistory, sessionHistoryHasMore, sessionHistoryNextOffset]);
 
   const persistKanbanCardAiState = useCallback(
     async (cardId: string, aiState: KanbanAiState | null) => {
@@ -4125,6 +4152,7 @@ export default function App() {
         currentSessionId={sessionId}
         historyItems={sessionHistory}
         isHistoryLoading={isHistoryLoading}
+        hasMoreHistory={sessionHistoryHasMore}
         isCollapsed={isSidebarCollapsed}
         selectedWorkspace={selectedWorkspace}
         selectedBaseWorkspace={currentBaseWorkspace || selectedWorkspace}
@@ -4137,6 +4165,7 @@ export default function App() {
         onNewSession={handleNewSession}
         onSelectHistory={(targetSessionId) => void restoreSession(targetSessionId)}
         onDeleteHistory={(targetSessionId) => void handleDeleteHistory(targetSessionId)}
+        onLoadMoreHistory={() => void loadMoreSessionHistory()}
         onToggle={toggleSidebar}
         onSelectOtherProject={handleSelectOtherProject}
         activePlugin={activePlugin}

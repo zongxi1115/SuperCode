@@ -233,6 +233,38 @@
   color: var(--foreground);
 }
 
+.artifact-shimmer-block {
+  position: relative;
+  overflow: hidden;
+  background: color-mix(in oklch, var(--muted), var(--foreground) 4%);
+}
+
+.artifact-shimmer-block::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-120%);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in oklch, var(--background), transparent 12%),
+    transparent
+  );
+  animation: artifact-shimmer 1.35s ease-in-out infinite;
+}
+
+@keyframes artifact-shimmer {
+  to {
+    transform: translateX(120%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .artifact-shimmer-block::after {
+    animation: none;
+  }
+}
+
 .project-docs-editor h1 {
   margin: 1.15em 0 0.45em;
   font-size: 2rem;

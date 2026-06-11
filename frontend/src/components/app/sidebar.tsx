@@ -4,13 +4,14 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { AnimatePresence, motion } from 'motion/react';
 import type { PluginSummary, SessionHistoryItem } from '@/lib/app-types';
 import { cn } from '@/lib/utils';
-import { ChevronRight, FileCode, FileText, FolderOpen, GitBranch, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Plus, Trash2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, FileCode, FileText, FolderOpen, GitBranch, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Plus, Trash2 } from 'lucide-react';
 import { useMemo, useState } from 'react';
 
 type SidebarProps = {
   currentSessionId: string | null;
   historyItems: SessionHistoryItem[];
   isHistoryLoading: boolean;
+  hasMoreHistory: boolean;
   isCollapsed: boolean;
   isResizing: boolean;
   selectedWorkspace: string;
@@ -23,6 +24,7 @@ type SidebarProps = {
   onNewSession: () => void;
   onSelectHistory: (sessionId: string) => void;
   onDeleteHistory: (sessionId: string) => void;
+  onLoadMoreHistory: () => void;
   onToggle: () => void;
   onSelectOtherProject: () => void;
   activePlugin: string | null;
@@ -64,6 +66,7 @@ export function Sidebar({
   currentSessionId,
   historyItems,
   isHistoryLoading,
+  hasMoreHistory,
   isCollapsed,
   isResizing,
   selectedWorkspace,
@@ -74,6 +77,7 @@ export function Sidebar({
   onNewSession,
   onSelectHistory,
   onDeleteHistory,
+  onLoadMoreHistory,
   onToggle,
   onSelectOtherProject,
   width,
@@ -298,6 +302,18 @@ export function Sidebar({
                     </div>
                   );
                 })}
+
+                {hasMoreHistory ? (
+                  <button
+                    type="button"
+                    onClick={onLoadMoreHistory}
+                    disabled={isHistoryLoading}
+                    className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-md border border-dashed px-2 py-1.5 text-xs text-muted-foreground transition-colors hover:border-border hover:bg-muted/40 hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+                  >
+                    <ChevronDown className="size-3.5" />
+                    {isHistoryLoading ? '加载中...' : '加载更多'}
+                  </button>
+                ) : null}
               </div>
             </ScrollArea>
 

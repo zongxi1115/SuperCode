@@ -196,13 +196,27 @@ def register_session_routes(
         return JSONResponse(snapshot.model_dump())
 
     @app.get("/api/sessions/history")
-    async def get_session_history() -> JSONResponse:
-        states = await asyncio.to_thread(deps.session_store.list)
+    async def get_session_history(
+        limit: int = Query(30, ge=1, le=100),
+        offset: int = Query(0, ge=0),
+    ) -> JSONResponse:
+        def load_history_page() -> tuple[list[Any], int]:
+            return deps.session_store.list(limit=limit, offset=offset), deps.session_store.count()
+
+        states, total = await asyncio.to_thread(load_history_page)
         history = [
             deps.persisted_state_to_history_item(state).model_dump()
             for state in states
         ]
-        return JSONResponse({"sessions": history})
+        return JSONResponse(
+            {
+                "sessions": history,
+                "limit": limit,
+                "offset": offset,
+                "total": total,
+                "hasMore": offset + len(history) < total,
+            }
+        )
 
     @app.get("/api/sessions/{session_id}")
     async def get_session_snapshot(session_id: str) -> JSONResponse:

@@ -52,6 +52,16 @@ from fastapi_app.workspace_utils import (
     resolve_workspace_path,
 )
 
+STREAM_RESPONSE_HEADERS = {
+    "Cache-Control": "no-cache, no-transform",
+    "X-Accel-Buffering": "no",
+}
+
+UI_MESSAGE_STREAM_HEADERS = {
+    **STREAM_RESPONSE_HEADERS,
+    "x-vercel-ai-ui-message-stream": "v1",
+}
+
 
 @dataclass(frozen=True)
 class ChatRuntimeDeps:
@@ -1404,15 +1414,16 @@ def register_chat_routes(
                         await producer
 
         if protocol == "legacy":
-            return StreamingResponse(event_generator(), media_type="text/event-stream")
+            return StreamingResponse(
+                event_generator(),
+                media_type="text/event-stream",
+                headers=STREAM_RESPONSE_HEADERS,
+            )
 
         return StreamingResponse(
             event_generator(),
             media_type="text/event-stream",
-            headers={
-                "x-vercel-ai-ui-message-stream": "v1",
-                "Cache-Control": "no-cache",
-            },
+            headers=UI_MESSAGE_STREAM_HEADERS,
         )
 
     @app.post("/api/chat/continue")
@@ -1470,14 +1481,15 @@ def register_chat_routes(
                         await producer
 
         if protocol == "legacy":
-            return StreamingResponse(event_generator(), media_type="text/event-stream")
+            return StreamingResponse(
+                event_generator(),
+                media_type="text/event-stream",
+                headers=STREAM_RESPONSE_HEADERS,
+            )
 
         return StreamingResponse(
             event_generator(),
             media_type="text/event-stream",
-            headers={
-                "x-vercel-ai-ui-message-stream": "v1",
-                "Cache-Control": "no-cache",
-            },
+            headers=UI_MESSAGE_STREAM_HEADERS,
         )
 

@@ -932,11 +932,51 @@ function HtmlArtifactPreview({ artifact, isGenerating }: { artifact: HtmlArtifac
   );
 }
 
-function PendingHtmlArtifact({ title }: { title: string }) {
+function ArtifactSkeletonBlock({ className }: { className?: string }) {
   return (
-    <div className="my-3 flex items-center gap-2 rounded-lg border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
-      <Loader2 className="size-3.5 animate-spin" />
-      <span className="truncate">{title || "HTML Artifact"} 正在生成</span>
+    <div
+      aria-hidden="true"
+      className={cn("artifact-shimmer-block rounded-md", className)}
+    />
+  );
+}
+
+function PendingHtmlArtifact({ title }: { title: string }) {
+  const displayTitle = title || "HTML Artifact";
+
+  return (
+    <div className="my-3 w-full overflow-hidden rounded-lg border bg-background/80 shadow-sm">
+      <div className="flex min-h-11 items-center gap-2 border-b bg-muted/25 px-3">
+        <div className="flex size-7 shrink-0 items-center justify-center rounded-md border bg-background text-muted-foreground">
+          <FileCodeIcon className="size-3.5" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-sm font-medium text-foreground">
+            {displayTitle}
+          </div>
+          <Shimmer duration={1.35} className="text-xs">
+            正在生成预览
+          </Shimmer>
+        </div>
+        <Loader2 className="size-3.5 shrink-0 animate-spin text-muted-foreground" />
+      </div>
+      <div className="grid gap-3 p-3 sm:grid-cols-[minmax(0,1.15fr)_minmax(150px,0.85fr)]">
+        <div className="space-y-2.5">
+          <ArtifactSkeletonBlock className="h-7 w-7/12" />
+          <ArtifactSkeletonBlock className="h-3 w-full" />
+          <ArtifactSkeletonBlock className="h-3 w-10/12" />
+          <div className="grid grid-cols-3 gap-2 pt-1">
+            <ArtifactSkeletonBlock className="aspect-[4/3]" />
+            <ArtifactSkeletonBlock className="aspect-[4/3]" />
+            <ArtifactSkeletonBlock className="aspect-[4/3]" />
+          </div>
+        </div>
+        <div className="space-y-2">
+          <ArtifactSkeletonBlock className="h-20 w-full" />
+          <ArtifactSkeletonBlock className="h-3 w-9/12" />
+          <ArtifactSkeletonBlock className="h-3 w-6/12" />
+        </div>
+      </div>
     </div>
   );
 }

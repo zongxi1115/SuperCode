@@ -112,7 +112,11 @@ class SessionStateAdapter(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def list(self) -> list[PersistedSessionState]:
+    def list(self, *, limit: int | None = None, offset: int = 0) -> list[PersistedSessionState]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def count(self) -> int:
         raise NotImplementedError
 
     @abstractmethod
@@ -151,15 +155,31 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                 return None
             return self._row_to_state(connection, row, include_large_fields=True)
 
-    def list(self) -> list[PersistedSessionState]:
+    def list(self, *, limit: int | None = None, offset: int = 0) -> list[PersistedSessionState]:
+        normalized_offset = max(0, int(offset))
+        parameters: list[Any] = []
+        query = """
+            SELECT
+                session_id, workspace, mode, model, reasoning_effort, execution_mode,
+                base_workspace, worktree_path, worktree_branch, agent_type, phase,
+                title, preview, message_count, tool_call_count, created_at, updated_at
+            FROM sessions
+            ORDER BY updated_at DESC
+        """
+        if limit is not None:
+            query += " LIMIT ? OFFSET ?"
+            parameters.extend([max(0, int(limit)), normalized_offset])
+        elif normalized_offset:
+            query += " LIMIT -1 OFFSET ?"
+            parameters.append(normalized_offset)
         with self._lock, self._connect() as connection:
-            rows = connection.execute(
-                "SELECT * FROM sessions ORDER BY updated_at DESC"
-            ).fetchall()
-            return [
-                self._row_to_state(connection, row, include_large_fields=False)
-                for row in rows
-            ]
+            rows = connection.execute(query, parameters).fetchall()
+            return [self._row_to_list_state(row) for row in rows]
+
+    def count(self) -> int:
+        with self._lock, self._connect() as connection:
+            row = connection.execute("SELECT COUNT(*) AS total FROM sessions").fetchone()
+            return int(row["total"] if row is not None else 0)
 
     def delete(self, session_id: str) -> None:
         with self._lock, self._connect() as connection:
@@ -1040,6 +1060,27 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
             pending_connect_requests=self._from_json(row["pending_connect_requests_json"], {}),
             deploy_connections=self._from_json(row["deploy_connections_json"], {}),
             deploy_state=self._from_json(row["deploy_state_json"], {}),
+        )
+
+    def _row_to_list_state(self, row: sqlite3.Row) -> PersistedSessionState:
+        return PersistedSessionState(
+            session_id=str(row["session_id"]),
+            workspace=str(row["workspace"]),
+            mode=str(row["mode"]),
+            model=str(row["model"]),
+            title=str(row["title"]),
+            preview=str(row["preview"]),
+            message_count=int(row["message_count"] or 0),
+            tool_call_count=int(row["tool_call_count"] or 0),
+            created_at=int(row["created_at"]),
+            updated_at=int(row["updated_at"]),
+            reasoning_effort=row["reasoning_effort"],
+            execution_mode=str(row["execution_mode"] or "local"),
+            base_workspace=row["base_workspace"],
+            worktree_path=row["worktree_path"],
+            worktree_branch=row["worktree_branch"],
+            agent_type=str(row["agent_type"] or "coding"),
+            phase=str(row["phase"] or "idle"),
         )
 
     def _load_open_files(self, connection: sqlite3.Connection, row: sqlite3.Row) -> list[str]:

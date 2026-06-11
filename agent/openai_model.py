@@ -52,10 +52,28 @@ class OpenAICompatibleModel(ModelAdapter):
                 streamed_text = ""
                 streamed_reasoning = ""
                 streamed_text_emitted = ""
+                stream_text_as_final = False
+                saw_tool_delta = False
 
                 def handle_text_delta(delta: str) -> None:
-                    nonlocal streamed_text
+                    nonlocal streamed_text, streamed_text_emitted, stream_text_as_final
                     streamed_text += delta
+                    if saw_tool_delta:
+                        return
+                    if not stream_text_as_final:
+                        stream_text_as_final = self._should_stream_native_text_as_final(
+                            streamed_text,
+                            state,
+                        )
+                    if stream_text_as_final and streamed_text != streamed_text_emitted:
+                        streamed_text_emitted = streamed_text
+                        on_stream(
+                            ModelStreamUpdate(
+                                raw_output=streamed_text,
+                                action="final",
+                                final_answer=streamed_text,
+                            )
+                        )
 
                 def handle_reasoning_delta(delta: str) -> None:
                     nonlocal streamed_reasoning
@@ -68,6 +86,8 @@ class OpenAICompatibleModel(ModelAdapter):
                     )
 
                 def handle_tool_delta(delta_update: CompletionToolCallDelta) -> None:
+                    nonlocal saw_tool_delta
+                    saw_tool_delta = True
                     tool_name = delta_update.name
                     streamed_tool_argument_name, streamed_tool_input = (
                         self._extract_partial_streamable_tool_input(
@@ -144,6 +164,38 @@ class OpenAICompatibleModel(ModelAdapter):
 
     def latest_usage(self) -> dict[str, int] | None:
         return self.client.last_usage
+
+    def _should_stream_native_text_as_final(
+        self,
+        text: str,
+        state: AgentState,
+    ) -> bool:
+        stripped = text.lstrip()
+        if not stripped:
+            return False
+
+        lowered = stripped.lower()
+        if "<supercode-artifact" in lowered:
+            return True
+
+        runtime_state = state.data.get("runtime_state") if isinstance(state.data, dict) else {}
+        if not isinstance(runtime_state, dict):
+            return False
+        if runtime_state.get("final_answer_rendering") != "html":
+            return False
+
+        return lowered.startswith(
+            (
+                "```html",
+                "<!doctype html",
+                "<html",
+                "<main",
+                "<section",
+                "<article",
+                "<div",
+                "<svg",
+            )
+        )
 
     def _build_messages(
         self,
