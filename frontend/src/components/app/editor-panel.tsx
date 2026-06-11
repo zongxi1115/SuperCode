@@ -21,6 +21,14 @@ export type PlanData = {
   markdown: string;
 };
 
+export type CodeSelectionContext = {
+  filePath: string;
+  language: string;
+  selectedText: string;
+  startLineNumber: number;
+  endLineNumber: number;
+};
+
 type EditorPanelProps = {
   fileTree: FileTreeNode[];
   selectedFilePath: string;
@@ -40,6 +48,7 @@ type EditorPanelProps = {
   onPlanAnnotationsChange?: (annotations: Annotation[]) => void;
   onSubmitPlan?: (markdown: string, annotations: Annotation[]) => void;
   onClosePlan?: () => void;
+  onAddCodeContext?: (context: CodeSelectionContext) => void;
   isDarkMode?: boolean;
 };
 
@@ -75,6 +84,7 @@ export function EditorPanel({
   onPlanAnnotationsChange,
   onSubmitPlan,
   onClosePlan,
+  onAddCodeContext,
   isDarkMode = false,
 }: EditorPanelProps) {
   const [isEditing, setIsEditing] = useState(false);
@@ -88,8 +98,12 @@ export function EditorPanel({
   const [isEditorFullscreen, setIsEditorFullscreen] = useState(false);
   const [isRefreshingFileTree, setIsRefreshingFileTree] = useState(false);
   const monacoRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null);
+  const fullscreenMonacoRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null);
+  const isEditorFullscreenRef = useRef(isEditorFullscreen);
   const isEditingRef = useRef(false);
   const editContentRef = useRef('');
+  const selectedFilePathRef = useRef(selectedFilePath);
+  const onAddCodeContextRef = useRef(onAddCodeContext);
   const lastPlanSyncRef = useRef<string | null>(null);
   const planAnnotationsRef = useRef<Annotation[]>([]);
 
@@ -100,8 +114,20 @@ export function EditorPanel({
   }, [isEditing]);
 
   useEffect(() => {
+    isEditorFullscreenRef.current = isEditorFullscreen;
+  }, [isEditorFullscreen]);
+
+  useEffect(() => {
     editContentRef.current = editContent;
   }, [editContent]);
+
+  useEffect(() => {
+    selectedFilePathRef.current = selectedFilePath;
+  }, [selectedFilePath]);
+
+  useEffect(() => {
+    onAddCodeContextRef.current = onAddCodeContext;
+  }, [onAddCodeContext]);
 
   useEffect(() => {
     setIsEditing(false);
@@ -137,7 +163,12 @@ export function EditorPanel({
     if (!selectedFilePath) return;
     setEditContent(selectedFileContent);
     setIsEditing(true);
-    setTimeout(() => monacoRef.current?.focus(), 50);
+    setTimeout(() => {
+      const activeEditor = isEditorFullscreenRef.current
+        ? fullscreenMonacoRef.current ?? monacoRef.current
+        : monacoRef.current ?? fullscreenMonacoRef.current;
+      activeEditor?.focus();
+    }, 50);
   }, [selectedFileContent, selectedFilePath]);
 
   const handleCancelEdit = useCallback(() => {
@@ -204,19 +235,73 @@ export function EditorPanel({
     setFileTreeWidth((prev) => Math.min(Math.max(prev + delta, MIN_FILE_TREE_WIDTH), MAX_FILE_TREE_WIDTH));
   }, []);
 
+  const getCodeSelectionContext = useCallback((editor: MonacoEditor.ICodeEditor): CodeSelectionContext | null => {
+    const filePath = selectedFilePathRef.current;
+    const model = editor.getModel();
+    const selection = editor.getSelection();
+
+    if (!filePath || !model || !selection || selection.isEmpty()) {
+      return null;
+    }
+
+    const selectedText = model.getValueInRange(selection);
+    if (!selectedText.trim()) {
+      return null;
+    }
+
+    const startLineNumber = Math.min(selection.startLineNumber, selection.endLineNumber);
+    const endLineNumber = Math.max(selection.startLineNumber, selection.endLineNumber);
+
+    return {
+      filePath,
+      language: getFileLanguage(filePath),
+      selectedText,
+      startLineNumber,
+      endLineNumber,
+    };
+  }, []);
+
   const handleEditorMount = useCallback(
     (
       editor: MonacoEditor.IStandaloneCodeEditor,
       monaco: typeof import('monaco-editor'),
+      isFullscreenEditor = false,
     ) => {
-      monacoRef.current = editor;
+      if (isFullscreenEditor) {
+        fullscreenMonacoRef.current = editor;
+      } else {
+        monacoRef.current = editor;
+      }
       editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
         if (isEditingRef.current) {
           void handleSaveRef.current();
         }
       });
+      const addContextActionDisposable = editor.addAction({
+        id: isFullscreenEditor
+          ? 'supercode.addSelectedCodeToChat.fullscreen'
+          : 'supercode.addSelectedCodeToChat',
+        label: '添加选中代码到对话',
+        precondition: 'editorHasSelection',
+        contextMenuGroupId: 'navigation',
+        contextMenuOrder: 1.5,
+        run: (activeEditor) => {
+          const context = getCodeSelectionContext(activeEditor);
+          if (!context) return;
+          onAddCodeContextRef.current?.(context);
+        },
+      });
+      editor.onDidDispose(() => {
+        addContextActionDisposable.dispose();
+        if (isFullscreenEditor && fullscreenMonacoRef.current === editor) {
+          fullscreenMonacoRef.current = null;
+        }
+        if (!isFullscreenEditor && monacoRef.current === editor) {
+          monacoRef.current = null;
+        }
+      });
     },
-    [],
+    [getCodeSelectionContext],
   );
 
   const openInEditor = useCallback(async (command: string) => {
@@ -517,6 +602,7 @@ export function EditorPanel({
                             language={getFileLanguage(selectedFilePath)}
                             value={isEditing ? editContent : selectedFileContent}
                             onChange={isEditing ? ((value) => setEditContent(value ?? '')) : undefined}
+                            onMount={(editor, monaco) => handleEditorMount(editor, monaco, true)}
                             theme={isDarkMode ? "vs-dark" : "vs"}
                             path={`fullscreen-${selectedFilePath}`}
                             options={{

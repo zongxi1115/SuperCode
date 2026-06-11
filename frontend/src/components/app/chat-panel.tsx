@@ -223,6 +223,7 @@ type ChatPanelProps = {
   isContextLoading: boolean;
   isContextOpen: boolean;
   input: string;
+  composerFocusRevision?: number;
   isLoading: boolean;
   model: string | null;
   reasoningEffort: string | null;
@@ -276,6 +277,7 @@ type MentionSuggestion = {
   label: string;
   description: string;
   insertValue: string;
+  filePath?: string;
 };
 
 type MentionRenderSegment =
@@ -681,6 +683,7 @@ type HtmlArtifact = {
   type: "html";
   title: string;
   html: string;
+  isPartial?: boolean;
 };
 
 type FinalAnswerSegment =
@@ -689,6 +692,7 @@ type FinalAnswerSegment =
   | { type: "pending-artifact"; title: string };
 
 const ARTIFACT_OPEN_TAG_RE = /<supercode-artifact\b([^>]*)>/i;
+const PARTIAL_ARTIFACT_OPEN_TAG_RE = /<supercode-artifact\b[\s\S]*$/i;
 const ARTIFACT_CLOSE_TAG_RE = /<\/supercode-artifact>/i;
 const ARTIFACT_TITLE_RE = /\btitle\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i;
 const ARTIFACT_TYPE_RE = /\btype\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i;
@@ -696,8 +700,10 @@ const FENCED_HTML_BLOCK_RE = /```html\b[^\n]*\n([\s\S]*?)\n```/i;
 const FENCED_HTML_OPEN_RE = /```html\b[^\n]*\n/i;
 const COMPLETE_HTML_DOC_RE = /(?:<!doctype\s+html[^>]*>\s*)?<html\b[\s\S]*?<\/html>/i;
 const HTML_FRAGMENT_RE = /<(?:style|script|main|section|article|div|svg)\b[\s\S]*?<\/(?:style|script|main|section|article|div|svg)>/i;
+const PARTIAL_HTML_START_RE = /(?:<!doctype\s+html[^>]*>\s*)?<(?:html|main|section|article|div|svg|style|script)\b/i;
 const HTML_TITLE_RE = /<title[^>]*>([\s\S]*?)<\/title>/i;
 const HTML_H1_RE = /<h1[^>]*>([\s\S]*?)<\/h1>/i;
+const LIVE_ARTIFACT_UPDATE_INTERVAL_MS = 140;
 
 const CHAT_CONTENT_MAX_WIDTH = "max-w-[880px]";
 const CHAT_HERO_MAX_WIDTH = "max-w-[960px]";
@@ -737,16 +743,46 @@ function parseFinalAnswerSegments(
   while (cursor < text.length) {
     const remaining = text.slice(cursor);
     const openMatch = ARTIFACT_OPEN_TAG_RE.exec(remaining);
-    const fencedHtmlMatch = allowAutoHtml ? FENCED_HTML_BLOCK_RE.exec(remaining) : null;
+    const partialOpenMatch = !openMatch ? PARTIAL_ARTIFACT_OPEN_TAG_RE.exec(remaining) : null;
     const fencedHtmlOpenMatch = allowAutoHtml ? FENCED_HTML_OPEN_RE.exec(remaining) : null;
-    const htmlDocMatch = allowAutoHtml ? COMPLETE_HTML_DOC_RE.exec(remaining) : null;
-    const htmlFragmentMatch = allowAutoHtml ? HTML_FRAGMENT_RE.exec(remaining) : null;
+    const explicitBoundaryIndex = Math.min(
+      openMatch?.index ?? Number.POSITIVE_INFINITY,
+      partialOpenMatch?.index ?? Number.POSITIVE_INFINITY,
+      fencedHtmlOpenMatch?.index ?? Number.POSITIVE_INFINITY,
+    );
+    const hasExplicitBoundary = Number.isFinite(explicitBoundaryIndex);
+    const autoHtmlScanText =
+      allowAutoHtml && hasExplicitBoundary
+        ? remaining.slice(0, explicitBoundaryIndex)
+        : remaining;
+    const shouldScanFencedBlock =
+      allowAutoHtml &&
+      (!hasExplicitBoundary ||
+        Boolean(
+          fencedHtmlOpenMatch &&
+            fencedHtmlOpenMatch.index <= explicitBoundaryIndex,
+        ));
+    const fencedHtmlMatch = shouldScanFencedBlock
+      ? FENCED_HTML_BLOCK_RE.exec(remaining)
+      : null;
+    const htmlDocMatch = allowAutoHtml ? COMPLETE_HTML_DOC_RE.exec(autoHtmlScanText) : null;
+    const htmlFragmentMatch = allowAutoHtml ? HTML_FRAGMENT_RE.exec(autoHtmlScanText) : null;
+    const partialHtmlMatch =
+      allowAutoHtml && !htmlDocMatch && !htmlFragmentMatch
+        ? PARTIAL_HTML_START_RE.exec(autoHtmlScanText)
+        : null;
 
     const candidates = [
       openMatch ? { kind: "artifact" as const, index: openMatch.index, match: openMatch } : null,
+      partialOpenMatch
+        ? { kind: "partial-artifact-open" as const, index: partialOpenMatch.index, match: partialOpenMatch }
+        : null,
       fencedHtmlMatch ? { kind: "fenced" as const, index: fencedHtmlMatch.index, match: fencedHtmlMatch } : null,
       htmlDocMatch ? { kind: "document" as const, index: htmlDocMatch.index, match: htmlDocMatch } : null,
       htmlFragmentMatch ? { kind: "fragment" as const, index: htmlFragmentMatch.index, match: htmlFragmentMatch } : null,
+      partialHtmlMatch
+        ? { kind: "partial-html" as const, index: partialHtmlMatch.index, match: partialHtmlMatch }
+        : null,
       fencedHtmlOpenMatch && !fencedHtmlMatch
         ? { kind: "pending-fenced" as const, index: fencedHtmlOpenMatch.index, match: fencedHtmlOpenMatch }
         : null,
@@ -779,8 +815,27 @@ function parseFinalAnswerSegments(
       continue;
     }
 
-    if (candidate.kind === "pending-fenced") {
+    if (candidate.kind === "partial-artifact-open") {
       segments.push({ type: "pending-artifact", title: "HTML Artifact" });
+      break;
+    }
+
+    if (candidate.kind === "pending-fenced") {
+      const openEnd = start + candidate.match[0].length;
+      const html = text.slice(openEnd).trim();
+      if (html) {
+        segments.push({
+          type: "artifact",
+          artifact: {
+            type: "html",
+            title: inferHtmlArtifactTitle(html),
+            html,
+            isPartial: true,
+          },
+        });
+      } else {
+        segments.push({ type: "pending-artifact", title: "HTML Artifact" });
+      }
       break;
     }
 
@@ -812,6 +867,24 @@ function parseFinalAnswerSegments(
       continue;
     }
 
+    if (candidate.kind === "partial-html") {
+      const html = text.slice(start).trim();
+      if (html) {
+        segments.push({
+          type: "artifact",
+          artifact: {
+            type: "html",
+            title: inferHtmlArtifactTitle(html),
+            html,
+            isPartial: true,
+          },
+        });
+      } else {
+        segments.push({ type: "pending-artifact", title: "HTML Artifact" });
+      }
+      break;
+    }
+
     const openStart = start;
     const openEnd = openStart + candidate.match[0].length;
     const attributes = candidate.match[1] ?? "";
@@ -819,7 +892,20 @@ function parseFinalAnswerSegments(
     const title = readArtifactAttribute(attributes, ARTIFACT_TITLE_RE) || "HTML Artifact";
     const closeMatch = ARTIFACT_CLOSE_TAG_RE.exec(text.slice(openEnd));
     if (!closeMatch || closeMatch.index < 0) {
-      segments.push({ type: "pending-artifact", title });
+      const html = text.slice(openEnd).trim();
+      if (artifactType === "html" && html) {
+        segments.push({
+          type: "artifact",
+          artifact: {
+            type: "html",
+            title,
+            html,
+            isPartial: true,
+          },
+        });
+      } else {
+        segments.push({ type: "pending-artifact", title });
+      }
       break;
     }
 
@@ -886,13 +972,123 @@ function buildArtifactSrcDoc(html: string, frameId: string) {
   return `<!doctype html><html><head>${meta}${baseStyle}${resizeScript}</head><body>${trimmed}</body></html>`;
 }
 
-function HtmlArtifactPreview({ artifact, isGenerating }: { artifact: HtmlArtifact; isGenerating?: boolean }) {
+function buildArtifactLiveSrcDoc(frameId: string) {
+  const csp = [
+    "default-src https: data: blob:",
+    "img-src https: data: blob:",
+    "style-src https: 'unsafe-inline'",
+    "script-src https: 'unsafe-inline'",
+    "font-src https: data:",
+    "connect-src https:",
+    "frame-ancestors 'none'",
+  ].join("; ");
+  const meta = `<meta http-equiv="Content-Security-Policy" content="${escapeHtmlAttribute(csp)}">`;
+  const baseStyle = [
+    "<style data-supercode-artifact-base>",
+    "html,body{margin:0;background:transparent;}",
+    "body{min-height:auto;color:inherit;overflow:hidden;}",
+    "*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important;}",
+    "</style>",
+  ].join("");
+  const liveScript = [
+    "<script data-supercode-artifact-live>",
+    "(()=>{",
+    `const id=${JSON.stringify(frameId)};`,
+    "let latestHtml='';",
+    "let scheduled=false;",
+    "const parser=new DOMParser();",
+    "const ensureBaseStyle=()=>{",
+    "let style=document.querySelector('style[data-supercode-artifact-base]');",
+    "if(!style){style=document.createElement('style');style.setAttribute('data-supercode-artifact-base','');document.head.prepend(style);}",
+    "style.textContent='html,body{margin:0;background:transparent;}body{min-height:auto;color:inherit;overflow:hidden;}*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important;}';",
+    "};",
+    "const send=()=>{",
+    "const b=document.body,d=document.documentElement;",
+    "const h=Math.ceil(Math.max(b?b.scrollHeight:0,d?d.scrollHeight:0,b?b.offsetHeight:0,d?d.offsetHeight:0));",
+    "parent.postMessage({type:'supercode-artifact-size',id,height:h},'*');",
+    "};",
+    "const stripScripts=(root)=>{root.querySelectorAll?.('script').forEach((script)=>script.remove());};",
+    "const sameNode=(current,next)=>{",
+    "if(current.nodeType!==next.nodeType)return false;",
+    "if(current.nodeType===Node.ELEMENT_NODE)return current.tagName===next.tagName;",
+    "return true;",
+    "};",
+    "const syncAttrs=(current,next)=>{",
+    "if(current.nodeType!==Node.ELEMENT_NODE||next.nodeType!==Node.ELEMENT_NODE)return;",
+    "for(const attr of Array.from(current.attributes)){if(!next.hasAttribute(attr.name))current.removeAttribute(attr.name);}",
+    "for(const attr of Array.from(next.attributes)){if(current.getAttribute(attr.name)!==attr.value)current.setAttribute(attr.name,attr.value);}",
+    "};",
+    "const morphNode=(current,next)=>{",
+    "if(!sameNode(current,next)){current.replaceWith(document.importNode(next,true));return;}",
+    "if(current.nodeType===Node.TEXT_NODE||current.nodeType===Node.COMMENT_NODE){if(current.nodeValue!==next.nodeValue)current.nodeValue=next.nodeValue;return;}",
+    "syncAttrs(current,next);",
+    "morphChildren(current,next);",
+    "};",
+    "const morphChildren=(current,next)=>{",
+    "const currentChildren=Array.from(current.childNodes);",
+    "const nextChildren=Array.from(next.childNodes);",
+    "const max=Math.max(currentChildren.length,nextChildren.length);",
+    "for(let i=0;i<max;i++){",
+    "const currentChild=currentChildren[i];",
+    "const nextChild=nextChildren[i];",
+    "if(!nextChild){currentChild?.remove();continue;}",
+    "if(!currentChild){current.appendChild(document.importNode(nextChild,true));continue;}",
+    "morphNode(currentChild,nextChild);",
+    "}",
+    "};",
+    "const apply=()=>{",
+    "scheduled=false;",
+    "const html=latestHtml.trim();",
+    "try{",
+    "const hasHtml=/<html[\\s>]/i.test(html);",
+    "const source=hasHtml?html:'<!doctype html><html><head></head><body>'+html+'</body></html>';",
+    "const doc=parser.parseFromString(source,'text/html');",
+    "stripScripts(doc);",
+    "document.documentElement.lang=doc.documentElement.lang||document.documentElement.lang;",
+    "document.head.innerHTML=doc.head?doc.head.innerHTML:'';",
+    "ensureBaseStyle();",
+    "if(doc.body)morphChildren(document.body,doc.body);",
+    "}catch{document.body.textContent='';}",
+    "send();requestAnimationFrame(send);setTimeout(send,80);",
+    "};",
+    "const schedule=()=>{if(scheduled)return;scheduled=true;requestAnimationFrame(apply);};",
+    "window.addEventListener('message',(event)=>{",
+    "const data=event.data;",
+    "if(!data||typeof data!=='object'||data.type!=='supercode-artifact-html'||data.id!==id)return;",
+    "latestHtml=String(data.html||'');",
+    "schedule();",
+    "});",
+    "ensureBaseStyle();",
+    "new ResizeObserver(send).observe(document.documentElement);",
+    "window.addEventListener('load',send);",
+    "setTimeout(send,0);",
+    "})();",
+    "</script>",
+  ].join("");
+
+  return `<!doctype html><html><head>${meta}${baseStyle}${liveScript}</head><body></body></html>`;
+}
+
+function HtmlArtifactPreview({
+  artifact,
+  isGenerating,
+}: {
+  artifact: HtmlArtifact;
+  isGenerating?: boolean;
+}) {
   const frameId = useId();
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const [height, setHeight] = useState(240);
-  const srcDoc = useMemo(
-    () => buildArtifactSrcDoc(artifact.html, frameId),
-    [artifact.html, frameId],
+  const usesLivePreview = Boolean(artifact.isPartial && isGenerating);
+  const latestLiveHtmlRef = useRef(artifact.html);
+  const liveSendTimerRef = useRef<number | null>(null);
+  const lastLiveSentAtRef = useRef(0);
+  const liveSrcDoc = useMemo(() => buildArtifactLiveSrcDoc(frameId), [frameId]);
+  const finalSrcDoc = useMemo(
+    () => (usesLivePreview ? "" : buildArtifactSrcDoc(artifact.html, frameId)),
+    [artifact.html, frameId, usesLivePreview],
   );
+  const srcDoc = usesLivePreview ? liveSrcDoc : finalSrcDoc;
 
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
@@ -907,76 +1103,87 @@ function HtmlArtifactPreview({ artifact, isGenerating }: { artifact: HtmlArtifac
     return () => window.removeEventListener("message", handleMessage);
   }, [frameId]);
 
-  const hasCodeBlock = useMemo(() => {
-    return /<pre[\s>]|<code[\s>]/i.test(artifact.html);
-  }, [artifact.html]);
+  const postLiveHtml = useCallback(() => {
+    liveSendTimerRef.current = null;
+    lastLiveSentAtRef.current = Date.now();
+    iframeRef.current?.contentWindow?.postMessage(
+      {
+        type: "supercode-artifact-html",
+        id: frameId,
+        html: latestLiveHtmlRef.current,
+      },
+      "*",
+    );
+  }, [frameId]);
+
+  const scheduleLiveHtmlPost = useCallback(
+    (immediate = false) => {
+      if (!usesLivePreview) return;
+      const elapsed = Date.now() - lastLiveSentAtRef.current;
+      if (immediate || elapsed >= LIVE_ARTIFACT_UPDATE_INTERVAL_MS) {
+        if (liveSendTimerRef.current !== null) {
+          window.clearTimeout(liveSendTimerRef.current);
+          liveSendTimerRef.current = null;
+        }
+        postLiveHtml();
+        return;
+      }
+      if (liveSendTimerRef.current === null) {
+        liveSendTimerRef.current = window.setTimeout(
+          postLiveHtml,
+          LIVE_ARTIFACT_UPDATE_INTERVAL_MS - elapsed,
+        );
+      }
+    },
+    [postLiveHtml, usesLivePreview],
+  );
+
+  useEffect(() => {
+    if (!usesLivePreview) return;
+    latestLiveHtmlRef.current = artifact.html;
+    scheduleLiveHtmlPost();
+  }, [artifact.html, scheduleLiveHtmlPost, usesLivePreview]);
+
+  useEffect(() => {
+    return () => {
+      if (liveSendTimerRef.current !== null) {
+        window.clearTimeout(liveSendTimerRef.current);
+        liveSendTimerRef.current = null;
+      }
+    };
+  }, []);
 
   return (
     <div className="my-3 w-full relative">
       <iframe
+        ref={iframeRef}
         className="block w-full border-0"
         sandbox="allow-scripts"
         scrolling="no"
         srcDoc={srcDoc}
         style={{ height }}
         title={artifact.title}
+        onLoad={() => {
+          if (!usesLivePreview) return;
+          latestLiveHtmlRef.current = artifact.html;
+          scheduleLiveHtmlPost(true);
+        }}
       />
-      {isGenerating && hasCodeBlock && (
-        <div className="absolute inset-0 z-10 bg-background/80 backdrop-blur-sm flex items-center justify-center rounded-md">
-          <Shimmer duration={1.5} className="text-base font-medium">
-            正在生成演示
-          </Shimmer>
-        </div>
+      {usesLivePreview && (
+        <div
+          aria-hidden="true"
+          className="artifact-live-preview-lock absolute inset-0 z-10"
+        />
       )}
     </div>
   );
 }
 
-function ArtifactSkeletonBlock({ className }: { className?: string }) {
-  return (
-    <div
-      aria-hidden="true"
-      className={cn("artifact-shimmer-block rounded-md", className)}
-    />
-  );
-}
-
 function PendingHtmlArtifact({ title }: { title: string }) {
-  const displayTitle = title || "HTML Artifact";
-
   return (
-    <div className="my-3 w-full overflow-hidden rounded-lg border bg-background/80 shadow-sm">
-      <div className="flex min-h-11 items-center gap-2 border-b bg-muted/25 px-3">
-        <div className="flex size-7 shrink-0 items-center justify-center rounded-md border bg-background text-muted-foreground">
-          <FileCodeIcon className="size-3.5" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="truncate text-sm font-medium text-foreground">
-            {displayTitle}
-          </div>
-          <Shimmer duration={1.35} className="text-xs">
-            正在生成预览
-          </Shimmer>
-        </div>
-        <Loader2 className="size-3.5 shrink-0 animate-spin text-muted-foreground" />
-      </div>
-      <div className="grid gap-3 p-3 sm:grid-cols-[minmax(0,1.15fr)_minmax(150px,0.85fr)]">
-        <div className="space-y-2.5">
-          <ArtifactSkeletonBlock className="h-7 w-7/12" />
-          <ArtifactSkeletonBlock className="h-3 w-full" />
-          <ArtifactSkeletonBlock className="h-3 w-10/12" />
-          <div className="grid grid-cols-3 gap-2 pt-1">
-            <ArtifactSkeletonBlock className="aspect-[4/3]" />
-            <ArtifactSkeletonBlock className="aspect-[4/3]" />
-            <ArtifactSkeletonBlock className="aspect-[4/3]" />
-          </div>
-        </div>
-        <div className="space-y-2">
-          <ArtifactSkeletonBlock className="h-20 w-full" />
-          <ArtifactSkeletonBlock className="h-3 w-9/12" />
-          <ArtifactSkeletonBlock className="h-3 w-6/12" />
-        </div>
-      </div>
+    <div className="my-3 flex items-center gap-2 rounded-lg border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
+      <Loader2 className="size-3.5 animate-spin" />
+      <span className="truncate">{title || "HTML Artifact"} 正在接收内容</span>
     </div>
   );
 }
@@ -5569,6 +5776,7 @@ export function ChatPanel({
   isContextLoading,
   isContextOpen,
   input,
+  composerFocusRevision,
   isLoading,
   model,
   reasoningEffort,
@@ -5829,6 +6037,7 @@ export function ChatPanel({
         label: getPathLeaf(filePath),
         description: filePath,
         insertValue: formatMentionToken(filePath),
+        filePath,
       });
     }
 
@@ -5838,6 +6047,16 @@ export function ChatPanel({
           pushSuggestion({
             id: `file:${node.path}`,
             kind: "file",
+            label: node.name,
+            description: node.path,
+            insertValue: formatMentionToken(node.path),
+            filePath: node.path,
+          });
+        }
+        if (node.type === "folder") {
+          pushSuggestion({
+            id: `workspace:${node.path}`,
+            kind: "workspace",
             label: node.name,
             description: node.path,
             insertValue: formatMentionToken(node.path),
@@ -5862,6 +6081,7 @@ export function ChatPanel({
         label: getPathLeaf(path),
         description: `最近改动 · ${path}`,
         insertValue: formatMentionToken(path),
+        filePath: path,
       });
     }
 
@@ -6282,6 +6502,7 @@ export function ChatPanel({
               <ChatComposerEditor
                 value={input}
                 suggestions={mentionSuggestions}
+                focusRevision={composerFocusRevision}
                 onChange={onInputChange}
                 onSubmit={
                   mainMessages.length === 0 ? handleEmptySend : onSendMessage

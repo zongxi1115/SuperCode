@@ -5,13 +5,14 @@ import { Node, mergeAttributes } from "@tiptap/core";
 import { EditorContent, NodeViewWrapper, ReactNodeViewRenderer, useEditor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import {
-  FileCodeIcon,
+  FileIcon,
   FolderOpenIcon,
   GlobeIcon,
   LightbulbIcon,
   MessageSquareIcon,
   PencilIcon,
 } from "lucide-react";
+import { getFileIcon } from "@/lib/file-icons";
 import { motion, useReducedMotion } from "motion/react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -24,6 +25,7 @@ export type ComposerMentionSuggestion = {
   label: string;
   description: string;
   insertValue: string;
+  filePath?: string;
 };
 
 type ActiveMention = {
@@ -41,6 +43,7 @@ type ActiveMention = {
 type ChatComposerEditorProps = {
   value: string;
   suggestions: ComposerMentionSuggestion[];
+  focusRevision?: number;
   onChange: (value: string) => void;
   onSubmit: () => void;
 };
@@ -75,19 +78,39 @@ const MENTION_KIND_BADGE_STYLES: Record<MentionKind, string> = {
     "border-cyan-200/80 bg-cyan-50/95 text-cyan-950 dark:border-cyan-900/80 dark:bg-cyan-950/70 dark:text-cyan-100",
 };
 
+const MENTION_KIND_LABELS: Record<MentionKind, string> = {
+  skill: "技能",
+  workspace: "工作区",
+  file: "文件",
+  change: "变更",
+  element: "元素",
+};
+
+const MENTION_KIND_GROUP_ORDER: MentionKind[] = ["skill", "workspace", "file", "change", "element"];
+
 function getPathLeaf(input: string) {
   const normalized = input.replace(/\\/g, "/");
   return normalized.split("/").filter(Boolean).pop() ?? input;
 }
 
-function getMentionSuggestionIcon(kind: MentionKind) {
+function FileExtIcon({ filename }: { filename: string }) {
+  const entry = getFileIcon(filename);
+  if (entry) {
+    return <span style={{ color: entry.color }} className="flex shrink-0">{entry.icon}</span>;
+  }
+  return <FileIcon className="size-3.5 text-muted-foreground" />;
+}
+
+function getMentionSuggestionIcon(kind: MentionKind, filePath?: string) {
   switch (kind) {
     case "workspace":
       return <FolderOpenIcon className="size-3.5" />;
     case "file":
-      return <FileCodeIcon className="size-3.5" />;
-    case "change":
-      return <PencilIcon className="size-3.5" />;
+    case "change": {
+      if (!filePath) return <FileIcon className="size-3.5" />;
+      const filename = getPathLeaf(filePath);
+      return <FileExtIcon filename={filename} />;
+    }
     case "element":
       return <GlobeIcon className="size-3.5" />;
     case "skill":
@@ -247,7 +270,7 @@ function MentionBadgeView(props: { node: { attrs: MentionAttrs } }) {
           MENTION_KIND_ICON_COLORS[attrs.kind],
         )}
       >
-        {getMentionSuggestionIcon(attrs.kind)}
+        {getMentionSuggestionIcon(attrs.kind, attrs.id)}
       </span>
       <span className="truncate">{attrs.label}</span>
     </NodeViewWrapper>
@@ -292,12 +315,14 @@ const ComposerMentionNode = Node.create({
 export function ChatComposerEditor({
   value,
   suggestions,
+  focusRevision,
   onChange,
   onSubmit,
 }: ChatComposerEditorProps) {
   const anchorRef = useRef<HTMLDivElement>(null);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const lastSerializedValueRef = useRef(value);
+  const lastFocusRevisionRef = useRef(focusRevision);
   const shouldReduceMotion = useReducedMotion();
   const [activeMention, setActiveMention] = useState<ActiveMention | null>(null);
   const [editorHeight, setEditorHeight] = useState(COMPOSER_MIN_HEIGHT);
@@ -514,6 +539,17 @@ export function ChatComposerEditor({
     setActiveMention(getActiveMentionFromEditor(editor, anchorRef));
   }, [editor, suggestionMap, value]);
 
+  useEffect(() => {
+    if (!editor || focusRevision === undefined) return;
+    if (lastFocusRevisionRef.current === focusRevision) return;
+
+    lastFocusRevisionRef.current = focusRevision;
+    requestAnimationFrame(() => {
+      editor.commands.focus("end");
+      refreshEditorMetrics();
+    });
+  }, [editor, focusRevision, refreshEditorMetrics]);
+
   const insertSuggestion = useCallback(
     (suggestion: ComposerMentionSuggestion) => {
       if (!editor || !activeMention) return;
@@ -539,19 +575,36 @@ export function ChatComposerEditor({
 
   const dropdownStyle = useMemo(() => {
     if (!activeMention) return null;
-    const estimatedHeight = Math.min(filteredSuggestions.length || 1, 6) * 44 + 12;
-    const estimatedWidth = Math.min(480, window.innerWidth - 32);
-    const fitsBelow =
-      activeMention.viewportBottom + estimatedHeight < window.innerHeight - 16;
-    return {
-      left: Math.min(
-        Math.max(12, activeMention.viewportLeft),
-        Math.max(12, window.innerWidth - estimatedWidth - 12),
-      ),
-      top: fitsBelow
-        ? activeMention.viewportBottom + 10
-        : Math.max(12, activeMention.viewportTop - estimatedHeight - 10),
-    };
+    const PADDING = 12;
+    const ITEM_H = 38;
+    const HEADER_H = 28;
+    const CONTENT_PADDINGS = 8;
+
+    const groupCount = MENTION_KIND_GROUP_ORDER.filter((kind) =>
+      filteredSuggestions.some((s) => s.kind === kind),
+    ).length;
+
+    const visibleItems = Math.min(filteredSuggestions.length || 1, 8);
+    const maxHeightByItems = visibleItems * ITEM_H + Math.max(groupCount - 1, 0) * HEADER_H + CONTENT_PADDINGS;
+
+    const spaceBelow = window.innerHeight - activeMention.viewportBottom - PADDING;
+    const spaceAbove = activeMention.viewportTop - PADDING;
+    const openDownward = spaceBelow >= Math.min(maxHeightByItems, 200) || spaceBelow >= spaceAbove;
+
+    const availableSpace = openDownward ? spaceBelow : spaceAbove;
+    const maxH = Math.max(120, Math.min(maxHeightByItems, availableSpace));
+
+    const estimatedWidth = Math.min(480, window.innerWidth - PADDING * 2);
+    const left = Math.min(
+      Math.max(PADDING, activeMention.viewportLeft),
+      Math.max(PADDING, window.innerWidth - estimatedWidth - PADDING),
+    );
+
+    const top = openDownward
+      ? activeMention.viewportBottom + 8
+      : Math.max(PADDING, activeMention.viewportTop - maxH - 8);
+
+    return { left, top, maxHeight: maxH };
   }, [activeMention, filteredSuggestions.length]);
 
   return (
@@ -608,52 +661,94 @@ export function ChatComposerEditor({
 
       {activeMention && dropdownStyle ? createPortal(
         <div
-          className="fixed z-[100] w-fit min-w-[16rem] max-w-[min(30rem,calc(100vw-2rem))] rounded-xl border border-border/50 bg-popover/98 p-1 shadow-xl backdrop-blur"
-          style={dropdownStyle}
+          className="fixed z-[100] w-fit min-w-[16rem] max-w-[min(30rem,calc(100vw-2rem))] overflow-hidden rounded-xl border border-border/40 bg-background/80 shadow-[0_12px_40px_-8px_rgba(0,0,0,0.18),0_2px_8px_-2px_rgba(0,0,0,0.08)] backdrop-blur-xl dark:shadow-[0_12px_40px_-8px_rgba(0,0,0,0.45),0_2px_8px_-2px_rgba(0,0,0,0.2)]"
+          style={{
+            ...dropdownStyle,
+            maxHeight: dropdownStyle.maxHeight,
+          }}
         >
-          {filteredSuggestions.length > 0 ? (
-            filteredSuggestions.map((suggestion, index) => (
-              <button
-                key={suggestion.id}
-                type="button"
-                onMouseEnter={() =>
-                  setMentionNavigation({
-                    key: activeMentionKey,
-                    index,
-                  })
-                }
-                onMouseDown={(event) => {
-                  event.preventDefault();
-                  insertSuggestion(suggestion);
-                }}
-                className={cn(
-                  "flex w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left",
-                  index === selectedIndex && "bg-accent text-accent-foreground",
-                )}
-              >
-                <span
-                  className={cn(
-                    "flex size-6 shrink-0 items-center justify-center rounded-md",
-                    MENTION_KIND_ICON_COLORS[suggestion.kind],
-                  )}
-                >
-                  {getMentionSuggestionIcon(suggestion.kind)}
-                </span>
-                <span className="flex min-w-0 flex-col gap-px">
-                  <span className="truncate text-[13px] font-medium">
-                    {suggestion.label}
-                  </span>
-                  <span className="truncate text-[11px] text-muted-foreground/70">
-                    {suggestion.description}
-                  </span>
-                </span>
-              </button>
-            ))
-          ) : (
-            <div className="rounded-lg px-2.5 py-2 text-xs text-muted-foreground">
-              没有匹配的上下文项
-            </div>
-          )}
+          <div className="overflow-y-auto p-1 [scrollbar-width:thin]" style={{ maxHeight: dropdownStyle.maxHeight }}>
+            {filteredSuggestions.length > 0 ? (() => {
+              const grouped = MENTION_KIND_GROUP_ORDER
+                .map((kind) => ({
+                  kind,
+                  items: filteredSuggestions.filter((s) => s.kind === kind),
+                }))
+                .filter((g) => g.items.length > 0);
+
+              let flatIndex = 0;
+
+              return grouped.map((group, gi) => (
+                <div key={group.kind} className={gi > 0 ? "mt-1.5" : undefined}>
+                  <div className="flex items-center gap-1.5 px-2.5 pb-0.5 pt-1.5">
+                    <span
+                      className={cn(
+                        "flex size-4 shrink-0 items-center justify-center rounded",
+                        MENTION_KIND_ICON_COLORS[group.kind],
+                      )}
+                    >
+                      {getMentionSuggestionIcon(group.kind)}
+                    </span>
+                    <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/45">
+                      {MENTION_KIND_LABELS[group.kind]}
+                    </span>
+                  </div>
+                  {group.items.map((suggestion) => {
+                    const index = flatIndex++;
+                    return (
+                      <button
+                        key={suggestion.id}
+                        type="button"
+                        data-selected={index === selectedIndex ? "true" : undefined}
+                        ref={(el) => {
+                          if (index === selectedIndex && el) {
+                            el.scrollIntoView({ block: "nearest" });
+                          }
+                        }}
+                        onMouseEnter={() =>
+                          setMentionNavigation({
+                            key: activeMentionKey,
+                            index,
+                          })
+                        }
+                        onMouseDown={(event) => {
+                          event.preventDefault();
+                          insertSuggestion(suggestion);
+                        }}
+                        className={cn(
+                          "flex w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left transition-colors duration-100",
+                          index === selectedIndex
+                            ? "bg-accent/70 text-accent-foreground"
+                            : "hover:bg-muted/50",
+                        )}
+                      >
+                        <span
+                          className={cn(
+                            "flex size-5 shrink-0 items-center justify-center rounded",
+                            MENTION_KIND_ICON_COLORS[suggestion.kind],
+                          )}
+                        >
+                          {getMentionSuggestionIcon(suggestion.kind, suggestion.filePath)}
+                        </span>
+                        <span className="flex min-w-0 flex-col gap-px">
+                          <span className="truncate text-[13px] font-medium leading-snug">
+                            {suggestion.label}
+                          </span>
+                          <span className="truncate text-[11px] leading-tight text-muted-foreground/50">
+                            {suggestion.description}
+                          </span>
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              ));
+            })() : (
+              <div className="rounded-lg px-3 py-2.5 text-xs text-muted-foreground/60">
+                没有匹配的上下文项
+              </div>
+            )}
+          </div>
         </div>,
         document.body,
       ) : null}

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react';
 import { ChatPanel } from '@/components/app/chat-panel';
-import { EditorPanel, type PlanData } from '@/components/app/editor-panel';
+import { EditorPanel, type CodeSelectionContext, type PlanData } from '@/components/app/editor-panel';
 import type { Annotation } from '@/components/app/plan-rich-text-editor';
 import { ResizableHandle } from '@/components/app/resizable-handle';
 import { Sidebar } from '@/components/app/sidebar';
@@ -275,6 +275,28 @@ function formatPlanAnnotations(annotations: Annotation[], title?: string) {
 
   const titleSuffix = title?.trim() ? ` (${title.trim()})` : '';
   return `\n\n---\n**批注${titleSuffix}:**\n${items.join('\n')}`;
+}
+
+function formatCodeSelectionContext(context: CodeSelectionContext) {
+  const lineLabel =
+    context.startLineNumber === context.endLineNumber
+      ? `L${context.startLineNumber}`
+      : `L${context.startLineNumber}-L${context.endLineNumber}`;
+  const fenceLanguage = context.language && context.language !== 'plaintext' ? context.language : '';
+  const selectedText = context.selectedText.replace(/\s+$/g, '');
+  const longestFence = Math.max(
+    2,
+    ...Array.from(selectedText.matchAll(/`+/g), (match) => match[0].length),
+  );
+  const fence = '`'.repeat(Math.max(3, longestFence + 1));
+
+  return [
+    `引用代码：${context.filePath}:${lineLabel}`,
+    `${fence}${fenceLanguage}`,
+    selectedText,
+    fence,
+    '',
+  ].join('\n');
 }
 
 function formatKanbanCardTaskPrompt(card: KanbanCard) {
@@ -668,6 +690,7 @@ export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [codeChanges, setCodeChanges] = useState<CodeChangeRecord[]>([]);
   const [input, setInput] = useState('');
+  const [composerFocusRevision, setComposerFocusRevision] = useState(0);
   const [fileTree, setFileTree] = useState<FileTreeNode[]>([]);
   const fileTreeRef = useRef<FileTreeNode[]>([]);
   const fileTreeRevisionRef = useRef(0);
@@ -3423,6 +3446,15 @@ export default function App() {
     }
   }, [appendCodeChanges, applyTerminalSnapshot, isContextOpen, isLoading, isTerminalOpen, loadFile, loadSessionContext, loadSessionHistory, refreshFileTreeAfterTerminalActivity, refreshTerminalState, showStreamingPlanDraft]);
 
+  const handleAddCodeContextToComposer = useCallback((context: CodeSelectionContext) => {
+    const block = formatCodeSelectionContext(context);
+    setInput((current) => {
+      const base = current.replace(/\s+$/g, '');
+      return base ? `${base}\n\n${block}` : block;
+    });
+    setComposerFocusRevision((current) => current + 1);
+  }, []);
+
   const sendMessage = async (msg: string, elements?: { selector: string; html: string; sourceUrl?: string }[]) => {
     if ((!msg.trim() && (!elements || elements.length === 0)) || !sessionId || isLoading) return;
 
@@ -4202,6 +4234,7 @@ export default function App() {
         isContextOpen={isContextOpen}
         messages={messages}
         input={input}
+        composerFocusRevision={composerFocusRevision}
         isLoading={isLoading}
         model={selectedModelId}
         reasoningEffort={selectedReasoningEffort}
@@ -4268,6 +4301,7 @@ export default function App() {
           }}
           planData={planData}
           onPlanAnnotationsChange={setPlanAnnotations}
+          onAddCodeContext={handleAddCodeContextToComposer}
           onPlanSave={async (markdown, annotations) => {
             if (!planData) return;
             const nextPlan = { ...planData, markdown };
