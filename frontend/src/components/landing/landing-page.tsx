@@ -11,7 +11,7 @@ const translations = {
     explore: "Explore here",
     titlePrefix: "Your AI",
     titleSuffix: "companion",
-    rotatingWords: ["coding", "thinking", "planning"],
+    rotatingWords: ["coding", "thinking", "planning", "debugging", "building", "creating"],
     subtitle: "Write, debug, and ship better code with SuperCode by your side.",
     placeholder: "How can I help you today?",
     ask: "Ask SuperCode",
@@ -26,7 +26,7 @@ const translations = {
     explore: "探索更多",
     titlePrefix: "你的 AI",
     titleSuffix: "伙伴",
-    rotatingWords: ["编程", "思考", "规划"],
+    rotatingWords: ["编程", "思考", "规划", "调试", "构建", "创造"],
     subtitle: "从代码到上线，SuperCode 让开发更轻松。",
     placeholder: "今天我能帮您什么？",
     ask: "询问 SuperCode",
@@ -65,7 +65,7 @@ export function LandingPage() {
   useEffect(() => {
     const interval = setInterval(() => {
       setWordIndex((prev) => (prev + 1) % t.rotatingWords.length);
-    }, 2000);
+    }, 3000);
     return () => clearInterval(interval);
   }, [t.rotatingWords.length]);
 

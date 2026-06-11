@@ -803,7 +803,7 @@ function buildArtifactSrcDoc(html: string, frameId: string) {
   return `<!doctype html><html><head>${meta}${baseStyle}${resizeScript}</head><body>${trimmed}</body></html>`;
 }
 
-function HtmlArtifactPreview({ artifact }: { artifact: HtmlArtifact }) {
+function HtmlArtifactPreview({ artifact, isGenerating }: { artifact: HtmlArtifact; isGenerating?: boolean }) {
   const frameId = useId();
   const [height, setHeight] = useState(240);
   const srcDoc = useMemo(
@@ -824,8 +824,12 @@ function HtmlArtifactPreview({ artifact }: { artifact: HtmlArtifact }) {
     return () => window.removeEventListener("message", handleMessage);
   }, [frameId]);
 
+  const hasCodeBlock = useMemo(() => {
+    return /<pre[\s>]|<code[\s>]/i.test(artifact.html);
+  }, [artifact.html]);
+
   return (
-    <div className="my-3 w-full">
+    <div className="my-3 w-full relative">
       <iframe
         className="block w-full border-0"
         sandbox="allow-scripts"
@@ -834,6 +838,13 @@ function HtmlArtifactPreview({ artifact }: { artifact: HtmlArtifact }) {
         style={{ height }}
         title={artifact.title}
       />
+      {isGenerating && hasCodeBlock && (
+        <div className="absolute inset-0 z-10 bg-background/80 backdrop-blur-sm flex items-center justify-center rounded-md">
+          <Shimmer duration={1.5} className="text-base font-medium">
+            正在生成演示
+          </Shimmer>
+        </div>
+      )}
     </div>
   );
 }
@@ -885,6 +896,7 @@ function renderFinalAnswerContent(
           <HtmlArtifactPreview
             key={`artifact-${index}`}
             artifact={segment.artifact}
+            isGenerating={isAnimating}
           />
         );
       })}
@@ -3417,6 +3429,21 @@ const EmptyHeroState = memo(function EmptyHeroState({
   );
 });
 
+const ThinkingTimeHeader = memo(function ThinkingTimeHeader({
+  thinkingTime,
+}: {
+  thinkingTime: number;
+}) {
+  return (
+    <div className="mb-3 flex flex-col gap-2">
+      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+        <span>已思考 {thinkingTime.toFixed(1)} 秒</span>
+      </div>
+      <div className="h-px bg-border" />
+    </div>
+  );
+});
+
 const UserMessageActions = memo(function UserMessageActions({
   msg,
   onEditMessage,
@@ -4421,6 +4448,9 @@ const MessageList = memo(function MessageList({
             onMouseLeave={() => setHoveredMsgId(null)}
           >
             <MessageContent>
+              {msg.role === "assistant" && msg.thinkingTime && (
+                <ThinkingTimeHeader thinkingTime={msg.thinkingTime} />
+              )}
               {msg.role === "assistant" &&
                 (displayMessage.parts?.length
                   ? renderPartsAssistant(displayMessage, isLast)

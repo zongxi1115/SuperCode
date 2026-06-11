@@ -9,6 +9,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from agent import AgentLLMConfig
+from fastapi_app.secure_config_store import get_secure_config_store
 
 CONFIG_DIRECTORY_NAME = ".supercode"
 CONFIG_FILE_NAME = "model-providers.json"
@@ -131,19 +132,14 @@ def _normalize_provider_payload(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def load_ui_model_providers(root: Path) -> list[dict[str, Any]]:
+    """加载供应商配置；首次启动时从旧 JSON 迁移到加密数据库。"""
+    secure_store = get_secure_config_store(root)
+    providers = secure_store.load_providers()
     path = config_store_path(root)
-    if not path.exists():
-        return []
-
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-
-    providers = payload.get("providers", [])
-    if not isinstance(providers, list):
-        return []
-    return [_normalize_provider_payload(provider) for provider in providers if isinstance(provider, dict)]
+    if not providers and path.exists():
+        secure_store.migrate_from_json_file(path)
+        providers = secure_store.load_providers()
+    return providers
 
 
 def save_ui_model_providers(
@@ -152,15 +148,12 @@ def save_ui_model_providers(
     *,
     refresh_context: bool = True,
 ) -> list[dict[str, Any]]:
+    """保存供应商配置到数据库（加密存储）"""
     normalized = [_normalize_provider_payload(provider) for provider in providers]
     if refresh_context:
         normalized = refresh_provider_context_windows(normalized)
-    path = config_store_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps({"providers": normalized}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    secure_store = get_secure_config_store(root)
+    secure_store.save_providers(normalized)
     return normalized
 
 

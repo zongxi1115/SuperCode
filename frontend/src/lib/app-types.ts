@@ -93,6 +93,7 @@ export type ChatMessage = {
   thoughts?: string;
   toolCalls?: ToolCallRecord[];
   parts?: ContentBlock[];
+  thinkingTime?: number; // 思考时间（秒）
 };
 
 export type CompletionActionKey =

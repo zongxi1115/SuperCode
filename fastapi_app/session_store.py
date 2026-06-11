@@ -260,6 +260,7 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
 
     def _ensure_runtime_schema(self, connection: sqlite3.Connection) -> None:
         self._create_runtime_tables(connection)
+        self._ensure_session_message_columns(connection)
         self._ensure_indexes(connection)
 
     def _migrate_sessions_schema(self, connection: sqlite3.Connection) -> None:
@@ -367,6 +368,7 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                 thought_text TEXT NOT NULL DEFAULT '',
                 created_at INTEGER NOT NULL,
                 turn_index INTEGER,
+                thinking_time REAL,
                 message_index INTEGER NOT NULL,
                 PRIMARY KEY (session_id, id),
                 FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
@@ -491,6 +493,14 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
             )
             """
         )
+
+    def _ensure_session_message_columns(self, connection: sqlite3.Connection) -> None:
+        existing_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(session_messages)").fetchall()
+        }
+        if "thinking_time" not in existing_columns:
+            connection.execute("ALTER TABLE session_messages ADD COLUMN thinking_time REAL")
 
     def _ensure_indexes(self, connection: sqlite3.Connection) -> None:
         statements = [
@@ -714,6 +724,7 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                     self._extract_message_thoughts(message),
                     self._coerce_optional_int(message.get("timestamp")) or state.updated_at,
                     self._coerce_optional_int(message.get("turnIndex", message.get("turn_index"))),
+                    self._coerce_optional_float(message.get("thinkingTime", message.get("thinking_time"))),
                     index,
                 )
             )
@@ -721,9 +732,10 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
             connection.executemany(
                 """
                 INSERT INTO session_messages (
-                    id, session_id, role, content, thought_text, created_at, turn_index, message_index
+                    id, session_id, role, content, thought_text, created_at, turn_index,
+                    thinking_time, message_index
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -1057,7 +1069,7 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
 
         rows = connection.execute(
             """
-            SELECT id, role, content, thought_text, created_at, turn_index, message_index
+            SELECT id, role, content, thought_text, created_at, turn_index, thinking_time, message_index
             FROM session_messages
             WHERE session_id = ?
             ORDER BY message_index ASC, created_at ASC, id ASC
@@ -1089,6 +1101,8 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                     payload["toolCalls"] = tool_parts
             if row["turn_index"] is not None:
                 payload["turnIndex"] = int(row["turn_index"])
+            if row["thinking_time"] is not None:
+                payload["thinkingTime"] = float(row["thinking_time"])
             messages.append(payload)
         return messages
 
@@ -1444,8 +1458,17 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
             normalized.pop("parts", None)
             normalized.pop("thoughts", None)
             normalized.pop("toolCalls", None)
+            normalized.pop("thinkingTime", None)
+            normalized.pop("startTime", None)
             return normalized
 
+        thinking_time = self._coerce_optional_float(
+            message.get("thinkingTime", message.get("thinking_time"))
+        )
+        if thinking_time is not None:
+            normalized["thinkingTime"] = thinking_time
+        else:
+            normalized.pop("thinkingTime", None)
         parts = self._message_parts_for_storage(normalized)
         if parts:
             normalized["parts"] = parts
@@ -1727,6 +1750,14 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
             return None
         try:
             return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _coerce_optional_float(self, value: object) -> float | None:
+        if value is None or value == "":
+            return None
+        try:
+            return float(value)
         except (TypeError, ValueError):
             return None
 

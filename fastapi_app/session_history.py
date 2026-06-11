@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 import uuid
 from typing import Any
 
@@ -49,6 +50,7 @@ def update_assistant_history_message(
             "thoughts": "",
             "toolCalls": [],
             "parts": [],
+            "startTime": time.time(),  # 记录消息开始时间
         }
     )
     next_message = updater(base_message)
@@ -76,12 +78,25 @@ def sync_assistant_message_fields(message: dict[str, Any]) -> dict[str, Any]:
         for part in parts
         if isinstance(part, dict) and part.get("type") == "tool_call" and isinstance(part.get("toolCall"), dict)
     ]
-    return {
+
+    # 计算思考时间（仅在有内容时）
+    thinking_time = None
+    start_time = message.get("startTime")
+    if start_time and (text_parts or thinking_parts or tool_calls):
+        thinking_time = time.time() - start_time
+
+    result = {
         **message,
         "content": "".join(text_parts),
         "thoughts": "\n\n".join(thinking_parts),
         "toolCalls": tool_calls,
     }
+
+    # 添加思考时间字段
+    if thinking_time is not None:
+        result["thinkingTime"] = round(thinking_time, 1)
+
+    return result
 
 
 def append_assistant_part_delta(

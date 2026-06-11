@@ -449,9 +449,9 @@
 .landing-header {
   position: relative;
   z-index: 2;
-  display: grid;
-  grid-template-columns: 1fr auto;
+  display: flex;
   align-items: center;
+  justify-content: space-between;
   height: 92px;
   padding: 0 7.35vw;
   border-bottom: 1px solid #252522;
@@ -501,6 +501,27 @@
   align-items: center;
   justify-content: flex-end;
   gap: 14px;
+}
+
+.landing-github {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #b8b5ad;
+  font-size: 17px;
+  font-weight: 500;
+  text-decoration: none;
+  transition: color 0.2s ease;
+}
+
+.landing-github:hover {
+  color: #f8f4ea;
+}
+
+.landing-github-icon {
+  width: 20px;
+  height: 20px;
+  stroke-width: 1.8;
 }
 
 .landing-lang-toggle {
@@ -588,11 +609,11 @@
   position: relative;
   z-index: 1;
   height: calc(100vh - 151px);
-  padding: 260px 7.35vw 80px;
+  padding: 200px 7.35vw 80px;
 }
 
 .landing-copy {
-  width: min(55vw, 720px);
+  width: min(60vw, 720px);
 }
 
 .landing-copy h1 {
@@ -602,8 +623,21 @@
   font-family: Georgia, "Times New Roman", serif;
   font-size: clamp(64px, 4.85vw, 92px);
   font-weight: 700;
-  line-height: 0.96;
+  line-height: 1.1;
   letter-spacing: 0;
+}
+
+.rotating-word-container {
+  display: inline-block;
+  min-width: 9ch;
+  white-space: nowrap;
+  vertical-align: baseline;
+  text-align: left;
+}
+
+.rotating-word {
+  display: inline-block;
+  white-space: nowrap;
 }
 
 .landing-copy p {
