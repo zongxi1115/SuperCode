@@ -2273,6 +2273,31 @@ function ToolBody({
     );
 
   if (isPlanQuestionsTool) {
+    if (
+      isStreaming &&
+      (questions?.length ||
+        streamingPlanPreview?.title ||
+        streamingPlanPreview?.message)
+    ) {
+      return (
+        <PlanQuestionsQuiz
+          questions={questions ?? []}
+          embedded
+          streaming
+          disabled
+          title={
+            (typeof args.title === "string" ? args.title : undefined) ||
+            streamingPlanPreview?.title
+          }
+          description={
+            (typeof args.message === "string" ? args.message : undefined) ||
+            streamingPlanPreview?.message
+          }
+          submitted={false}
+        />
+      );
+    }
+
     if (toolCall.state === "input-requested") {
       return (
         <PlanQuestionsQuiz
@@ -2954,6 +2979,14 @@ function ToolBody({
   }
 
   if (toolCall.name === "search_web") {
+    if (isStreaming) {
+      return (
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <Loader2 className="size-3.5 animate-spin" />
+          <span>正在搜索网页内容...</span>
+        </div>
+      );
+    }
     const results =
       output && typeof output === "object"
         ? ((output as Record<string, unknown>)?.results as
@@ -2984,6 +3017,14 @@ function ToolBody({
   }
 
   if (toolCall.name === "fetch_url_content") {
+    if (isStreaming) {
+      return (
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <Loader2 className="size-3.5 animate-spin" />
+          <span>正在抓取网页内容...</span>
+        </div>
+      );
+    }
     const documents =
       output && typeof output === "object"
         ? ((output as Record<string, unknown>)?.documents as
@@ -3925,15 +3966,15 @@ const ThinkingTimeHeader = memo(function ThinkingTimeHeader({
 
 const UserMessageActions = memo(function UserMessageActions({
   msg,
-  onEditMessage,
+  onStartEdit,
 }: {
   msg: ChatMessage;
-  onEditMessage?: (content: string) => void;
+  onStartEdit?: (msgId: string, content: string) => void;
 }) {
   if (!msg.content) return null;
   return (
     <motion.div
-      className="absolute bottom-1.5 right-1.5 z-10 flex items-center gap-0.5 rounded-md bg-background/80 backdrop-blur-sm px-0.5 py-0.5 shadow-sm border border-border/40"
+      className="flex items-center gap-0.5 mt-1 self-end"
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
@@ -3944,25 +3985,25 @@ const UserMessageActions = memo(function UserMessageActions({
           <TooltipTrigger asChild>
             <button
               type="button"
-              className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors"
+              className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors"
               onClick={() => navigator.clipboard.writeText(msg.content)}
             >
-              <Copy className="h-2.5 w-2.5" />
+              <Copy className="h-3 w-3" />
             </button>
           </TooltipTrigger>
           <TooltipContent side="bottom"><p>复制</p></TooltipContent>
         </Tooltip>
       </TooltipProvider>
-      {onEditMessage && (
+      {onStartEdit && (
         <TooltipProvider>
           <Tooltip>
             <TooltipTrigger asChild>
               <button
                 type="button"
-                className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors"
-                onClick={() => onEditMessage(msg.content)}
+                className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors"
+                onClick={() => onStartEdit(msg.id ?? "", msg.content)}
               >
-                <Pencil className="h-2.5 w-2.5" />
+                <Pencil className="h-3 w-3" />
               </button>
             </TooltipTrigger>
             <TooltipContent side="bottom"><p>编辑并重新发送</p></TooltipContent>
@@ -4032,6 +4073,40 @@ const MessageList = memo(function MessageList({
     {},
   );
   const [hoveredMsgId, setHoveredMsgId] = useState<string | null>(null);
+  const [editingMsgId, setEditingMsgId] = useState<string | null>(null);
+  const [editContent, setEditContent] = useState("");
+  const editTextareaRef = useRef<HTMLTextAreaElement>(null);
+
+  const handleStartEdit = useCallback(
+    (msgId: string, content: string) => {
+      setEditingMsgId(msgId);
+      setEditContent(content);
+    },
+    [],
+  );
+
+  const handleCancelEdit = useCallback(() => {
+    setEditingMsgId(null);
+    setEditContent("");
+  }, []);
+
+  const handleResendEdit = useCallback(() => {
+    const trimmed = editContent.trim();
+    if (!trimmed) return;
+    onEditMessage?.(trimmed);
+    setEditingMsgId(null);
+    setEditContent("");
+  }, [editContent, onEditMessage]);
+
+  useEffect(() => {
+    if (editingMsgId && editTextareaRef.current) {
+      editTextareaRef.current.focus();
+      editTextareaRef.current.setSelectionRange(
+        editTextareaRef.current.value.length,
+        editTextareaRef.current.value.length,
+      );
+    }
+  }, [editingMsgId]);
 
   const getMessageToolCalls = useCallback((message: ChatMessage) => {
     const partToolCalls =
@@ -4933,6 +5008,8 @@ const MessageList = memo(function MessageList({
         const msgCodeChanges = codeChanges.filter(
           (c) => c.toolCallId && msgToolCallIds.has(c.toolCallId),
         );
+        const isEditingThisMsg = editingMsgId === msg.id;
+        const isUser = msg.role === "user";
         return (
           <Message
             key={msg.id || idx}
@@ -4941,38 +5018,88 @@ const MessageList = memo(function MessageList({
             onMouseEnter={() => msg.id && setHoveredMsgId(msg.id)}
             onMouseLeave={() => setHoveredMsgId(null)}
           >
-            <MessageContent>
-              {showThinkingTime && (
-                <ThinkingTimeHeader
-                  thinkingTime={msg.thinkingTime}
-                  startTime={msg.startTime}
-                  isActive={isActiveAssistant}
-                />
-              )}
-              {msg.role === "assistant" &&
-                (displayMessage.parts?.length
-                  ? renderPartsAssistant(displayMessage, isLast)
-                  : renderLegacyAssistant(displayMessage, isLast))}
-              {msg.role === "user" && msg.content
-                ? renderFinalAnswerContent(msg.content, new Map(), {
-                    finalAnswerRendering: "markdown",
-                  })
-                : null}
-              {msg.role === "assistant" && !displayMessage.parts?.length && msg.content
-                ? renderFinalAnswerContent(msg.content, new Map(), {
-                    className:
-                      isLast && isLoading ? "streaming-tail-fade" : undefined,
-                    isAnimating: isLast && isLoading,
-                    finalAnswerRendering,
-                  })
-                : null}
-            </MessageContent>
-            {msg.role === "user" && (
-              <AnimatePresence>
-                {hoveredMsgId === msg.id && (
-                  <UserMessageActions key="actions" msg={msg} onEditMessage={onEditMessage} />
+            {isUser && isEditingThisMsg ? (
+              <motion.div
+                className="w-full"
+                initial={{ opacity: 0, y: -4 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -4 }}
+                transition={{ duration: 0.15 }}
+              >
+                <div className="w-full rounded-lg border border-border/60 bg-secondary/50 overflow-hidden">
+                  <textarea
+                    ref={editTextareaRef}
+                    className="w-full resize-none bg-transparent px-4 py-3 text-sm text-foreground outline-none min-h-[60px]"
+                    value={editContent}
+                    onChange={(e) => setEditContent(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        handleResendEdit();
+                      }
+                      if (e.key === "Escape") {
+                        handleCancelEdit();
+                      }
+                    }}
+                    rows={Math.max(2, editContent.split("\n").length)}
+                  />
+                  <div className="flex items-center justify-end gap-2 px-3 py-2 border-t border-border/40">
+                    <button
+                      type="button"
+                      className="px-3 py-1 text-xs text-muted-foreground hover:text-foreground rounded transition-colors"
+                      onClick={handleCancelEdit}
+                    >
+                      取消
+                    </button>
+                    <button
+                      type="button"
+                      className="px-3 py-1 text-xs bg-primary text-primary-foreground rounded hover:bg-primary/90 transition-colors disabled:opacity-50"
+                      onClick={handleResendEdit}
+                      disabled={!editContent.trim()}
+                    >
+                      重新发送
+                    </button>
+                  </div>
+                </div>
+              </motion.div>
+            ) : (
+              <>
+                {!isEditingThisMsg && (
+                  <MessageContent>
+                    {showThinkingTime && (
+                      <ThinkingTimeHeader
+                        thinkingTime={msg.thinkingTime}
+                        startTime={msg.startTime}
+                        isActive={isActiveAssistant}
+                      />
+                    )}
+                    {msg.role === "assistant" &&
+                      (displayMessage.parts?.length
+                        ? renderPartsAssistant(displayMessage, isLast)
+                        : renderLegacyAssistant(displayMessage, isLast))}
+                    {isUser && msg.content
+                      ? renderFinalAnswerContent(msg.content, new Map(), {
+                          finalAnswerRendering: "markdown",
+                        })
+                      : null}
+                    {msg.role === "assistant" && !displayMessage.parts?.length && msg.content
+                      ? renderFinalAnswerContent(msg.content, new Map(), {
+                          className:
+                            isLast && isLoading ? "streaming-tail-fade" : undefined,
+                          isAnimating: isLast && isLoading,
+                          finalAnswerRendering,
+                        })
+                      : null}
+                  </MessageContent>
                 )}
-              </AnimatePresence>
+                {isUser && (
+                  <AnimatePresence>
+                    {hoveredMsgId === msg.id && (
+                      <UserMessageActions key="actions" msg={msg} onStartEdit={onEditMessage ? handleStartEdit : undefined} />
+                    )}
+                  </AnimatePresence>
+                )}
+              </>
             )}
             {msg.role === "assistant" &&
               msgCodeChanges.length > 0 &&

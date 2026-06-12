@@ -299,6 +299,22 @@
   padding-left: 1.45rem;
 }
 
+.project-docs-editor ul {
+  list-style: disc;
+}
+
+.project-docs-editor ol {
+  list-style: decimal;
+}
+
+.project-docs-editor li {
+  padding-left: 0.15rem;
+}
+
+.project-docs-editor li > p {
+  margin: 0.2em 0;
+}
+
 .project-docs-editor blockquote {
   margin: 0.85em 0;
   border-left: 3px solid color-mix(in oklch, var(--primary), transparent 45%);

@@ -94,10 +94,25 @@ type InlineBlockAttrs = {
 
 type InlineBlockMenuState = SlashMenuState;
 
+type TableSize = {
+  rows: number;
+  cols: number;
+};
+
+type TableControlsState = {
+  top: number;
+  left: number;
+};
+
+type TableAction = 'add-row-after' | 'add-column-after' | 'delete-row' | 'delete-column' | 'delete-table';
+
 type SaveState = 'idle' | 'loading' | 'dirty' | 'syncing' | 'synced' | 'error';
 
 const PROJECT_DOC_SYNC_INTERVAL_MS = 8000;
 const PROJECT_DOC_DRAFT_PREFIX = 'supercode:project-docs:draft';
+const DEFAULT_TABLE_SIZE: TableSize = { rows: 3, cols: 3 };
+const TABLE_DIMENSION_MIN = 1;
+const TABLE_DIMENSION_MAX = 12;
 
 const turndown = new TurndownService({
   bulletListMarker: '-',
@@ -315,6 +330,45 @@ function readApiDetail(payload: unknown, fallback: string) {
   return fallback;
 }
 
+function clampTableDimension(value: number) {
+  if (!Number.isFinite(value)) return TABLE_DIMENSION_MIN;
+  return Math.min(TABLE_DIMENSION_MAX, Math.max(TABLE_DIMENSION_MIN, Math.trunc(value)));
+}
+
+function normalizeTableSize(size: TableSize): TableSize {
+  return {
+    rows: clampTableDimension(size.rows),
+    cols: clampTableDimension(size.cols),
+  };
+}
+
+function buildTableContent(size: TableSize) {
+  const { rows, cols } = normalizeTableSize(size);
+  return Array.from({ length: rows }, (_, rowIndex) => ({
+    type: 'tableRow',
+    content: Array.from({ length: cols }, () => ({
+      type: rowIndex === 0 ? 'tableHeader' : 'tableCell',
+      content: [{ type: 'paragraph' }],
+    })),
+  }));
+}
+
+function getActiveTableControlsState(editor: Editor, frame: HTMLElement | null): TableControlsState | null {
+  if (!frame || !editor.isActive('table')) return null;
+  const domAtSelection = editor.view.domAtPos(editor.state.selection.from);
+  const element =
+    domAtSelection.node instanceof HTMLElement ? domAtSelection.node : domAtSelection.node.parentElement;
+  const table = element?.closest('table');
+  if (!table) return null;
+
+  const tableRect = table.getBoundingClientRect();
+  const frameRect = frame.getBoundingClientRect();
+  return {
+    top: Math.max(8, tableRect.top - frameRect.top - 38),
+    left: Math.max(8, tableRect.left - frameRect.left),
+  };
+}
+
 function getSlashMenuState(editor: Editor): SlashMenuState | null {
   if (editor.view.composing || !editor.state.selection.empty) return null;
   const { from } = editor.state.selection;
@@ -390,10 +444,10 @@ function iconForStyle(style: ProjectDocStyle) {
   return <TextIcon {...props} />;
 }
 
-function applyParagraphStyle(editor: Editor, style: ProjectDocStyle) {
+function applyParagraphStyle(editor: Editor, style: ProjectDocStyle, tableSize: TableSize = DEFAULT_TABLE_SIZE) {
   const chain = editor.chain().focus();
   if (style === 'table') {
-    chain.insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run();
+    chain.insertContent({ type: 'table', content: buildTableContent(tableSize) }).run();
     return;
   }
   if (style === 'body') {
@@ -521,7 +575,7 @@ export function ProjectDocsPage({ sessionId, workspace, fileTree = [] }: Project
   const syncInFlightRef = useRef<Set<string>>(new Set());
   const editorContainerRef = useRef<HTMLDivElement>(null);
   const articleFrameRef = useRef<HTMLDivElement>(null);
-  const hoverCoordsRef = useRef<{ top: number; left: number }>({ top: 0, left: 0 });
+  const tableSizeRef = useRef<TableSize>(DEFAULT_TABLE_SIZE);
 
   const [documents, setDocuments] = useState<ProjectDocSummary[]>([]);
   const [activeDocId, setActiveDocId] = useState<string | null>(null);
@@ -534,8 +588,11 @@ export function ProjectDocsPage({ sessionId, workspace, fileTree = [] }: Project
   const [inlineBlockIndex, setInlineBlockIndex] = useState(0);
   const [styleValue, setStyleValue] = useState<ProjectDocStyle>('body');
   const [hoverPos, setHoverPos] = useState<number | null>(null);
+  const [hoverCoords, setHoverCoords] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
   const [insertMenuPos, setInsertMenuPos] = useState<{ top: number; left: number } | null>(null);
   const [insertIndex, setInsertIndex] = useState(0);
+  const [tableSize, setTableSize] = useState<TableSize>(DEFAULT_TABLE_SIZE);
+  const [tableControls, setTableControls] = useState<TableControlsState | null>(null);
 
   const slashStateRef = useRef({
     menu: null as SlashMenuState | null,
@@ -557,22 +614,28 @@ export function ProjectDocsPage({ sessionId, workspace, fileTree = [] }: Project
 
   const filteredCommands = useMemo(() => {
     const query = slashMenu?.query.trim().toLowerCase() ?? '';
-    const commands: SlashCommand[] = PROJECT_DOC_STYLES.map((style) => ({
-      ...style,
-      keywords: [style.id, style.label, style.description],
-    }));
+    const tableLabel = `${tableSize.rows}x${tableSize.cols}`;
+    const commands: SlashCommand[] = PROJECT_DOC_STYLES.map((style) => {
+      const isTable = style.id === 'table';
+      return {
+        ...style,
+        label: isTable ? `${style.label} ${tableLabel}` : style.label,
+        description: isTable ? `插入 ${tableLabel} 表格` : style.description,
+        keywords: [style.id, style.label, style.description, isTable ? tableLabel : ''],
+      };
+    });
     if (!query) return commands;
     return commands.filter((command) =>
       command.keywords.some((keyword) => keyword.toLowerCase().includes(query)),
     );
-  }, [slashMenu?.query]);
+  }, [slashMenu?.query, tableSize.cols, tableSize.rows]);
 
   const inlineBlockSuggestions = useMemo<InlineBlockSuggestion[]>(
     () => buildFileInlineBlockSuggestions(fileTree),
     [fileTree],
   );
 
-  const filteredInlineBlockSuggestions = useMemo(() => {
+  const filteredInlineBlockSuggestions = useMemo<InlineBlockSuggestion[]>(() => {
     const query = inlineBlockMenu?.query.trim().toLowerCase() ?? '';
     if (!query) return inlineBlockSuggestions;
     const matches = inlineBlockSuggestions.filter((suggestion) =>
@@ -595,23 +658,60 @@ export function ProjectDocsPage({ sessionId, workspace, fileTree = [] }: Project
       : [];
   }, [inlineBlockMenu?.query, inlineBlockSuggestions]);
 
-  slashStateRef.current = {
-    menu: slashMenu,
-    index: slashIndex,
-    commands: filteredCommands,
-    editor: slashStateRef.current.editor,
-  };
-  inlineBlockStateRef.current = {
-    menu: inlineBlockMenu,
-    index: inlineBlockIndex,
-    suggestions: filteredInlineBlockSuggestions,
-    editor: inlineBlockStateRef.current.editor,
-  };
+  useEffect(() => {
+    tableSizeRef.current = tableSize;
+  }, [tableSize]);
+
+  useEffect(() => {
+    slashStateRef.current = {
+      menu: slashMenu,
+      index: slashIndex,
+      commands: filteredCommands,
+      editor: slashStateRef.current.editor,
+    };
+  }, [filteredCommands, slashIndex, slashMenu]);
+
+  useEffect(() => {
+    inlineBlockStateRef.current = {
+      menu: inlineBlockMenu,
+      index: inlineBlockIndex,
+      suggestions: filteredInlineBlockSuggestions,
+      editor: inlineBlockStateRef.current.editor,
+    };
+  }, [filteredInlineBlockSuggestions, inlineBlockIndex, inlineBlockMenu]);
+
+  const refreshEditorUi = useCallback((currentEditor: Editor) => {
+    const nextInlineBlockMenu = getInlineBlockMenuState(currentEditor);
+    setInlineBlockMenu(nextInlineBlockMenu);
+    setInlineBlockIndex(0);
+    setSlashMenu(nextInlineBlockMenu ? null : getSlashMenuState(currentEditor));
+    setStyleValue(currentStyle(currentEditor));
+    setTableControls(getActiveTableControlsState(currentEditor, articleFrameRef.current));
+  }, [setInlineBlockIndex, setInlineBlockMenu, setSlashMenu, setStyleValue, setTableControls]);
 
   const SlashKeymap = useMemo(
     () =>
       Extension.create({
         name: 'slashKeymap',
+        addProseMirrorPlugins() {
+          return [
+            new Plugin({
+              key: new PluginKey('slashTextInput'),
+              props: {
+                handleTextInput: (_view, _from, _to, text) => {
+                  if (text !== '/') return false;
+                  window.requestAnimationFrame(() => {
+                    const ed = slashStateRef.current.editor ?? editorRef.current;
+                    if (!ed) return;
+                    refreshEditorUi(ed);
+                    setSlashIndex(0);
+                  });
+                  return false;
+                },
+              },
+            }),
+          ];
+        },
         addKeyboardShortcuts() {
           return {
             ArrowDown: () => {
@@ -634,7 +734,7 @@ export function ProjectDocsPage({ sessionId, workspace, fileTree = [] }: Project
               const cmd = commands[index] ?? commands[0];
               if (ed) {
                 ed.chain().focus().deleteRange({ from: menu.from, to: menu.to }).run();
-                applyParagraphStyle(ed, cmd.id);
+                applyParagraphStyle(ed, cmd.id, tableSizeRef.current);
               }
               setSlashMenu(null);
               setSlashIndex(0);
@@ -649,7 +749,7 @@ export function ProjectDocsPage({ sessionId, workspace, fileTree = [] }: Project
           };
         },
       }),
-    [],
+    [refreshEditorUi, setSlashIndex],
   );
 
   const insertInlineBlockSuggestion = useCallback((suggestion: InlineBlockSuggestion, menu: InlineBlockMenuState) => {
@@ -742,8 +842,8 @@ export function ProjectDocsPage({ sessionId, workspace, fileTree = [] }: Project
                     const blockPos = $pos.depth > 0 ? $pos.before(1) : 0;
 
                     const blockDom = view.nodeDOM(blockPos);
-                    let blockTop = 0;
-                    let blockHeight = 24;
+                    let blockTop: number;
+                    let blockHeight: number;
                     if (blockDom instanceof HTMLElement) {
                       const rect = blockDom.getBoundingClientRect();
                       blockTop = rect.top;
@@ -757,10 +857,10 @@ export function ProjectDocsPage({ sessionId, workspace, fileTree = [] }: Project
 
                     const frameRect = frame.getBoundingClientRect();
 
-                    hoverCoordsRef.current = {
+                    setHoverCoords({
                       top: blockTop - frameRect.top + Math.max(0, (blockHeight - 24) / 2),
                       left: Math.max(6, editorRect.left - frameRect.left + paddingLeft - 34),
-                    };
+                    });
                     prevPos = blockPos;
                     setHoverPos(blockPos);
                     return false;
@@ -782,7 +882,7 @@ export function ProjectDocsPage({ sessionId, workspace, fileTree = [] }: Project
           ];
         },
       }),
-    [],
+    [setHoverCoords, setHoverPos],
   );
 
   const editor = useEditor(
@@ -825,18 +925,10 @@ export function ProjectDocsPage({ sessionId, workspace, fileTree = [] }: Project
           }
         }
 
-        const nextInlineBlockMenu = getInlineBlockMenuState(currentEditor);
-        setInlineBlockMenu(nextInlineBlockMenu);
-        setInlineBlockIndex(0);
-        setSlashMenu(nextInlineBlockMenu ? null : getSlashMenuState(currentEditor));
-        setStyleValue(currentStyle(currentEditor));
+        refreshEditorUi(currentEditor);
       },
       onSelectionUpdate({ editor: currentEditor }) {
-        const nextInlineBlockMenu = getInlineBlockMenuState(currentEditor);
-        setInlineBlockMenu(nextInlineBlockMenu);
-        setInlineBlockIndex(0);
-        setSlashMenu(nextInlineBlockMenu ? null : getSlashMenuState(currentEditor));
-        setStyleValue(currentStyle(currentEditor));
+        refreshEditorUi(currentEditor);
       },
     },
     [],
@@ -944,6 +1036,7 @@ export function ProjectDocsPage({ sessionId, workspace, fileTree = [] }: Project
       setErrorMessage('');
       closeFloatingMenus();
       setHoverPos(null);
+      setTableControls(null);
 
       try {
         const response = await apiFetch(`/api/sessions/${sessionId}/project-docs/${encodeURIComponent(documentId)}`);
@@ -1114,6 +1207,34 @@ export function ProjectDocsPage({ sessionId, workspace, fileTree = [] }: Project
     [loadDocument, saveState],
   );
 
+  const updateTableSize = useCallback((key: keyof TableSize, rawValue: string) => {
+    const parsed = Number.parseInt(rawValue, 10);
+    setTableSize((prev) => ({
+      ...prev,
+      [key]: clampTableDimension(parsed),
+    }));
+  }, [setTableSize]);
+
+  const insertTableAtSelection = useCallback(() => {
+    if (!editor) return;
+    applyParagraphStyle(editor, 'table', tableSize);
+    window.requestAnimationFrame(() => setTableControls(getActiveTableControlsState(editor, articleFrameRef.current)));
+  }, [editor, setTableControls, tableSize]);
+
+  const handleTableAction = useCallback(
+    (action: TableAction) => {
+      if (!editor) return;
+      const chain = editor.chain().focus();
+      if (action === 'add-row-after') chain.addRowAfter().run();
+      if (action === 'add-column-after') chain.addColumnAfter().run();
+      if (action === 'delete-row') chain.deleteRow().run();
+      if (action === 'delete-column') chain.deleteColumn().run();
+      if (action === 'delete-table') chain.deleteTable().run();
+      window.requestAnimationFrame(() => setTableControls(getActiveTableControlsState(editor, articleFrameRef.current)));
+    },
+    [editor, setTableControls],
+  );
+
   const handleInsert = useCallback(
     (style: ProjectDocStyle) => {
       if (!editor || hoverPos === null) return;
@@ -1127,22 +1248,7 @@ export function ProjectDocsPage({ sessionId, workspace, fileTree = [] }: Project
           .focus()
           .insertContentAt(insertAt, {
             type: 'table',
-            content: [
-              {
-                type: 'tableRow',
-                content: Array.from({ length: 3 }, () => ({
-                  type: 'tableHeader',
-                  content: [{ type: 'paragraph' }],
-                })),
-              },
-              ...Array.from({ length: 2 }, () => ({
-                type: 'tableRow',
-                content: Array.from({ length: 3 }, () => ({
-                  type: 'tableCell',
-                  content: [{ type: 'paragraph' }],
-                })),
-              })),
-            ],
+            content: buildTableContent(tableSize),
           })
           .run();
       } else {
@@ -1157,7 +1263,7 @@ export function ProjectDocsPage({ sessionId, workspace, fileTree = [] }: Project
       setInsertMenuPos(null);
       setInsertIndex(0);
     },
-    [editor, hoverPos],
+    [editor, hoverPos, setInsertIndex, setInsertMenuPos, tableSize],
   );
 
   const statusLabel =
@@ -1183,7 +1289,7 @@ export function ProjectDocsPage({ sessionId, workspace, fileTree = [] }: Project
               onValueChange={(value) => {
                 const style = value as ProjectDocStyle;
                 setStyleValue(style);
-                if (editor) applyParagraphStyle(editor, style);
+                if (editor) applyParagraphStyle(editor, style, tableSize);
               }}
             >
               <SelectTrigger size="sm" className="w-36">
@@ -1200,6 +1306,39 @@ export function ProjectDocsPage({ sessionId, workspace, fileTree = [] }: Project
                 ))}
               </SelectContent>
             </Select>
+            <div className="hidden items-center gap-1.5 rounded-md border border-border bg-muted/30 px-2 py-1 sm:flex">
+              <span className="text-[11px] font-medium text-muted-foreground">表格</span>
+              <input
+                aria-label="表格行数"
+                type="number"
+                min={TABLE_DIMENSION_MIN}
+                max={TABLE_DIMENSION_MAX}
+                value={tableSize.rows}
+                onChange={(event) => updateTableSize('rows', event.currentTarget.value)}
+                className="h-6 w-10 rounded border border-border bg-background px-1.5 text-center text-xs outline-none focus:border-ring"
+              />
+              <span className="text-xs text-muted-foreground">x</span>
+              <input
+                aria-label="表格列数"
+                type="number"
+                min={TABLE_DIMENSION_MIN}
+                max={TABLE_DIMENSION_MAX}
+                value={tableSize.cols}
+                onChange={(event) => updateTableSize('cols', event.currentTarget.value)}
+                className="h-6 w-10 rounded border border-border bg-background px-1.5 text-center text-xs outline-none focus:border-ring"
+              />
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-6 px-2 text-xs"
+                disabled={!editor}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={insertTableAtSelection}
+              >
+                插入
+              </Button>
+            </div>
             <span className="hidden truncate text-xs text-muted-foreground sm:inline">
               {activeDocument?.relativePath || workspace}
             </span>
@@ -1278,11 +1417,78 @@ export function ProjectDocsPage({ sessionId, workspace, fileTree = [] }: Project
               >
                 <EditorContent editor={editor} />
 
+                {tableControls && (
+                  <div
+                    className="slash-menu-animate absolute z-30 flex items-center gap-1 rounded-lg border border-border bg-popover p-1 text-xs shadow-xl"
+                    style={{ top: tableControls.top, left: tableControls.left, transformOrigin: 'bottom left' }}
+                    onMouseDown={(event) => event.preventDefault()}
+                  >
+                    <button
+                      type="button"
+                      title="在下方插入行"
+                      className="flex h-7 items-center gap-1 rounded-md px-2 text-popover-foreground transition-colors hover:bg-accent"
+                      onMouseDown={(event) => {
+                        event.preventDefault();
+                        handleTableAction('add-row-after');
+                      }}
+                    >
+                      <Plus className="size-3.5" />
+                      行
+                    </button>
+                    <button
+                      type="button"
+                      title="在右侧插入列"
+                      className="flex h-7 items-center gap-1 rounded-md px-2 text-popover-foreground transition-colors hover:bg-accent"
+                      onMouseDown={(event) => {
+                        event.preventDefault();
+                        handleTableAction('add-column-after');
+                      }}
+                    >
+                      <Plus className="size-3.5" />
+                      列
+                    </button>
+                    <span className="mx-1 h-4 w-px bg-border" />
+                    <button
+                      type="button"
+                      title="删除当前行"
+                      className="h-7 rounded-md px-2 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                      onMouseDown={(event) => {
+                        event.preventDefault();
+                        handleTableAction('delete-row');
+                      }}
+                    >
+                      删行
+                    </button>
+                    <button
+                      type="button"
+                      title="删除当前列"
+                      className="h-7 rounded-md px-2 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                      onMouseDown={(event) => {
+                        event.preventDefault();
+                        handleTableAction('delete-column');
+                      }}
+                    >
+                      删列
+                    </button>
+                    <button
+                      type="button"
+                      title="删除表格"
+                      className="h-7 rounded-md px-2 text-destructive transition-colors hover:bg-destructive/10"
+                      onMouseDown={(event) => {
+                        event.preventDefault();
+                        handleTableAction('delete-table');
+                      }}
+                    >
+                      删表
+                    </button>
+                  </div>
+                )}
+
                 {hoverPos !== null && (
                   <button
                     type="button"
                     className="block-hover-plus absolute z-10 flex size-6 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                    style={{ top: hoverCoordsRef.current.top, left: hoverCoordsRef.current.left }}
+                    style={{ top: hoverCoords.top, left: hoverCoords.left }}
                     onMouseEnter={() => {
                       if (insertMenuPos) return;
                       setHoverPos((prev) => prev ?? hoverPos);
@@ -1290,7 +1496,7 @@ export function ProjectDocsPage({ sessionId, workspace, fileTree = [] }: Project
                     onMouseDown={(e) => {
                       e.preventDefault();
                       setInsertMenuPos((prev) =>
-                        prev ? null : { top: hoverCoordsRef.current.top + 24, left: hoverCoordsRef.current.left },
+                        prev ? null : { top: hoverCoords.top + 24, left: hoverCoords.left },
                       );
                     }}
                   >
@@ -1323,7 +1529,9 @@ export function ProjectDocsPage({ sessionId, workspace, fileTree = [] }: Project
                         <span className="flex size-5 shrink-0 items-center justify-center">
                           {iconForStyle(style.id)}
                         </span>
-                        <span className="truncate font-medium">{style.label}</span>
+                        <span className="truncate font-medium">
+                          {style.id === 'table' ? `${style.label} ${tableSize.rows}x${tableSize.cols}` : style.label}
+                        </span>
                       </button>
                     ))}
                   </div>
@@ -1369,7 +1577,7 @@ export function ProjectDocsPage({ sessionId, workspace, fileTree = [] }: Project
                     event.preventDefault();
                     if (!editor || !slashMenu) return;
                     editor.chain().focus().deleteRange({ from: slashMenu.from, to: slashMenu.to }).run();
-                    applyParagraphStyle(editor, command.id);
+                    applyParagraphStyle(editor, command.id, tableSize);
                     setSlashMenu(null);
                     setSlashIndex(0);
                   }}

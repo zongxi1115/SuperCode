@@ -10,8 +10,9 @@ from typing import Any, Callable
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
-from agent import Agent, AgentEvent
-from coding_agent.tools import delete_file_in_workspace, execute_git_commit, execute_git_tag
+from agent import AgentEvent
+from coding_agent.file_tools import delete_file_in_workspace
+from coding_agent.git_tools import execute_git_commit, execute_git_tag
 from fastapi_app.app_config import APP_DATA_ROOT
 from fastapi_app.api_models import ChatStreamRequest, ContinueChatStreamRequest
 from fastapi_app.rag_index import schedule_workspace_rag_index
@@ -34,6 +35,7 @@ from fastapi_app.session_history import (
     finalize_plan_steps,
     record_confirmation_result_for_agent,
     replace_assistant_text_part,
+    seed_chat_session_history,
     sync_assistant_message_fields,
     update_assistant_history_message,
     update_assistant_tool_call,
@@ -51,6 +53,7 @@ from fastapi_app.workspace_utils import (
     render_demo_list_output,
     resolve_workspace_path,
 )
+from zonix import Agent
 
 STREAM_RESPONSE_HEADERS = {
     "Cache-Control": "no-cache, no-transform",
@@ -99,6 +102,7 @@ async def run_agent_stream(
     assistant_id = assistant_id or uuid.uuid4().hex
     streamed_assistant_text = ""
     assistant_stream_started = False
+    assistant_turn_index: int | None = None
     tool_before_snapshots: dict[str, dict[str, str]] = {}
     deps.reset_phase_for_new_turn(session)
     deps.sync_session_runtime_state_for_agent(session)
@@ -123,6 +127,89 @@ async def run_agent_stream(
                 "data": deps.build_session_state_payload(session),
             },
         }
+
+    def _stamp_assistant_turn_index() -> int | None:
+        nonlocal assistant_turn_index
+        turn_index = current_agent_turn_index(session)
+        if turn_index is None:
+            return None
+        if assistant_turn_index == turn_index:
+            return turn_index
+        assistant_turn_index = turn_index
+        update_assistant_history_message(
+            session,
+            assistant_id,
+            lambda message: {**message, "turnIndex": turn_index},
+        )
+        return turn_index
+
+    def _tool_record_with_runtime_metadata(record: dict[str, Any]) -> dict[str, Any]:
+        turn_index = _stamp_assistant_turn_index()
+        payload = {
+            **record,
+            "assistantId": assistant_id,
+        }
+        if turn_index is not None:
+            payload["turnIndex"] = turn_index
+        return payload
+
+    def _latest_assistant_tool_call() -> dict[str, Any] | None:
+        for message in reversed(session.history_messages):
+            if not isinstance(message, dict) or str(message.get("id") or "") != assistant_id:
+                continue
+            tool_calls = message.get("toolCalls")
+            if isinstance(tool_calls, list):
+                for tool_call in reversed(tool_calls):
+                    if isinstance(tool_call, dict) and str(tool_call.get("id") or "").strip():
+                        return tool_call
+            parts = message.get("parts")
+            if not isinstance(parts, list):
+                return None
+            for part in reversed(parts):
+                if not isinstance(part, dict) or part.get("type") != "tool_call":
+                    continue
+                tool_call = part.get("toolCall")
+                if isinstance(tool_call, dict) and str(tool_call.get("id") or "").strip():
+                    return tool_call
+            return None
+        return None
+
+    def _mark_latest_tool_failed(error: str) -> None:
+        tool_call = _latest_assistant_tool_call()
+        if tool_call is None:
+            return
+        tool_id = str(tool_call.get("id") or "").strip()
+        tool_name = str(tool_call.get("name") or "").strip()
+        if not tool_id or not tool_name:
+            return
+        existing_state = str(tool_call.get("state") or "").strip()
+        if existing_state and existing_state not in {"running", "input-requested"}:
+            return
+        if tool_call.get("success") is not None:
+            return
+        arguments = tool_call.get("arguments")
+        tool_record = _tool_record_with_runtime_metadata(
+            {
+                "id": tool_id,
+                "stepIndex": tool_call.get("stepIndex", tool_call.get("step_index")),
+                "name": tool_name,
+                "arguments": arguments if isinstance(arguments, dict) else {},
+                "output": None,
+                "success": False,
+                "errorMessage": error,
+                "state": "error",
+            }
+        )
+        session.history_tools = upsert_tool(session.history_tools, tool_record)
+        update_assistant_tool_call(
+            session,
+            assistant_id,
+            tool_id,
+            lambda existing: {
+                **existing,
+                **tool_record,
+            },
+        )
 
     subagent_metadata_by_id: dict[str, dict[str, Any]] = {}
 
@@ -494,6 +581,7 @@ async def run_agent_stream(
 
         if session.cancel_event.is_set():
             return
+        _stamp_assistant_turn_index()
 
         if event.type == "thought_delta" and event.delta:
             append_assistant_part_delta(session, assistant_id, "thinking", event.delta)
@@ -612,13 +700,15 @@ async def run_agent_stream(
             append_assistant_tool_call(
                 session,
                 assistant_id,
-                {
-                    "id": tool_id,
-                    "stepIndex": event.step_index,
-                    "name": event.tool_call.name,
-                    "arguments": event.tool_call.arguments,
-                    "state": "running",
-                },
+                _tool_record_with_runtime_metadata(
+                    {
+                        "id": tool_id,
+                        "stepIndex": event.step_index,
+                        "name": event.tool_call.name,
+                        "arguments": event.tool_call.arguments,
+                        "state": "running",
+                    }
+                ),
             )
             loop.call_soon_threadsafe(
                 queue.put_nowait,
@@ -880,18 +970,20 @@ async def run_agent_stream(
                 else:
                     deps.set_session_phase(session, "planning")
                     deps.update_plan_state(session, status="clarifying")
-            tool_record = {
-                "id": tool_id,
-                "stepIndex": event.step_index,
-                "name": event.tool_call.name,
-                "arguments": event.tool_call.arguments,
-                "output": output,
-                "success": tool_success,
-                "errorMessage": event.tool_result.error_message,
-                "state": tool_state,
-                "approval": approval,
-                "inputRequest": input_request,
-            }
+            tool_record = _tool_record_with_runtime_metadata(
+                {
+                    "id": tool_id,
+                    "stepIndex": event.step_index,
+                    "name": event.tool_call.name,
+                    "arguments": event.tool_call.arguments,
+                    "output": output,
+                    "success": tool_success,
+                    "errorMessage": event.tool_result.error_message,
+                    "state": tool_state,
+                    "approval": approval,
+                    "inputRequest": input_request,
+                }
+            )
             session.history_tools = upsert_tool(session.history_tools, tool_record)
             update_assistant_tool_call(
                 session,
@@ -1010,6 +1102,7 @@ async def run_agent_stream(
                 on_event,
             )
     except Exception as exc:  # noqa: BLE001 - 流式接口需要兜底，避免 SSE 半路中断
+        _mark_latest_tool_failed(str(exc))
         if session.agent_type == "deploy":
             deps.set_session_phase(session, "failed")
             deps.update_deploy_state(
@@ -1055,6 +1148,7 @@ async def run_agent_stream(
                     },
                 }
             )
+            await asyncio.sleep(0.03)
 
         persisted_failure_content = (
             f"{streamed_assistant_text}{failure_message}"
@@ -1062,6 +1156,8 @@ async def run_agent_stream(
             else failure_message.strip()
         )
         replace_assistant_text_part(session, assistant_id, persisted_failure_content.strip())
+        if session.chat_session is not None:
+            seed_chat_session_history(session.chat_session, session.history_messages, session.history_tools)
         deps.set_session_generating(session, False)
         await queue.put({"type": "assistant_done", "payload": {"id": assistant_id}})
         await queue.put(None)
@@ -1147,6 +1243,9 @@ async def run_agent_stream(
     )
     if auto_compression_response is not None:
         await queue.put(_session_state_event())
+
+    if session.chat_session is not None:
+        seed_chat_session_history(session.chat_session, session.history_messages, session.history_tools)
 
     await queue.put({"type": "assistant_done", "payload": {"id": assistant_id}})
     await queue.put(None)

@@ -14,14 +14,14 @@ from pathlib import Path, PurePosixPath
 import shlex
 from typing import Any
 
-from agent.tools import BaseTool, ToolContext
-from coding_agent.tools import (
+from coding_agent.tool_common import (
     DEFAULT_IGNORED_DIR_NAMES,
     READ_FILE_MAX_OUTPUT_CHARS,
     _build_powershell_utf8_command,
     _hidden_windows_process_kwargs,
     _kill_process_tree,
 )
+from zonix.tools import ToolContext
 
 try:
     import paramiko
@@ -192,8 +192,8 @@ class DeployConnectionManager:
         return PurePosixPath(normalized)
 
 
-class DeployBaseTool(BaseTool):
-    """部署场景工具基类。"""
+class DeployWorkspace:
+    """部署目标的公共路径、SSH 和传输 helper。"""
 
     def _get_connection_manager(self, context: ToolContext) -> DeployConnectionManager:
         manager = context.metadata.get("deploy_connection_manager")
@@ -257,17 +257,16 @@ class DeployBaseTool(BaseTool):
             rendered.append(f"{index} | {line}")
         return "\n".join(rendered)
 
-    def _parse_timeout(self, arguments: dict[str, object]) -> int:
-        raw_timeout = arguments.get("timeout")
-        if raw_timeout is None:
+    def _parse_timeout(self, timeout: object) -> int:
+        if timeout is None:
             raise ValueError("timeout 为必填参数，单位秒。")
         try:
-            timeout = int(raw_timeout)
+            parsed = int(timeout)
         except (TypeError, ValueError) as exc:
             raise ValueError("timeout 必须是正整数秒数。") from exc
-        if timeout <= 0:
+        if parsed <= 0:
             raise ValueError("timeout 必须大于 0。")
-        return timeout
+        return parsed
 
     def _validate_command(self, command: str) -> None:
         normalized = command.lower()
@@ -383,14 +382,13 @@ class DeployBaseTool(BaseTool):
             raise ValueError(f"路径越界，不允许访问工作区外部: {raw_path}")
         return candidate
 
-    def _normalize_string_list_argument(
+    def _normalize_string_list_values(
         self,
-        arguments: dict[str, object],
-        *keys: str,
+        field_name: str,
+        *raw_values: object,
     ) -> list[str]:
         values: list[str] = []
-        for key in keys:
-            raw_value = arguments.get(key)
+        for raw_value in raw_values:
             if raw_value is None:
                 continue
             if isinstance(raw_value, str):
@@ -401,25 +399,17 @@ class DeployBaseTool(BaseTool):
             if isinstance(raw_value, list):
                 for item in raw_value:
                     if not isinstance(item, str):
-                        raise ValueError(f"{key} 数组里的每一项都必须是字符串。")
+                        raise ValueError(f"{field_name} 数组里的每一项都必须是字符串。")
                     normalized = item.strip()
                     if normalized:
                         values.append(normalized)
                 continue
-            raise ValueError(f"{key} 只能是字符串或字符串数组。")
+            raise ValueError(f"{field_name} 只能是字符串或字符串数组。")
         return values
 
 
-class ConnectTool(DeployBaseTool):
-    name = "connect"
-    description = "请求用户填写部署目标信息并建立 deploy session，成功后会返回 session_id。"
-    parameters_schema = {
-        "type": "object",
-        "properties": {},
-        "additionalProperties": False,
-    }
-
-    def run(self, arguments: dict[str, object], context: ToolContext) -> dict[str, object]:
+class DeployConnector(DeployWorkspace):
+    def connect(self, ctx: ToolContext) -> dict[str, object]:
         return {
             "requires_user_input": True,
             "input_kind": "deploy_connect",
@@ -491,26 +481,13 @@ class ConnectTool(DeployBaseTool):
         }
 
 
-class DeployListFilesTool(DeployBaseTool):
-    name = "list_files"
-    description = "列出 deploy session 下的目录结构，参数：session_id、path。path 相对 deploy session 根目录。"
-    supports_parallel = True
-    parameters_schema = {
-        "type": "object",
-        "properties": {
-            "session_id": {"type": "string"},
-            "path": {"type": "string"},
-        },
-        "required": ["session_id"],
-        "additionalProperties": False,
-    }
-
-    def run(self, arguments: dict[str, object], context: ToolContext) -> str:
-        session_id = str(arguments.get("session_id") or "").strip()
-        relative_path = str(arguments.get("path") or ".")
-        connection = self._get_connection(context, session_id)
+class DeployFileBrowser(DeployWorkspace):
+    def list_files(self, ctx: ToolContext, session_id: str, path: str = ".") -> str:
+        session_id = session_id.strip()
+        relative_path = path or "."
+        connection = self._get_connection(ctx, session_id)
         if self._is_remote_connection(connection):
-            return self._run_remote(arguments, context, session_id, relative_path, connection)
+            return self._run_remote(ctx, session_id, relative_path, connection)
         target = self._resolve_connection_path(connection, relative_path)
         if not target.exists():
             raise FileNotFoundError(f"目录不存在: {relative_path}")
@@ -543,14 +520,13 @@ class DeployListFilesTool(DeployBaseTool):
 
     def _run_remote(
         self,
-        arguments: dict[str, object],
-        context: ToolContext,
+        ctx: ToolContext,
         session_id: str,
         relative_path: str,
         connection: DeployConnection,
     ) -> str:
         target = str(self._resolve_connection_path(connection, relative_path))
-        client = self._connect_ssh_client(context, session_id, connection)
+        client = self._connect_ssh_client(ctx, session_id, connection)
         try:
             sftp = client.open_sftp()
             try:
@@ -597,63 +573,58 @@ class DeployListFilesTool(DeployBaseTool):
                 self._render_remote_tree(sftp, child_path, root_path, rendered)
 
 
-class DeployReadFileTool(DeployBaseTool):
-    name = "read_file"
-    description = (
-        "读取 deploy session 下的文件内容，参数：session_id、path，可选 start_line、end_line。"
-        "返回带行号内容；大文件应分段读取。"
-    )
-    supports_parallel = True
-    parameters_schema = {
-        "type": "object",
-        "properties": {
-            "session_id": {"type": "string"},
-            "path": {"type": "string"},
-            "start_line": {"type": "integer"},
-            "end_line": {"type": "integer"},
-        },
-        "required": ["session_id", "path"],
-        "additionalProperties": False,
-    }
-
-    def run(self, arguments: dict[str, object], context: ToolContext) -> str:
-        session_id = str(arguments.get("session_id") or "").strip()
-        relative_path = str(arguments.get("path") or "").strip()
+class DeployFileReader(DeployWorkspace):
+    def read_file(
+        self,
+        ctx: ToolContext,
+        session_id: str,
+        path: str,
+        start_line: int | None = None,
+        end_line: int | None = None,
+    ) -> str:
+        session_id = session_id.strip()
+        relative_path = path.strip()
         if not relative_path:
             raise ValueError("path 不能为空。")
 
-        connection = self._get_connection(context, session_id)
+        connection = self._get_connection(ctx, session_id)
         if self._is_remote_connection(connection):
-            return self._run_remote(arguments, context, session_id, relative_path, connection)
+            return self._run_remote(
+                ctx,
+                session_id,
+                relative_path,
+                connection,
+                start_line=start_line,
+                end_line=end_line,
+            )
         target = self._resolve_connection_path(connection, relative_path)
         if not target.exists():
             raise FileNotFoundError(f"文件不存在: {relative_path}")
         if not target.is_file():
             raise IsADirectoryError(f"目标不是文件: {relative_path}")
 
-        start_line = max(1, int(arguments.get("start_line") or 1))
-        raw_end_line = arguments.get("end_line")
-        end_line = int(raw_end_line) if raw_end_line is not None else None
-        if end_line is not None and end_line < start_line:
+        resolved_start_line = max(1, int(start_line or 1))
+        resolved_end_line = int(end_line) if end_line is not None else None
+        if resolved_end_line is not None and resolved_end_line < resolved_start_line:
             raise ValueError("end_line 不能小于 start_line。")
 
         content = target.read_text(encoding="utf-8")
         lines = content.splitlines()
         total_lines = len(lines)
-        actual_start = start_line if start_line <= total_lines else total_lines + 1
-        actual_end = total_lines if end_line is None else min(end_line, total_lines)
-        selected_lines = lines[start_line - 1 : actual_end] if total_lines else []
-        eof = total_lines == 0 or actual_end >= total_lines or start_line > total_lines
+        actual_start = resolved_start_line if resolved_start_line <= total_lines else total_lines + 1
+        actual_end = total_lines if resolved_end_line is None else min(resolved_end_line, total_lines)
+        selected_lines = lines[resolved_start_line - 1 : actual_end] if total_lines else []
+        eof = total_lines == 0 or actual_end >= total_lines or resolved_start_line > total_lines
         selected_content = "\n".join(selected_lines)
 
         metadata_lines = [
             f"# Session: {session_id}",
-            f"# Requested lines: {start_line}-{end_line if end_line is not None else 'EOF'}",
+            f"# Requested lines: {resolved_start_line}-{resolved_end_line if resolved_end_line is not None else 'EOF'}",
             f"# Actual lines: {actual_start}-{actual_end}",
             f"# Total lines: {total_lines}",
             f"# EOF: {'true' if eof else 'false'}",
         ]
-        if start_line > total_lines and total_lines > 0:
+        if resolved_start_line > total_lines and total_lines > 0:
             metadata_lines.append("# Note: requested range starts beyond end of file.")
 
         rendered = self._format_numbered_text(
@@ -670,14 +641,16 @@ class DeployReadFileTool(DeployBaseTool):
 
     def _run_remote(
         self,
-        arguments: dict[str, object],
-        context: ToolContext,
+        ctx: ToolContext,
         session_id: str,
         relative_path: str,
         connection: DeployConnection,
+        *,
+        start_line: int | None,
+        end_line: int | None,
     ) -> str:
         target = str(self._resolve_connection_path(connection, relative_path))
-        client = self._connect_ssh_client(context, session_id, connection)
+        client = self._connect_ssh_client(ctx, session_id, connection)
         try:
             sftp = client.open_sftp()
             try:
@@ -685,10 +658,9 @@ class DeployReadFileTool(DeployBaseTool):
                 if not stat.S_ISREG(attrs.st_mode):
                     raise IsADirectoryError(f"目标不是文件: {relative_path}")
 
-                start_line = max(1, int(arguments.get("start_line") or 1))
-                raw_end_line = arguments.get("end_line")
-                end_line = int(raw_end_line) if raw_end_line is not None else None
-                if end_line is not None and end_line < start_line:
+                resolved_start_line = max(1, int(start_line or 1))
+                resolved_end_line = int(end_line) if end_line is not None else None
+                if resolved_end_line is not None and resolved_end_line < resolved_start_line:
                     raise ValueError("end_line 不能小于 start_line。")
 
                 with sftp.open(target, "r") as remote_file:
@@ -696,20 +668,20 @@ class DeployReadFileTool(DeployBaseTool):
 
                 lines = content.splitlines()
                 total_lines = len(lines)
-                actual_start = start_line if start_line <= total_lines else total_lines + 1
-                actual_end = total_lines if end_line is None else min(end_line, total_lines)
-                selected_lines = lines[start_line - 1 : actual_end] if total_lines else []
-                eof = total_lines == 0 or actual_end >= total_lines or start_line > total_lines
+                actual_start = resolved_start_line if resolved_start_line <= total_lines else total_lines + 1
+                actual_end = total_lines if resolved_end_line is None else min(resolved_end_line, total_lines)
+                selected_lines = lines[resolved_start_line - 1 : actual_end] if total_lines else []
+                eof = total_lines == 0 or actual_end >= total_lines or resolved_start_line > total_lines
                 selected_content = "\n".join(selected_lines)
 
                 metadata_lines = [
                     f"# Session: {session_id}",
-                    f"# Requested lines: {start_line}-{end_line if end_line is not None else 'EOF'}",
+                    f"# Requested lines: {resolved_start_line}-{resolved_end_line if resolved_end_line is not None else 'EOF'}",
                     f"# Actual lines: {actual_start}-{actual_end}",
                     f"# Total lines: {total_lines}",
                     f"# EOF: {'true' if eof else 'false'}",
                 ]
-                if start_line > total_lines and total_lines > 0:
+                if resolved_start_line > total_lines and total_lines > 0:
                     metadata_lines.append("# Note: requested range starts beyond end of file.")
 
                 rendered = self._format_numbered_text(
@@ -729,36 +701,33 @@ class DeployReadFileTool(DeployBaseTool):
             client.close()
 
 
-class DeployExecuteTool(DeployBaseTool):
-    name = "execute"
-    description = (
-        "在 deploy session 下执行命令，参数：session_id、cwd、command、timeout（秒）。"
-        "cwd 相对 deploy session 根目录。"
-    )
-    parameters_schema = {
-        "type": "object",
-        "properties": {
-            "session_id": {"type": "string"},
-            "cwd": {"type": "string"},
-            "command": {"type": "string"},
-            "timeout": {"type": "integer"},
-        },
-        "required": ["session_id", "command", "timeout"],
-        "additionalProperties": False,
-    }
-
-    def run(self, arguments: dict[str, object], context: ToolContext) -> str:
-        session_id = str(arguments.get("session_id") or "").strip()
-        cwd = str(arguments.get("cwd") or ".").strip() or "."
-        command = str(arguments.get("command") or "").strip()
-        timeout = self._parse_timeout(arguments)
+class DeployCommandRunner(DeployWorkspace):
+    def execute(
+        self,
+        ctx: ToolContext,
+        session_id: str,
+        command: str,
+        timeout: int,
+        cwd: str = ".",
+    ) -> str:
+        session_id = session_id.strip()
+        cwd = cwd.strip() or "."
+        command = command.strip()
+        parsed_timeout = self._parse_timeout(timeout)
         if not command:
             raise ValueError("command 不能为空。")
         self._validate_command(command)
 
-        connection = self._get_connection(context, session_id)
+        connection = self._get_connection(ctx, session_id)
         if self._is_remote_connection(connection):
-            return self._run_remote(context, session_id, cwd, command, timeout, connection)
+            return self._run_remote(
+                ctx,
+                session_id,
+                cwd,
+                command,
+                parsed_timeout,
+                connection,
+            )
         working_directory = self._resolve_connection_path(connection, cwd)
         if not working_directory.exists():
             raise FileNotFoundError(f"cwd 不存在: {cwd}")
@@ -776,14 +745,14 @@ class DeployExecuteTool(DeployBaseTool):
             **_hidden_windows_process_kwargs(),
         )
         try:
-            stdout, stderr = process.communicate(timeout=timeout)
+            stdout, stderr = process.communicate(timeout=parsed_timeout)
         except subprocess.TimeoutExpired as exc:
             _kill_process_tree(process)
             try:
                 process.communicate(timeout=5)
             except subprocess.TimeoutExpired:
                 pass
-            raise TimeoutError(f"命令执行超时（>{timeout} 秒）: {command}") from exc
+            raise TimeoutError(f"命令执行超时（>{parsed_timeout} 秒）: {command}") from exc
 
         stdout = stdout.strip()
         stderr = stderr.strip()
@@ -860,69 +829,51 @@ class DeployExecuteTool(DeployBaseTool):
             client.close()
 
 
-class DeployTransferFilesTool(DeployBaseTool):
-    name = "transfer_files"
-    description = (
-        "把当前工作区里的文件或目录复制到 deploy session 下。参数：session_id、"
-        "path / file（都支持字符串或字符串数组，也兼容 paths / files）、"
-        "target_dir（可选，默认 deploy 根目录）。"
-    )
-    parameters_schema = {
-        "type": "object",
-        "properties": {
-            "session_id": {"type": "string"},
-            "path": {
-                "anyOf": [
-                    {"type": "string"},
-                    {"type": "array", "items": {"type": "string"}},
-                ]
-            },
-            "paths": {
-                "type": "array",
-                "items": {"type": "string"},
-            },
-            "file": {
-                "anyOf": [
-                    {"type": "string"},
-                    {"type": "array", "items": {"type": "string"}},
-                ]
-            },
-            "files": {
-                "type": "array",
-                "items": {"type": "string"},
-            },
-            "target_dir": {"type": "string"},
-        },
-        "required": ["session_id"],
-        "additionalProperties": False,
-    }
-
-    def run(self, arguments: dict[str, object], context: ToolContext) -> dict[str, object]:
-        session_id = str(arguments.get("session_id") or "").strip()
+class DeployFileTransfer(DeployWorkspace):
+    def transfer_files(
+        self,
+        ctx: ToolContext,
+        session_id: str,
+        path: str | list[str] | None = None,
+        paths: list[str] | None = None,
+        file: str | list[str] | None = None,
+        files: list[str] | None = None,
+        target_dir: str = ".",
+    ) -> dict[str, object]:
+        session_id = session_id.strip()
         if not session_id:
             raise ValueError("session_id 不能为空。")
 
-        connection = self._get_connection(context, session_id)
+        connection = self._get_connection(ctx, session_id)
         if self._is_remote_connection(connection):
-            return self._run_remote(arguments, context, session_id, connection)
+            return self._run_remote(
+                ctx,
+                session_id,
+                connection,
+                path=path,
+                paths=paths,
+                file=file,
+                files=files,
+                target_dir=target_dir,
+            )
 
-        target_dir = str(arguments.get("target_dir") or ".").strip() or "."
+        target_dir = target_dir.strip() or "."
         target_root = self._resolve_connection_path(connection, target_dir)
         target_root.mkdir(parents=True, exist_ok=True)
         if not target_root.is_dir():
             raise NotADirectoryError(f"target_dir 不是目录: {target_dir}")
 
-        path_inputs = self._normalize_string_list_argument(arguments, "path", "paths")
-        file_inputs = self._normalize_string_list_argument(arguments, "file", "files")
+        path_inputs = self._normalize_string_list_values("path", path, paths)
+        file_inputs = self._normalize_string_list_values("file", file, files)
         raw_sources = [("path", value) for value in path_inputs] + [("file", value) for value in file_inputs]
         if not raw_sources:
             raise ValueError("至少要提供 path 或 file。")
 
-        workspace = context.workspace.resolve()
+        workspace = ctx.workspace.resolve()
         transferred: list[dict[str, str]] = []
         seen_sources: set[str] = set()
         for source_kind, raw_source in raw_sources:
-            source = self._resolve_workspace_source_path(raw_source, context)
+            source = self._resolve_workspace_source_path(raw_source, ctx)
             source_key = str(source)
             if source_key in seen_sources:
                 continue
@@ -969,21 +920,26 @@ class DeployTransferFilesTool(DeployBaseTool):
 
     def _run_remote(
         self,
-        arguments: dict[str, object],
-        context: ToolContext,
+        ctx: ToolContext,
         session_id: str,
         connection: DeployConnection,
+        *,
+        path: str | list[str] | None,
+        paths: list[str] | None,
+        file: str | list[str] | None,
+        files: list[str] | None,
+        target_dir: str,
     ) -> dict[str, object]:
-        target_dir = str(arguments.get("target_dir") or ".").strip() or "."
+        target_dir = target_dir.strip() or "."
         target_root = str(self._resolve_connection_path(connection, target_dir))
-        path_inputs = self._normalize_string_list_argument(arguments, "path", "paths")
-        file_inputs = self._normalize_string_list_argument(arguments, "file", "files")
+        path_inputs = self._normalize_string_list_values("path", path, paths)
+        file_inputs = self._normalize_string_list_values("file", file, files)
         raw_sources = [("path", value) for value in path_inputs] + [("file", value) for value in file_inputs]
         if not raw_sources:
             raise ValueError("至少要提供 path 或 file。")
 
-        client = self._connect_ssh_client(context, session_id, connection)
-        workspace = context.workspace.resolve()
+        client = self._connect_ssh_client(ctx, session_id, connection)
+        workspace = ctx.workspace.resolve()
         transferred: list[dict[str, str]] = []
         seen_sources: set[str] = set()
 
@@ -992,7 +948,7 @@ class DeployTransferFilesTool(DeployBaseTool):
             try:
                 self._ensure_remote_directory(sftp, target_root)
                 for source_kind, raw_source in raw_sources:
-                    source = self._resolve_workspace_source_path(raw_source, context)
+                    source = self._resolve_workspace_source_path(raw_source, ctx)
                     source_key = str(source)
                     if source_key in seen_sources:
                         continue
@@ -1046,11 +1002,84 @@ class DeployTransferFilesTool(DeployBaseTool):
                 sftp.put(str(child), remote_child)
 
 
-def build_deploy_tools() -> list[BaseTool]:
-    return [
-        ConnectTool(),
-        DeployListFilesTool(),
-        DeployReadFileTool(),
-        DeployTransferFilesTool(),
-        DeployExecuteTool(),
-    ]
+_CONNECTOR = DeployConnector()
+_FILE_BROWSER = DeployFileBrowser()
+_FILE_READER = DeployFileReader()
+_FILE_TRANSFER = DeployFileTransfer()
+_COMMAND_RUNNER = DeployCommandRunner()
+
+
+def connect(ctx: ToolContext) -> dict[str, object]:
+    """请求用户填写部署目标信息并建立 deploy session，成功后会返回 session_id。"""
+
+    output = _CONNECTOR.connect(ctx)
+    ctx.state.request_stop("")
+    return output
+
+
+def list_files(ctx: ToolContext, session_id: str, path: str = ".") -> str:
+    """列出 deploy session 下的目录结构，path 相对 deploy session 根目录。"""
+
+    return _FILE_BROWSER.list_files(ctx, session_id=session_id, path=path)
+
+
+def read_file(
+    ctx: ToolContext,
+    session_id: str,
+    path: str,
+    start_line: int | None = None,
+    end_line: int | None = None,
+) -> str:
+    """读取 deploy session 下的文件内容，返回带行号文本。"""
+
+    return _FILE_READER.read_file(
+        ctx,
+        session_id=session_id,
+        path=path,
+        start_line=start_line,
+        end_line=end_line,
+    )
+
+
+def transfer_files(
+    ctx: ToolContext,
+    session_id: str,
+    path: str | list[str] | None = None,
+    paths: list[str] | None = None,
+    file: str | list[str] | None = None,
+    files: list[str] | None = None,
+    target_dir: str = ".",
+) -> dict[str, object]:
+    """把当前工作区里的文件或目录复制到 deploy session 下。"""
+
+    return _FILE_TRANSFER.transfer_files(
+        ctx,
+        session_id=session_id,
+        path=path,
+        paths=paths,
+        file=file,
+        files=files,
+        target_dir=target_dir,
+    )
+
+
+def execute(
+    ctx: ToolContext,
+    session_id: str,
+    command: str,
+    timeout: int,
+    cwd: str = ".",
+) -> str:
+    """在 deploy session 下执行命令，cwd 相对 deploy session 根目录。"""
+
+    return _COMMAND_RUNNER.execute(
+        ctx,
+        session_id=session_id,
+        command=command,
+        timeout=timeout,
+        cwd=cwd,
+    )
+
+
+list_files.supports_parallel = True
+read_file.supports_parallel = True

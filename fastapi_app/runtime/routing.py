@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from agent import OpenAICompatibleClient
-from coding_agent.tools import DEFAULT_IGNORED_DIR_NAMES
+from coding_agent.tool_common import DEFAULT_IGNORED_DIR_NAMES
 
 from fastapi_app.agent_router import decide_agent_route_with_model, normalize_route_state
 from fastapi_app.app_config import APP_DATA_ROOT

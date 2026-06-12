@@ -3,17 +3,17 @@ from __future__ import annotations
 import threading
 from typing import Any
 
-from agent import Agent, ChatSession, OpenAICompatibleClient
-from chat_agent import ChatPromptModel
+from agent import OpenAICompatibleClient
+from chat_agent import build_chat_agent
 from coding_agent import (
-    CodingPromptModel,
     InteractiveCommandSession,
+    build_coding_agent,
     build_coding_tools,
     build_project_docs_tools,
 )
-from deploy_agent import DeployConnectionManager, DeployPromptModel, build_deploy_tools
+from deploy_agent import DeployConnectionManager, build_deploy_agent, build_deploy_tools
 from fastapi_app.mcp import build_enabled_mcp_tools
-from plan_agent import PlanPromptModel, build_plan_tools
+from plan_agent import build_plan_agent, build_plan_tools
 
 from fastapi_app.agent_router import normalize_route_state
 from fastapi_app.app_config import APP_DATA_ROOT, BACKEND_BASE_URL, ROOT, normalize_reasoning_effort
@@ -21,6 +21,7 @@ from fastapi_app.model_config_store import build_agent_config, resolve_model_con
 from fastapi_app.rag_index import schedule_workspace_rag_index
 from fastapi_app.runtime.context import infer_model_context_limit
 from fastapi_app.runtime.routing import decide_route_for_message, forced_route_decision
+from fastapi_app.runtime.zonix_runner import ZonixChatSession
 from fastapi_app.runtime.session import (
     build_agent_runtime_state as build_agent_runtime_state_impl,
     normalize_deploy_state as normalize_deploy_state_impl,
@@ -35,6 +36,7 @@ from fastapi_app.runtime.session import (
 )
 from fastapi_app.session_history import seed_chat_session_history
 from fastapi_app.workspace_utils import resolve_workspace_path
+from zonix import Agent
 
 
 def normalize_session_phase(phase: str | None) -> str:
@@ -138,7 +140,7 @@ def build_chat_session(
     loaded_plugin_ids: set[str] | None = None,
     fallback_context_tokens: int | None = None,
     load_mcp_tools: bool = True,
-) -> tuple[ChatSession | None, str, str | None, str | None, str | None, int | None]:
+) -> tuple[ZonixChatSession | None, str, str | None, str | None, str | None, int | None]:
     try:
         config, normalized_model_ref = build_agent_config(APP_DATA_ROOT, env_file)
         if reasoning_effort is not None:
@@ -151,38 +153,54 @@ def build_chat_session(
         client = OpenAICompatibleClient(config)
         resolved_workspace = resolve_workspace_path(workspace)
         loaded_plugin_ids = loaded_plugin_ids or set()
+        metadata = {
+            "include_thoughts_in_context": config.include_thoughts_in_context,
+            "project_root": str(ROOT),
+            "app_data_root": str(APP_DATA_ROOT),
+            "llm_client": client,
+            "mcp_tools_loaded": agent_type == "chat" or load_mcp_tools,
+        }
         if agent_type == "deploy":
-            model = DeployPromptModel(client, workspace=workspace)
             tools = build_deploy_tools()
+            if load_mcp_tools:
+                tools = tools + build_enabled_mcp_tools(APP_DATA_ROOT)
+            agent = build_deploy_agent(
+                client,
+                workspace=resolved_workspace,
+                tools=tools,
+                metadata=metadata,
+            )
         elif agent_type == "plan":
-            model = PlanPromptModel(client, workspace=workspace)
             tools = build_plan_tools()
+            if load_mcp_tools:
+                tools = tools + build_enabled_mcp_tools(APP_DATA_ROOT)
+            agent = build_plan_agent(
+                client,
+                workspace=resolved_workspace,
+                tools=tools,
+                metadata=metadata,
+            )
         elif agent_type == "chat":
-            model = ChatPromptModel(client)
-            tools = []
+            agent = build_chat_agent(
+                client,
+                workspace=resolved_workspace,
+                metadata=metadata,
+            )
         else:
-            model = CodingPromptModel(client, workspace=workspace)
             tools = build_coding_tools()
-        if agent_type != "chat" and "project-docs" in loaded_plugin_ids:
-            tools = tools + build_project_docs_tools()
-        if agent_type != "chat" and load_mcp_tools:
-            tools = tools + build_enabled_mcp_tools(APP_DATA_ROOT)
-        mcp_tools_loaded = agent_type == "chat" or load_mcp_tools
-        agent = Agent(
-            model=model,
-            tools=tools,
-            workspace=resolved_workspace,
-            tool_context_metadata={
-                "include_thoughts_in_context": config.include_thoughts_in_context,
-                "project_root": str(ROOT),
-                "app_data_root": str(APP_DATA_ROOT),
-                "llm_client": client,
-                "mcp_tools_loaded": mcp_tools_loaded,
-            },
-        )
+            if "project-docs" in loaded_plugin_ids:
+                tools = tools + build_project_docs_tools()
+            if load_mcp_tools:
+                tools = tools + build_enabled_mcp_tools(APP_DATA_ROOT)
+            agent = build_coding_agent(
+                client,
+                workspace=resolved_workspace,
+                tools=tools,
+                metadata=metadata,
+            )
         schedule_workspace_rag_index(APP_DATA_ROOT, resolved_workspace)
         return (
-            ChatSession(agent=agent),
+            ZonixChatSession(agent=agent),
             config.model,
             None,
             normalized_model_ref,
@@ -229,15 +247,14 @@ def rebuild_chat_session_for_agent_type(session: Any, agent_type: str) -> None:
         session.model = model_name
         session.max_context_tokens = context_limit or session.max_context_tokens
         seed_chat_session_history(session.chat_session, session.history_messages, session.history_tools)
-        if isinstance(session.chat_session.agent, Agent):
-            attach_agent_runtime_metadata(
-                session.chat_session.agent,
-                session_id=session.session_id,
-                interactive_command_session=session.interactive_command_session,
-                cancel_event=session.cancel_event,
-                deploy_connection_manager=session.deploy_connection_manager,
-            )
-            sync_session_runtime_state_for_agent(session)
+        attach_agent_runtime_metadata(
+            session.chat_session.agent,
+            session_id=session.session_id,
+            interactive_command_session=session.interactive_command_session,
+            cancel_event=session.cancel_event,
+            deploy_connection_manager=session.deploy_connection_manager,
+        )
+        sync_session_runtime_state_for_agent(session)
 
 
 def ensure_mcp_tools_for_session(session: Any) -> None:
@@ -250,7 +267,8 @@ def ensure_mcp_tools_for_session(session: Any) -> None:
         return
     tools = build_enabled_mcp_tools(APP_DATA_ROOT)
     for tool in tools:
-        agent.tool_registry.tools.setdefault(tool.name, tool)
+        if not any(existing.name == tool.name for existing in agent.tools):
+            agent.tools.append(tool)
     agent.tool_context_metadata["mcp_tools_loaded"] = True
 
 

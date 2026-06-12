@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import time
 import uuid
+import json
 from typing import Any
 
-from agent import ChatSession, ConversationMessage, StepRecord, ToolResult
+from agent import ConversationMessage, StepRecord, ToolResult
 
 MAX_PLANNING_RECORD_CHARS = 1_200
 MAX_STORED_TOOL_RECORDS = 80
+MAX_ASSISTANT_TRACE_SUMMARY_CHARS = 2_400
+MAX_ASSISTANT_TRACE_SUMMARY_TOOLS = 8
 SUBAGENT_SCOPE = "subagent"
 
 
@@ -231,26 +234,157 @@ def update_assistant_tool_call(
     update_assistant_history_message(session, assistant_id, _message_updater)
 
 
+def _coerce_optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _compact_history_value(value: object, limit: int = 220) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        text = value
+    else:
+        try:
+            text = json.dumps(value, ensure_ascii=False)
+        except TypeError:
+            text = str(value)
+    compact = " ".join(text.split()).strip()
+    if len(compact) <= limit:
+        return compact
+    return f"{compact[:limit].rstrip()}..."
+
+
+def extract_message_tool_calls(message: dict[str, Any]) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+
+    def append(raw_tool_call: object) -> None:
+        if not isinstance(raw_tool_call, dict):
+            return
+        tool_id = str(raw_tool_call.get("id") or "").strip()
+        if tool_id and tool_id in seen_ids:
+            return
+        if tool_id:
+            seen_ids.add(tool_id)
+        records.append(raw_tool_call)
+
+    raw_tool_calls = message.get("toolCalls")
+    if isinstance(raw_tool_calls, list):
+        for raw_tool_call in raw_tool_calls:
+            append(raw_tool_call)
+
+    raw_parts = message.get("parts")
+    if isinstance(raw_parts, list):
+        for part in raw_parts:
+            if not isinstance(part, dict):
+                continue
+            append(part.get("toolCall"))
+
+    return records
+
+
+def build_assistant_tool_trace_summary(message: dict[str, Any]) -> str:
+    if is_subagent_record(message):
+        return ""
+    if str(message.get("role") or "") != "assistant":
+        return ""
+
+    tool_calls = extract_message_tool_calls(message)
+    thought_text = extract_message_thought_text(message)
+    if not tool_calls and not thought_text:
+        return ""
+
+    state_counts: dict[str, int] = {}
+    for tool_call in tool_calls:
+        state = str(tool_call.get("state") or "unknown")
+        state_counts[state] = state_counts.get(state, 0) + 1
+
+    lines = [
+        "[内部工具轨迹摘要] 上一轮助手没有产生完整的可展示最终回复，但以下执行轨迹已经真实发生；继续对话时必须沿用这些结果，不要从头重做。",
+    ]
+    if tool_calls:
+        state_text = ", ".join(
+            f"{state}={count}" for state, count in sorted(state_counts.items())
+        )
+        lines.append(f"- 工具调用数: {len(tool_calls)}" + (f" ({state_text})" if state_text else ""))
+
+        recent_tools = tool_calls[-MAX_ASSISTANT_TRACE_SUMMARY_TOOLS:]
+        for index, tool_call in enumerate(recent_tools, start=1):
+            name = str(tool_call.get("name") or "unknown")
+            state = str(tool_call.get("state") or "unknown")
+            success = tool_call.get("success")
+            arguments = tool_call.get("arguments")
+            error = tool_call.get("errorMessage", tool_call.get("error_message"))
+            output = tool_call.get("output")
+            summary_bits = [f"{index}. {name}", f"state={state}"]
+            if success is not None:
+                summary_bits.append(f"success={success}")
+            args_text = _compact_history_value(arguments, 180)
+            if args_text:
+                summary_bits.append(f"args={args_text}")
+            error_text = _compact_history_value(error, 180)
+            if error_text:
+                summary_bits.append(f"error={error_text}")
+            elif output is not None:
+                output_text = _compact_history_value(output, 180)
+                if output_text:
+                    summary_bits.append(f"output={output_text}")
+            lines.append("- " + " | ".join(summary_bits))
+    if thought_text:
+        lines.append(f"- 最近思路: {_compact_history_value(thought_text, 260)}")
+
+    summary = "\n".join(lines)
+    if len(summary) <= MAX_ASSISTANT_TRACE_SUMMARY_CHARS:
+        return summary
+    return f"{summary[:MAX_ASSISTANT_TRACE_SUMMARY_CHARS].rstrip()}..."
+
+
+def model_content_from_history_message(message: dict[str, Any]) -> str:
+    role = str(message.get("role", ""))
+    content = str(message.get("content", "") or "").strip()
+    if role != "assistant" or is_subagent_record(message):
+        return content
+
+    trace_summary = build_assistant_tool_trace_summary(message)
+    if not trace_summary:
+        return content
+    if not content:
+        return trace_summary
+    if content.startswith("后端处理失败") or content.startswith("后端处理在流式阶段失败"):
+        return f"{content}\n\n{trace_summary}"
+    return content
+
+
 def seed_chat_session_history(
-    chat_session: ChatSession,
+    chat_session: Any,
     history_messages: list[dict[str, Any]],
     history_tools: list[dict[str, Any]] | None = None,
 ) -> None:
-    chat_session.state.conversation_messages = [
-        ConversationMessage(
-            role=str(message.get("role", "")),
-            content=str(message.get("content", "")),
-            reasoning_content=(
-                extract_message_thought_text(message)
-                if str(message.get("role", "")) == "assistant"
-                else None
-            ) or None,
+    conversation_messages: list[ConversationMessage] = []
+    for message in history_messages:
+        role = str(message.get("role", ""))
+        if role not in {"user", "assistant"} or is_subagent_record(message):
+            continue
+        content = model_content_from_history_message(message)
+        if not content.strip():
+            continue
+        conversation_messages.append(
+            ConversationMessage(
+                role=role,
+                content=content,
+                reasoning_content=(
+                    extract_message_thought_text(message)
+                    if role == "assistant"
+                    else None
+                ) or None,
+            )
         )
-        for message in history_messages
-        if str(message.get("role", "")) in {"user", "assistant"}
-        and str(message.get("content", "")).strip()
-        and not is_subagent_record(message)
-    ]
+    chat_session.state.conversation_messages = conversation_messages
     tool_records = build_tool_records_from_history(history_messages, history_tools or [])
     if tool_records:
         chat_session.state.data["tool_records"] = tool_records
@@ -429,23 +563,19 @@ def build_tool_records_from_history(
             return
         records[existing_index] = {**records[existing_index], **normalized}
 
-    for message in history_messages:
+    for message_index, message in enumerate(history_messages, start=1):
         if is_subagent_record(message):
             continue
-        raw_tool_calls = message.get("toolCalls")
-        if isinstance(raw_tool_calls, list):
-            for raw_tool_call in raw_tool_calls:
-                if isinstance(raw_tool_call, dict):
-                    upsert(raw_tool_call)
-        raw_parts = message.get("parts")
-        if not isinstance(raw_parts, list):
-            continue
-        for part in raw_parts:
-            if not isinstance(part, dict):
-                continue
-            raw_tool_call = part.get("toolCall")
-            if isinstance(raw_tool_call, dict):
-                upsert(raw_tool_call)
+        message_turn = _coerce_optional_int(
+            message.get("turnIndex", message.get("turn_index"))
+        ) or message_index
+        assistant_id = str(message.get("id") or "").strip()
+        for raw_tool_call in extract_message_tool_calls(message):
+            tool_call = {**raw_tool_call}
+            tool_call.setdefault("turnIndex", message_turn)
+            if assistant_id:
+                tool_call.setdefault("assistantId", assistant_id)
+            upsert(tool_call)
 
     for raw_tool in history_tools:
         if isinstance(raw_tool, dict) and not is_subagent_record(raw_tool):
@@ -519,6 +649,12 @@ def normalize_tool_record(raw_record: dict[str, Any]) -> dict[str, Any]:
         "state": state,
         "error_message": raw_record.get("errorMessage", raw_record.get("error_message")),
     }
+    turn_index = _coerce_optional_int(raw_record.get("turnIndex", raw_record.get("turn_index")))
+    if turn_index is not None:
+        normalized["turn_index"] = turn_index
+    assistant_id = str(raw_record.get("assistantId", raw_record.get("assistant_id")) or "").strip()
+    if assistant_id:
+        normalized["assistant_id"] = assistant_id
     for key in (
         "agentScope",
         "subagentId",

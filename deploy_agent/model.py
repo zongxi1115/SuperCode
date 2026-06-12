@@ -8,23 +8,11 @@ from coding_agent.model import CodingPromptModel, HTML_ARTIFACT_OUTPUT_RULES
 class DeployPromptModel(CodingPromptModel):
     """Model adapter with deployment-specific prompts and context."""
 
-    def _build_system_prompt(
-        self,
-        tool_definitions: dict[str, dict[str, object]],
-        response_mode: str = "legacy_json",
-    ) -> str:
-        base_prompt = self.prompt_path.read_text(encoding="utf-8").strip()
-        tool_lines = [
-            f"- {tool_name}: {str(metadata.get('description', '')).strip()}"
-            for tool_name, metadata in tool_definitions.items()
-        ]
-        system_info = self._build_system_info()
-
-        if response_mode == "native_tools":
-            protocol_lines = [
+    def build_native_protocol_prompt(self) -> str:
+        return "\n".join(
+            [
                 "## 输出协议",
-                "当前接口已启用原生 tool calling。",
-                "如果需要调用工具，必须使用原生 tool calling，不要在文本里输出 action/tool_name/tool_arguments JSON。",
+                "当模型请求携带原生 tools 时，必须使用原生 tool calling，不要在文本里输出 action/tool_name/tool_arguments JSON。",
                 "如果不需要调用工具，直接输出给用户的最终答复文本。",
                 "规则：",
                 "1. 后端提供的内部会话状态是当前阶段的唯一真实来源；优先读取 phase 和 deploy_state，不要靠历史自行猜测。",
@@ -49,10 +37,13 @@ class DeployPromptModel(CodingPromptModel):
                 "20. 你会在上下文里看到 [技能目录]，如果其中某个 skill 与当前部署任务高度相关，应主动吸收其摘要或已激活正文，不要等用户先显式 @ skill。",
                 *HTML_ARTIFACT_OUTPUT_RULES,
             ]
-        else:
-            protocol_lines = [
+        )
+
+    def build_legacy_protocol_prompt(self) -> str:
+        return "\n".join(
+            [
                 "## 输出协议",
-                "你必须始终只输出一个 JSON 对象，不要输出 Markdown，不要输出解释。",
+                "当前模型接口不可用原生 tool calling 时，你必须始终只输出一个 JSON 对象，不要输出 Markdown，不要输出解释。",
                 (
                     'JSON 格式：{"action":"tool 或 final","thought":"当前思路",'
                     '"tool_name":"工具名","tool_arguments":{},'
@@ -81,15 +72,6 @@ class DeployPromptModel(CodingPromptModel):
                 "19. 如果用户目标已经完成，必须 action=final，不要继续调用无必要工具；连续失败的同一工具在没有新信息前也不要重试。",
                 "20. 你会在上下文里看到 [技能目录]，如果其中某个 skill 与当前部署任务高度相关，应主动吸收其摘要或已激活正文，不要等用户先显式 @ skill。",
                 *HTML_ARTIFACT_OUTPUT_RULES,
-            ]
-
-        return "\n\n".join(
-            [
-                base_prompt,
-                system_info,
-                "## 当前工具注册表",
-                "\n".join(tool_lines),
-                "\n".join(protocol_lines),
             ]
         )
 

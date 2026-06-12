@@ -7,11 +7,11 @@ from typing import Any, Callable
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
-from agent import Agent, ChatSession, OpenAICompatibleClient
-from chat_agent import ChatPromptModel
-from deploy_agent import DeployPromptModel, build_deploy_tools
-from coding_agent import CodingPromptModel, build_coding_tools, build_project_docs_tools
-from plan_agent import PlanPromptModel, build_plan_tools
+from agent import OpenAICompatibleClient
+from chat_agent import build_chat_agent
+from coding_agent import build_coding_agent, build_coding_tools, build_project_docs_tools
+from deploy_agent import build_deploy_agent, build_deploy_tools
+from plan_agent import build_plan_agent, build_plan_tools
 from fastapi_app.api_models import (
     EmbeddingSettingsPayload,
     ModelConfigPayload,
@@ -31,6 +31,7 @@ from fastapi_app.model_config_store import (
 from fastapi_app.mcp import build_enabled_mcp_tools
 from fastapi_app.session.agent_runtime import resolve_model_context_limit
 from fastapi_app.rag_index import schedule_workspace_rag_index, test_embedding_config
+from fastapi_app.runtime.zonix_runner import ZonixChatSession
 from fastapi_app.session_history import seed_chat_session_history
 from fastapi_app.workspace_utils import resolve_workspace_path
 
@@ -164,46 +165,63 @@ def register_config_routes(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         client = OpenAICompatibleClient(config)
+        resolved_workspace = resolve_workspace_path(session.workspace)
+        metadata = {
+            "include_thoughts_in_context": config.include_thoughts_in_context,
+            "llm_client": client,
+        }
         if session.agent_type == "deploy":
-            model = DeployPromptModel(client, workspace=session.workspace)
             tools = build_deploy_tools()
+            agent = build_deploy_agent(
+                client,
+                workspace=resolved_workspace,
+                tools=tools,
+                metadata=metadata,
+            )
         elif session.agent_type == "plan":
-            model = PlanPromptModel(client, workspace=session.workspace)
             tools = build_plan_tools()
+            agent = build_plan_agent(
+                client,
+                workspace=resolved_workspace,
+                tools=tools,
+                metadata=metadata,
+            )
         elif session.agent_type == "chat":
-            model = ChatPromptModel(client)
-            tools = []
+            agent = build_chat_agent(
+                client,
+                workspace=resolved_workspace,
+                metadata=metadata,
+            )
         else:
-            model = CodingPromptModel(client, workspace=session.workspace)
             tools = build_coding_tools()
-        if session.agent_type != "chat" and "project-docs" in deps.get_loaded_plugin_ids(session):
-            tools = tools + build_project_docs_tools()
+            if "project-docs" in deps.get_loaded_plugin_ids(session):
+                tools = tools + build_project_docs_tools()
+            agent = build_coding_agent(
+                client,
+                workspace=resolved_workspace,
+                tools=tools,
+                metadata=metadata,
+            )
         if session.agent_type != "chat":
-            tools = tools + build_enabled_mcp_tools(deps.app_data_root)
-        agent = Agent(
-            model=model,
-            tools=tools,
-            workspace=resolve_workspace_path(session.workspace),
-            tool_context_metadata={
-                "include_thoughts_in_context": config.include_thoughts_in_context,
-                "llm_client": client,
-            },
-        )
+            existing_tool_names = {tool.name for tool in agent.tools}
+            for tool in build_enabled_mcp_tools(deps.app_data_root):
+                if tool.name not in existing_tool_names:
+                    agent.tools.append(tool)
+                    existing_tool_names.add(tool.name)
         interactive_command_session = session.interactive_command_session
 
-        session.chat_session = ChatSession(agent=agent)
+        session.chat_session = ZonixChatSession(agent=agent)
         schedule_workspace_rag_index(deps.app_data_root, session.workspace)
         seed_chat_session_history(session.chat_session, session.history_messages, session.history_tools)
-        if isinstance(session.chat_session.agent, Agent):
-            deps.attach_agent_runtime_metadata(
-                session.chat_session.agent,
-                session_id=session.session_id,
-                interactive_command_session=interactive_command_session,
-                cancel_event=session.cancel_event,
-                include_thoughts_in_context=config.include_thoughts_in_context,
-                deploy_connection_manager=session.deploy_connection_manager,
-            )
-            deps.sync_session_runtime_state_for_agent(session)
+        deps.attach_agent_runtime_metadata(
+            session.chat_session.agent,
+            session_id=session.session_id,
+            interactive_command_session=interactive_command_session,
+            cancel_event=session.cancel_event,
+            include_thoughts_in_context=config.include_thoughts_in_context,
+            deploy_connection_manager=session.deploy_connection_manager,
+        )
+        deps.sync_session_runtime_state_for_agent(session)
         session.model = config.model
         session.max_context_tokens = resolve_model_context_limit(session.model, normalized_model_ref)
         session.reasoning_effort = config.reasoning_effort

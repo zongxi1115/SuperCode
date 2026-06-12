@@ -15,6 +15,9 @@ from fastapi_app.runtime.terminal import TerminalRuntime
 
 TERMINAL_WS_INITIAL_REPLAY_MAX_CHARS = 64_000
 TERMINAL_WS_OUTPUT_CHUNK_CHARS = 8_192
+TERMINAL_WS_LIVE_BATCH_CHARS = 16_384
+MANAGED_PROCESS_OUTPUT_TAIL_CHARS = 64_000
+MANAGED_PROCESS_TERMINAL_HISTORY_LIMIT = 20
 
 
 @dataclass(frozen=True)
@@ -112,7 +115,9 @@ def register_terminal_routes(
                 "kind": "interactive",
             })
         if session.interactive_command_session is not None:
-            for proc in session.interactive_command_session.list_managed_processes(only_active=True):
+            for proc in session.interactive_command_session.list_managed_processes(
+                only_active=False
+            )[:MANAGED_PROCESS_TERMINAL_HISTORY_LIMIT]:
                 terminals.append({
                     "terminalId": proc["terminalId"],
                     "name": proc["terminalId"],
@@ -126,8 +131,32 @@ def register_terminal_routes(
                     "rootPid": proc["rootPid"],
                     "status": proc["status"],
                     "startedAt": proc["startedAt"],
+                    "returnCode": proc.get("returnCode"),
+                    "terminatedAt": proc.get("terminatedAt"),
+                    "processCount": proc.get("processCount"),
                 })
         return JSONResponse({"terminals": terminals})
+
+    @app.get("/api/sessions/{session_id}/processes/{terminal_id}/output")
+    async def get_session_process_output(
+        session_id: str,
+        terminal_id: str,
+        tail_chars: int = Query(MANAGED_PROCESS_OUTPUT_TAIL_CHARS, ge=1, le=300_000),
+        after_offset: int | None = Query(None, ge=0),
+    ) -> JSONResponse:
+        session = deps.require_session(session_id)
+        interactive_session = session.interactive_command_session
+        if interactive_session is None:
+            raise HTTPException(status_code=404, detail="当前会话没有受管进程")
+        try:
+            payload = interactive_session.get_managed_process_output(
+                terminal_id,
+                tail_chars=tail_chars,
+                after_offset=after_offset,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return JSONResponse(payload)
 
     @app.post("/api/sessions/{session_id}/terminals")
     async def create_session_terminal(
@@ -250,7 +279,7 @@ def register_terminal_routes(
                 chunks = [chunk]
                 buffered_chars = len(chunk)
                 deadline = time.monotonic() + 0.016
-                while time.monotonic() < deadline and buffered_chars < 64_000:
+                while time.monotonic() < deadline and buffered_chars < TERMINAL_WS_LIVE_BATCH_CHARS:
                     try:
                         next_chunk = output_queue.get_nowait()
                     except asyncio.QueueEmpty:

@@ -73,6 +73,14 @@ const CONTEXT_COMPRESSION_USAGE_THRESHOLD = 0.8;
 const STREAM_RETRY_LIMIT = 10;
 const SESSION_HISTORY_PAGE_SIZE = 30;
 const RETRYABLE_STREAM_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
+const STREAMING_TOOL_ID_PREFIX = 'streaming-';
+const STREAMABLE_TOOL_NAMES = [
+  'write_file',
+  'replace_file',
+  'apply_patch',
+  'save_plan',
+  'ask_plan_questions',
+];
 
 type ViewTransitionDocument = Document & {
   startViewTransition?: (callback: () => void) => {
@@ -105,6 +113,32 @@ const DEFAULT_URL_APP_STATE: UrlAppState = {
 function readBooleanParam(searchParams: URLSearchParams, key: string) {
   const value = searchParams.get(key);
   return value === '1' || value === 'true';
+}
+
+function inferToolNameFromStreamingId(toolCallId: string) {
+  if (!toolCallId.startsWith(STREAMING_TOOL_ID_PREFIX)) {
+    return '';
+  }
+  const suffix = toolCallId.slice(STREAMING_TOOL_ID_PREFIX.length).trim();
+  if (!suffix) {
+    return '';
+  }
+  return STREAMABLE_TOOL_NAMES.find((name) => suffix === name || suffix.startsWith(`${name}-`)) ?? suffix;
+}
+
+function resolveStreamToolName(
+  toolCallId: string,
+  eventToolName: unknown,
+  storedToolName?: string,
+) {
+  const directToolName = typeof eventToolName === 'string' ? eventToolName.trim() : '';
+  if (directToolName && directToolName !== 'tool') {
+    return directToolName;
+  }
+  if (storedToolName && storedToolName !== 'tool') {
+    return storedToolName;
+  }
+  return inferToolNameFromStreamingId(toolCallId) || directToolName || storedToolName || 'tool';
 }
 
 function getUrlAppState(): UrlAppState {
@@ -1066,7 +1100,9 @@ export default function App() {
                 rootPid: t.rootPid ?? 0,
                 status: t.status ?? 'unknown',
                 startedAt: t.startedAt ?? 0,
-                processCount: 0,
+                returnCode: t.returnCode ?? null,
+                terminatedAt: t.terminatedAt ?? null,
+                processCount: t.processCount ?? 0,
                 processes: [],
               }));
             setManagedProcesses(mp);
@@ -1652,7 +1688,10 @@ export default function App() {
   useEffect(() => {
     if (!sessionId || !hasTerminalBeenOpened || !isTerminalOpen) return;
 
-    const shouldKeepPolling = isLoading || managedProcesses.length > 0;
+    const hasRunningManagedProcess = managedProcesses.some((process) =>
+      process.status === 'running' || process.status === 'orphaned'
+    );
+    const shouldKeepPolling = isLoading || hasRunningManagedProcess;
 
     const pollTerminalState = () =>
       refreshTerminalState({
@@ -2391,6 +2430,8 @@ export default function App() {
 
       const pendingUpdates = new Map<string, ((message: ChatMessage) => ChatMessage)[]>();
       let rafHandle: number | null = null;
+      let toolDeltaCharsSincePaint = 0;
+      let toolDeltaEventsSincePaint = 0;
 
       const flushPendingUpdates = () => {
         if (pendingUpdates.size === 0) {
@@ -2461,6 +2502,17 @@ export default function App() {
           scheduleFlush();
         }
       };
+
+      const waitForNextPaint = () =>
+        new Promise<void>((resolve) => {
+          if (document.visibilityState === 'hidden') {
+            window.setTimeout(resolve, 0);
+            return;
+          }
+          requestAnimationFrame(() => {
+            window.setTimeout(resolve, 0);
+          });
+        });
 
       const adoptAssistantId = (nextAssistantId: string) => {
         const normalizedNextId = String(nextAssistantId || '').trim();
@@ -2995,9 +3047,20 @@ export default function App() {
           } else if (data.type === 'tool-input-available') {
             const assistantId = currentAssistantId;
             if (!assistantId) return;
+            if (toolDeltaCharsSincePaint > 0 || toolDeltaEventsSincePaint > 0) {
+              toolDeltaCharsSincePaint = 0;
+              toolDeltaEventsSincePaint = 0;
+              await waitForNextPaint();
+            }
+            const toolCallId = String(data.toolCallId ?? Math.random());
+            const toolName = resolveStreamToolName(
+              toolCallId,
+              data.toolName,
+              toolNamesById.get(toolCallId),
+            );
             const toolCallRecord = {
-              id: String(data.toolCallId ?? Math.random()),
-              name: String(data.toolName ?? 'tool'),
+              id: toolCallId,
+              name: toolName,
               arguments: data.input ?? {},
               streamedInput: undefined,
               state: 'running' as const
@@ -3030,7 +3093,11 @@ export default function App() {
             const assistantId = currentAssistantId;
             const toolCallId = String(data.toolCallId ?? '');
             if (!assistantId || !toolCallId) return;
-            const toolName = String(data.toolName ?? toolNamesById.get(toolCallId) ?? 'tool');
+            const toolName = resolveStreamToolName(
+              toolCallId,
+              data.toolName,
+              toolNamesById.get(toolCallId),
+            );
             onToolCallStart?.(toolName);
             toolNamesById.set(toolCallId, toolName);
             toolInputBuffersById.set(toolCallId, '');
@@ -3053,7 +3120,12 @@ export default function App() {
             const toolCallId = String(data.toolCallId ?? '');
             if (!assistantId || !toolCallId) return;
             const delta = String(data.inputTextDelta ?? '');
-            const toolName = toolNamesById.get(toolCallId) ?? 'tool';
+            const toolName = resolveStreamToolName(
+              toolCallId,
+              data.toolName,
+              toolNamesById.get(toolCallId),
+            );
+            toolNamesById.set(toolCallId, toolName);
             const nextBufferedInput = `${toolInputBuffersById.get(toolCallId) ?? ''}${delta}`;
             toolInputBuffersById.set(toolCallId, nextBufferedInput);
             if (toolName === 'save_plan') {
@@ -3065,11 +3137,19 @@ export default function App() {
               () => ({ id: toolCallId, name: toolName, arguments: {}, streamedInput: '', state: 'running' }),
               (toolCall) => ({
                 ...toolCall,
+                name: toolName,
                 streamedInput: `${toolCall.streamedInput ?? ''}${delta}`,
                 state: 'running'
               }),
-              false
+              true
             );
+            toolDeltaCharsSincePaint += delta.length;
+            toolDeltaEventsSincePaint += 1;
+            if (toolDeltaCharsSincePaint >= 240 || toolDeltaEventsSincePaint >= 4) {
+              toolDeltaCharsSincePaint = 0;
+              toolDeltaEventsSincePaint = 0;
+              await waitForNextPaint();
+            }
           } else if (data.type === 'tool-output-available') {
             const assistantId = currentAssistantId;
             const toolCallId = String(data.toolCallId ?? '');
@@ -3086,7 +3166,11 @@ export default function App() {
             const toolCallId = String(payload.id ?? '');
             if (!assistantId || !toolCallId) return;
             adoptAssistantId(assistantId);
-            const toolName = String(payload.name ?? toolNamesById.get(toolCallId) ?? 'tool');
+            const toolName = resolveStreamToolName(
+              toolCallId,
+              payload.name,
+              toolNamesById.get(toolCallId),
+            );
             toolNamesById.set(toolCallId, toolName);
             if (
               toolName === 'save_plan' &&
@@ -4250,7 +4334,10 @@ export default function App() {
         }}
         onContextOpenChange={handleContextOpenChange}
         onInputChange={setInput}
-        onEditMessage={(content) => setInput(content)}
+        onEditMessage={(content) => {
+          setInput(content);
+          void sendMessage(content, elementAttachments.length > 0 ? elementAttachments : undefined);
+        }}
         onKeyDown={handleKeyDown}
         onSendMessage={() => void sendMessage(input, elementAttachments.length > 0 ? elementAttachments : undefined)}
         availableSkills={availableSkills}

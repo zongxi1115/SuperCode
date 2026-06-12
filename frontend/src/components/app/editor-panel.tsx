@@ -10,7 +10,7 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { getFileLanguage } from '@/lib/app-utils';
-import { apiFetch } from '@/lib/api-client';
+import { apiFetch, apiUrl } from '@/lib/api-client';
 import type { FileTreeNode } from '@/lib/app-types';
 import { CircleAlert, FileCode, FolderTree, Maximize2, Minimize2, PanelsTopLeft, RefreshCw, Sparkles, SquareTerminal } from 'lucide-react';
 import type { editor as MonacoEditor } from 'monaco-editor';
@@ -345,6 +345,19 @@ export function EditorPanel({
   }, [isRefreshingFileTree, onRefreshFileTree]);
 
   const hasSelectedFile = Boolean(selectedFilePath);
+  const selectedFileExtension = selectedFilePath.split('.').pop()?.toLowerCase() ?? '';
+  const isSelectedHtmlFile = selectedFileExtension === 'html' || selectedFileExtension === 'htm';
+  const handleOpenHtmlPreview = useCallback(() => {
+    if (!sessionId || !selectedFilePath) return;
+    const query = new URLSearchParams({
+      session_id: sessionId,
+      path: selectedFilePath,
+    });
+    onWebPreviewUrlChange(apiUrl(`/api/files/preview?${query.toString()}`));
+    if (!isWebPreviewOpen) {
+      onToggleWebPreview();
+    }
+  }, [isWebPreviewOpen, onToggleWebPreview, onWebPreviewUrlChange, selectedFilePath, sessionId]);
   const shouldShowFileTree = !isWebPreviewOpen && isFileTreeVisible;
 
   return (
@@ -415,12 +428,13 @@ export function EditorPanel({
                           isEditing={isEditing}
                           isSaving={isSaving}
                           isWebPreviewOpen={isWebPreviewOpen}
+                          canOpenHtmlPreview={hasSelectedFile && isSelectedHtmlFile}
                           editorTargets={EDITORS}
                           onStartEdit={handleStartEdit}
                           onCancelEdit={handleCancelEdit}
                           onSave={() => void handleSave()}
                           onOpenInEditor={(command) => void openInEditor(command)}
-                          onToggleWebPreview={onToggleWebPreview}
+                          onOpenHtmlPreview={handleOpenHtmlPreview}
                         />
                         <Button
                           variant="ghost"
@@ -577,12 +591,13 @@ export function EditorPanel({
                             isEditing={isEditing}
                             isSaving={isSaving}
                             isWebPreviewOpen={isWebPreviewOpen}
+                            canOpenHtmlPreview={hasSelectedFile && isSelectedHtmlFile}
                             editorTargets={EDITORS}
                             onStartEdit={handleStartEdit}
                             onCancelEdit={handleCancelEdit}
                             onSave={() => void handleSave()}
                             onOpenInEditor={(command) => void openInEditor(command)}
-                            onToggleWebPreview={onToggleWebPreview}
+                            onOpenHtmlPreview={handleOpenHtmlPreview}
                           />
                           <Button
                             variant="ghost"

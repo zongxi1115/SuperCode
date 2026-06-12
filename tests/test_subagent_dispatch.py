@@ -64,12 +64,11 @@ class DelegateCodeExplorationToolTests(unittest.TestCase):
             {
                 "task": "检查 subagent 消息流",
                 "focus_paths": ["fastapi_app", "frontend/src"],
-                "max_steps": 4,
             },
             ToolContext(
                 workspace=workspace,
                 metadata={
-                    "code_exploration_subagent_factory": lambda _context, _max_steps: fake_subagent,
+                    "code_exploration_subagent_factory": lambda _context: fake_subagent,
                     "runtime_event_emitter": lambda event_type, payload: emitted.append((event_type, payload)),
                 },
             ),

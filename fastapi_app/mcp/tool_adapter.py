@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from agent.tools import BaseTool, ToolContext
+from zonix.tools import ToolContext, ToolDefinition
 
 from .client import call_mcp_tool, list_mcp_tools
 from .config_store import load_mcp_servers, set_mcp_server_status
@@ -21,33 +21,38 @@ def _adapter_tool_name(server_id: str, tool_name: str) -> str:
     return f"mcp__{server_part}__{tool_part}"
 
 
-class MCPToolAdapter(BaseTool):
-    supports_parallel = False
+def _build_mcp_tool(
+    *,
+    server: dict[str, Any],
+    original_tool_name: str,
+    adapter_name: str,
+    description: str,
+    parameters_schema: dict[str, Any],
+) -> ToolDefinition:
+    server_name = str(server.get("name") or server.get("id") or "MCP")
 
-    def __init__(
-        self,
-        *,
-        server: dict[str, Any],
-        original_tool_name: str,
-        adapter_name: str,
-        description: str,
-        parameters_schema: dict[str, Any],
-    ) -> None:
-        self.server = server
-        self.original_tool_name = original_tool_name
-        self.name = adapter_name
-        server_name = str(server.get("name") or server.get("id") or "MCP")
-        self.description = f"[MCP:{server_name}] {description or original_tool_name}".strip()
-        self.parameters_schema = parameters_schema
+    def run_mcp_tool(ctx: ToolContext, arguments: dict[str, Any]) -> Any:
+        del ctx
+        return call_mcp_tool(server, original_tool_name, arguments)
 
-    def run(self, arguments: dict[str, Any], context: ToolContext) -> Any:
-        return call_mcp_tool(self.server, self.original_tool_name, arguments)
+    return ToolDefinition.from_schema_runner(
+        name=adapter_name,
+        description=f"[MCP:{server_name}] {description or original_tool_name}".strip(),
+        schema=parameters_schema,
+        runner=run_mcp_tool,
+        supports_parallel=False,
+        catch_errors=True,
+    )
 
 
-def build_mcp_tools_for_server(server: dict[str, Any], *, seen_names: set[str] | None = None) -> list[BaseTool]:
+def build_mcp_tools_for_server(
+    server: dict[str, Any],
+    *,
+    seen_names: set[str] | None = None,
+) -> list[ToolDefinition]:
     server_id = str(server.get("id") or "")
     seen_names = seen_names if seen_names is not None else set()
-    tools: list[BaseTool] = []
+    tools: list[ToolDefinition] = []
     discovered_tools = list_mcp_tools(server)
     for tool in discovered_tools:
         original_name = str(tool.get("name") or "").strip()
@@ -61,7 +66,7 @@ def build_mcp_tools_for_server(server: dict[str, Any], *, seen_names: set[str] |
             suffix += 1
         seen_names.add(adapter_name)
         tools.append(
-            MCPToolAdapter(
+            _build_mcp_tool(
                 server=server,
                 original_tool_name=original_name,
                 adapter_name=adapter_name,
@@ -82,9 +87,9 @@ def build_mcp_tools_for_server(server: dict[str, Any], *, seen_names: set[str] |
     return tools
 
 
-def build_enabled_mcp_tools(root: Path) -> list[BaseTool]:
+def build_enabled_mcp_tools(root: Path) -> list[ToolDefinition]:
     enabled_servers = [server for server in load_mcp_servers(root) if server.get("enabled")]
-    tools: list[BaseTool] = []
+    tools: list[ToolDefinition] = []
     seen_names = {tool.name for tool in tools}
     for server in enabled_servers:
         server_id = str(server.get("id") or "")

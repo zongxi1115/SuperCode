@@ -8,23 +8,11 @@ from coding_agent.model import CodingPromptModel, HTML_ARTIFACT_OUTPUT_RULES
 class PlanPromptModel(CodingPromptModel):
     """Model adapter with planning-specific prompts and context."""
 
-    def _build_system_prompt(
-        self,
-        tool_definitions: dict[str, dict[str, object]],
-        response_mode: str = "legacy_json",
-    ) -> str:
-        base_prompt = self.prompt_path.read_text(encoding="utf-8").strip()
-        tool_lines = [
-            f"- {tool_name}: {str(metadata.get('description', '')).strip()}"
-            for tool_name, metadata in tool_definitions.items()
-        ]
-        system_info = self._build_system_info()
-
-        if response_mode == "native_tools":
-            protocol_lines = [
+    def build_native_protocol_prompt(self) -> str:
+        return "\n".join(
+            [
                 "## 输出协议",
-                "当前接口已启用原生 tool calling。",
-                "如果需要调用工具，必须使用原生 tool calling，不要在文本里输出 action/tool_name/tool_arguments JSON。",
+                "当模型请求携带原生 tools 时，必须使用原生 tool calling，不要在文本里输出 action/tool_name/tool_arguments JSON。",
                 "如果不需要调用工具，直接输出给用户的最终答复文本。",
                 "规则：",
                 "1. 你的职责是需求澄清、方案调研和生成可编辑计划，不要直接写代码、执行命令或修改文件。",
@@ -43,10 +31,13 @@ class PlanPromptModel(CodingPromptModel):
                 "14. 当用户明确表达可长期复用的偏好、工作流约束、交互风格或项目约定时，调用 remember_preference 记录；不要记录普通任务过程或临时事实。",
                 *HTML_ARTIFACT_OUTPUT_RULES,
             ]
-        else:
-            protocol_lines = [
+        )
+
+    def build_legacy_protocol_prompt(self) -> str:
+        return "\n".join(
+            [
                 "## 输出协议",
-                "你必须始终只输出一个 JSON 对象，不要输出 Markdown，不要输出解释。",
+                "当前模型接口不可用原生 tool calling 时，你必须始终只输出一个 JSON 对象，不要输出 Markdown，不要输出解释。",
                 (
                     'JSON 格式：{"action":"tool 或 final","thought":"当前思路",'
                     '"tool_name":"工具名","tool_arguments":{},'
@@ -70,15 +61,6 @@ class PlanPromptModel(CodingPromptModel):
                 "14. 你会在上下文里看到 [技能目录]，如果其中某个 skill 与当前规划任务高度相关，应主动吸收其摘要或已激活正文，不要等用户先显式 @ skill。",
                 "15. 当用户明确表达可长期复用的偏好、工作流约束、交互风格或项目约定时，调用 remember_preference 记录；不要记录普通任务过程或临时事实。",
                 *HTML_ARTIFACT_OUTPUT_RULES,
-            ]
-
-        return "\n\n".join(
-            [
-                base_prompt,
-                system_info,
-                "## 当前工具注册表",
-                "\n".join(tool_lines),
-                "\n".join(protocol_lines),
             ]
         )
 

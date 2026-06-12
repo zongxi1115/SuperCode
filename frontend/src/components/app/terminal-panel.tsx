@@ -11,7 +11,7 @@ import type {
   TerminalSocketClientMessage,
   TerminalSocketServerMessage,
 } from "@/lib/app-types";
-import { apiWebSocketUrl, openExternalUrl } from "@/lib/api-client";
+import { apiFetch, apiWebSocketUrl, openExternalUrl } from "@/lib/api-client";
 import { AnimatePresence, motion } from "motion/react";
 import {
   ChevronDown,
@@ -56,11 +56,27 @@ type TerminalInstance = {
   errorMessage: string;
   outputBuffer: string[];
   outputFrame: number | null;
+  writeQueue: string[];
+  queuedWriteChars: number;
+  isWriting: boolean;
   lastResize: { cols: number; rows: number } | null;
   supportsResize: boolean;
   cwd: string;
   backend: string;
+  managedOutputOffset: number | null;
 };
+
+type ManagedProcessOutputPayload = {
+  terminalId: string;
+  output: string;
+  startOffset: number;
+  endOffset: number;
+  truncated: boolean;
+};
+
+const XTERM_WRITE_CHUNK_CHARS = 16_384;
+const XTERM_MAX_QUEUED_WRITE_CHARS = 512_000;
+const MANAGED_PROCESS_OUTPUT_TAIL_CHARS = 64_000;
 
 const XTERM_THEME = {
   background: "#111314",
@@ -148,12 +164,35 @@ export function TerminalPanel({
   const openedSetRef = useRef<Set<string>>(new Set());
   const dataDisposablesRef = useRef<Map<string, { dispose(): void }>>(new Map());
   const keyDisposablesRef = useRef<Map<string, { dispose(): void }>>(new Map());
+  const pendingFocusTerminalIdRef = useRef<string | null>(null);
+  const pendingFocusActiveTerminalRef = useRef(false);
 
   const [, forceUpdate] = useState(0);
   const triggerRender = useCallback(() => forceUpdate((n) => n + 1), []);
 
   const getInstance = useCallback((terminalId: string) => {
     return instancesRef.current.get(terminalId);
+  }, []);
+
+  const requestTerminalFocus = useCallback((terminalId: string | null) => {
+    if (terminalId) {
+      pendingFocusTerminalIdRef.current = terminalId;
+      pendingFocusActiveTerminalRef.current = false;
+      return;
+    }
+    pendingFocusActiveTerminalRef.current = true;
+  }, []);
+
+  const consumeTerminalFocusRequest = useCallback((terminalId: string) => {
+    if (pendingFocusTerminalIdRef.current === terminalId) {
+      pendingFocusTerminalIdRef.current = null;
+      return true;
+    }
+    if (pendingFocusActiveTerminalRef.current) {
+      pendingFocusActiveTerminalRef.current = false;
+      return true;
+    }
+    return false;
   }, []);
 
   const sendSocketMessage = useCallback((terminalId: string, message: TerminalSocketClientMessage) => {
@@ -163,14 +202,51 @@ export function TerminalPanel({
     return true;
   }, [getInstance]);
 
+  const drainTerminalOutput = useCallback(function drainTerminalOutput(terminalId: string) {
+    const inst = getInstance(terminalId);
+    if (!inst || inst.isWriting) return;
+    const nextOutput = inst.writeQueue.shift();
+    if (!nextOutput) return;
+
+    const chunk = nextOutput.length > XTERM_WRITE_CHUNK_CHARS
+      ? nextOutput.slice(0, XTERM_WRITE_CHUNK_CHARS)
+      : nextOutput;
+    const remainder = nextOutput.length > XTERM_WRITE_CHUNK_CHARS
+      ? nextOutput.slice(XTERM_WRITE_CHUNK_CHARS)
+      : "";
+    if (remainder) {
+      inst.writeQueue.unshift(remainder);
+    }
+    inst.queuedWriteChars = Math.max(0, inst.queuedWriteChars - chunk.length);
+    inst.isWriting = true;
+    inst.xterm.write(chunk, () => {
+      inst.isWriting = false;
+      if (inst.writeQueue.length > 0) {
+        window.setTimeout(() => drainTerminalOutput(terminalId), 0);
+      }
+    });
+  }, [getInstance]);
+
+  const queueTerminalWrite = useCallback((terminalId: string, output: string) => {
+    const inst = getInstance(terminalId);
+    if (!inst || !output) return;
+    inst.writeQueue.push(output);
+    inst.queuedWriteChars += output.length;
+    while (inst.queuedWriteChars > XTERM_MAX_QUEUED_WRITE_CHARS && inst.writeQueue.length > 1) {
+      const dropped = inst.writeQueue.shift() ?? "";
+      inst.queuedWriteChars = Math.max(0, inst.queuedWriteChars - dropped.length);
+    }
+    drainTerminalOutput(terminalId);
+  }, [drainTerminalOutput, getInstance]);
+
   const flushOutput = useCallback((terminalId: string) => {
     const inst = getInstance(terminalId);
     if (!inst) return;
     inst.outputFrame = null;
     const output = inst.outputBuffer.join("");
     inst.outputBuffer = [];
-    if (output) inst.xterm.write(output);
-  }, [getInstance]);
+    queueTerminalWrite(terminalId, output);
+  }, [getInstance, queueTerminalWrite]);
 
   const enqueueOutput = useCallback((terminalId: string, output: string) => {
     const inst = getInstance(terminalId);
@@ -189,7 +265,48 @@ export function TerminalPanel({
       window.cancelAnimationFrame(inst.outputFrame);
       inst.outputFrame = null;
     }
+    inst.writeQueue = [];
+    inst.queuedWriteChars = 0;
   }, [getInstance]);
+
+  const loadManagedProcessOutput = useCallback(async (terminalId: string) => {
+    if (!sessionId) return;
+    const inst = getInstance(terminalId);
+    if (!inst) return;
+
+    const query = new URLSearchParams();
+    query.set("tail_chars", String(MANAGED_PROCESS_OUTPUT_TAIL_CHARS));
+    if (inst.managedOutputOffset !== null) {
+      query.set("after_offset", String(inst.managedOutputOffset));
+    }
+
+    try {
+      const res = await apiFetch(
+        `/api/sessions/${sessionId}/processes/${terminalId}/output?${query.toString()}`
+      );
+      if (!res.ok) return;
+      const data = await res.json() as ManagedProcessOutputPayload;
+      const currentInst = getInstance(terminalId);
+      if (!currentInst) return;
+
+      const previousOffset = currentInst.managedOutputOffset;
+      if (previousOffset !== null && data.endOffset <= previousOffset) return;
+
+      let output = data.output;
+      if (previousOffset === null || data.startOffset > previousOffset) {
+        clearQueuedOutput(terminalId);
+        currentInst.xterm.clear();
+      } else if (data.startOffset < previousOffset) {
+        output = output.slice(previousOffset - data.startOffset);
+      }
+      if (output) {
+        queueTerminalWrite(terminalId, output);
+      }
+      currentInst.managedOutputOffset = data.endOffset;
+    } catch {
+      return;
+    }
+  }, [clearQueuedOutput, getInstance, queueTerminalWrite, sessionId]);
 
   const sendResize = useCallback((terminalId: string) => {
     const inst = getInstance(terminalId);
@@ -234,7 +351,6 @@ export function TerminalPanel({
       inst.connectionState = "open";
       triggerRender();
       fitTerminal(terminalId);
-      if (activeTerminalId === terminalId) inst.xterm.focus();
     });
 
     socket.addEventListener("message", (event) => {
@@ -284,7 +400,7 @@ export function TerminalPanel({
       inst.errorMessage = "终端连接失败";
       triggerRender();
     });
-  }, [activeTerminalId, clearQueuedOutput, enqueueOutput, fitTerminal, isOpen, onRuntimeStatusChange, sessionId, triggerRender]);
+  }, [clearQueuedOutput, enqueueOutput, fitTerminal, getInstance, isOpen, onRuntimeStatusChange, sessionId, triggerRender]);
 
   const ensureInstance = useCallback((info: TerminalInfo) => {
     const existing = getInstance(info.terminalId);
@@ -306,10 +422,14 @@ export function TerminalPanel({
       errorMessage: "",
       outputBuffer: [],
       outputFrame: null,
+      writeQueue: [],
+      queuedWriteChars: 0,
+      isWriting: false,
       lastResize: null,
       supportsResize: false,
       cwd: info.cwd || "",
       backend: info.backend || "subprocess",
+      managedOutputOffset: null,
     };
     instancesRef.current.set(info.terminalId, inst);
 
@@ -357,7 +477,12 @@ export function TerminalPanel({
     for (const info of terminalInfos) {
       const isNew = !instancesRef.current.has(info.terminalId);
       ensureInstance(info);
-      if (isNew && info.kind === "managed-process") {
+      if (
+        isNew &&
+        !newProcessId &&
+        info.kind === "managed-process" &&
+        (info.status === "running" || info.status === "orphaned")
+      ) {
         newProcessId = info.terminalId;
       }
     }
@@ -399,17 +524,21 @@ export function TerminalPanel({
     const fitRaf = window.requestAnimationFrame(() => {
       window.requestAnimationFrame(() => {
         fitTerminal(activeTerminalId);
-        if (activeInfo.kind === "interactive") {
+        const shouldFocus = consumeTerminalFocusRequest(activeTerminalId);
+        if (activeInfo.kind === "interactive" && shouldFocus) {
           inst.xterm.focus();
         }
         if (activeInfo.kind === "interactive" && inst.connectionState === "idle") {
           connectTerminal(activeTerminalId);
         }
+        if (activeInfo.kind === "managed-process") {
+          void loadManagedProcessOutput(activeTerminalId);
+        }
       });
     });
 
     return () => window.cancelAnimationFrame(fitRaf);
-  }, [isOpen, activeTerminalId, terminalInfos, getInstance, fitTerminal, connectTerminal]);
+  }, [isOpen, activeTerminalId, terminalInfos, getInstance, fitTerminal, connectTerminal, consumeTerminalFocusRequest, loadManagedProcessOutput]);
 
   // Connect all interactive terminals when panel opens
   useEffect(() => {
@@ -489,6 +618,8 @@ export function TerminalPanel({
   // Close sockets when panel closes
   useEffect(() => {
     if (isOpen) return;
+    pendingFocusTerminalIdRef.current = null;
+    pendingFocusActiveTerminalRef.current = false;
     for (const [, inst] of instancesRef.current) {
       if (inst.socket) { inst.socket.close(); inst.socket = null; }
       inst.connectionState = "idle";
@@ -514,8 +645,12 @@ export function TerminalPanel({
       (activeTerminalId ? getInstance(activeTerminalId)?.cwd : null)
       || terminalInfos.find((terminal) => terminal.isDefault)?.cwd
       || undefined;
-    void onCreateTerminal(preferredCwd);
-  }, [activeTerminalId, getInstance, onCreateTerminal, terminalInfos]);
+    void onCreateTerminal(preferredCwd).then((terminalId) => {
+      if (!terminalId) return;
+      requestTerminalFocus(terminalId);
+      onActiveTerminalChange(terminalId);
+    });
+  }, [activeTerminalId, getInstance, onActiveTerminalChange, onCreateTerminal, requestTerminalFocus, terminalInfos]);
 
   const handleCloseTab = useCallback((terminalId: string) => {
     const info = terminalInfos.find((t) => t.terminalId === terminalId);
@@ -527,6 +662,20 @@ export function TerminalPanel({
     }
     void onCloseTerminal(terminalId);
   }, [onCloseTerminal, onTerminateProcess, terminalInfos]);
+
+  const handleSelectTerminal = useCallback((terminalId: string) => {
+    requestTerminalFocus(terminalId);
+    onActiveTerminalChange(terminalId);
+    if (terminalId === activeTerminalId) {
+      getInstance(terminalId)?.xterm.focus();
+      pendingFocusTerminalIdRef.current = null;
+    }
+  }, [activeTerminalId, getInstance, onActiveTerminalChange, requestTerminalFocus]);
+
+  const handleToggleTerminal = useCallback(() => {
+    if (!isOpen) requestTerminalFocus(activeTerminalId);
+    onToggle();
+  }, [activeTerminalId, isOpen, onToggle, requestTerminalFocus]);
 
   const activeInfo = activeTerminalId
     ? terminalInfos.find((terminal) => terminal.terminalId === activeTerminalId) ?? null
@@ -576,7 +725,7 @@ export function TerminalPanel({
                 return (
                   <button
                     key={info.terminalId}
-                    onClick={() => onActiveTerminalChange(info.terminalId)}
+                    onClick={() => handleSelectTerminal(info.terminalId)}
                     className={`
                       flex items-center gap-1.5 h-7 px-2.5 rounded-t text-[11px] shrink-0
                       transition-colors relative group border border-b-0 border-transparent
@@ -652,7 +801,7 @@ export function TerminalPanel({
                 <Button
                   variant="ghost"
                   size="icon"
-                  onClick={onToggle}
+                  onClick={handleToggleTerminal}
                   className="h-7 w-7 text-muted-foreground hover:bg-muted hover:text-foreground"
                   title="关闭终端面板"
                 >
@@ -724,7 +873,7 @@ export function TerminalPanel({
 
       {!isOpen && (
         <button
-          onClick={onToggle}
+          onClick={handleToggleTerminal}
           className="w-full h-9 flex items-center justify-center gap-2 border-t bg-background text-muted-foreground text-xs hover:text-foreground hover:bg-muted/40 transition-colors shrink-0"
         >
           <TerminalIcon className="w-3.5 h-3.5" />

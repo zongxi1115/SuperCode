@@ -7,7 +7,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import type { ReactNode } from 'react';
-import { Pencil, Save, SquareArrowOutUpRight, X, PanelsTopLeft } from 'lucide-react';
+import { Globe, Pencil, Save, SquareArrowOutUpRight, X } from 'lucide-react';
 
 export type EditorTarget = {
   name: string;
@@ -20,12 +20,13 @@ type EditorToolsProps = {
   isEditing: boolean;
   isSaving: boolean;
   isWebPreviewOpen: boolean;
+  canOpenHtmlPreview: boolean;
   editorTargets: EditorTarget[];
   onStartEdit: () => void;
   onCancelEdit: () => void;
   onSave: () => void;
   onOpenInEditor: (command: string) => void;
-  onToggleWebPreview: () => void;
+  onOpenHtmlPreview: () => void;
 };
 
 export function EditorTools({
@@ -33,12 +34,13 @@ export function EditorTools({
   isEditing,
   isSaving,
   isWebPreviewOpen,
+  canOpenHtmlPreview,
   editorTargets,
   onStartEdit,
   onCancelEdit,
   onSave,
   onOpenInEditor,
-  onToggleWebPreview,
+  onOpenHtmlPreview,
 }: EditorToolsProps) {
   return (
     <div className="flex items-center gap-1 shrink-0">
@@ -109,23 +111,25 @@ export function EditorTools({
         </>
       )}
 
-      <TooltipProvider>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              variant={isWebPreviewOpen ? 'secondary' : 'ghost'}
-              size="icon"
-              onClick={onToggleWebPreview}
-              className="h-7 w-7"
-            >
-              <PanelsTopLeft className="w-3.5 h-3.5" />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent>
-            <p>{isWebPreviewOpen ? '关闭浏览器预览' : '打开浏览器预览'}</p>
-          </TooltipContent>
-        </Tooltip>
-      </TooltipProvider>
+      {canOpenHtmlPreview && (
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant={isWebPreviewOpen ? 'secondary' : 'ghost'}
+                size="icon"
+                onClick={onOpenHtmlPreview}
+                className="h-7 w-7"
+              >
+                <Globe className="w-3.5 h-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              <p>在浏览器打开</p>
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      )}
     </div>
   );
 }

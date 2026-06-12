@@ -1,28 +1,106 @@
 from __future__ import annotations
 
+import asyncio
 import json
-from typing import Any
+import uuid
 from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any
 
-from .model import ModelAdapter, ModelStep, ModelStreamUpdate
 from .llm_client import (
     CompletionResponse,
-    CompletionToolCall,
     CompletionToolCallDelta,
     OpenAICompatibleClient,
     UnsupportedToolCallingError,
 )
-from .schema import AgentState, ConversationMessage, StepRecord
+from .schema import AgentState, StepRecord
+from zonix.events import ReasoningDelta, TextDelta, ToolInputAvailable, ToolInputDelta, ToolInputStart
+from zonix.models.base import BaseChatModel, ModelRequest, ModelResponse, SupportsEmit
+from zonix.types import Message as ZonixMessage
+from zonix.types import ToolCall as ZonixToolCall
+from zonix.types import Usage as ZonixUsage
 
 
-class OpenAICompatibleModel(ModelAdapter):
+@dataclass(slots=True)
+class _ProviderStep:
+    action: str
+    thought: str
+    tool_name: str | None = None
+    tool_arguments: dict[str, Any] = field(default_factory=dict)
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    final_answer: str | None = None
+    provider_response_items: list[dict[str, Any]] = field(default_factory=list)
+
+    @classmethod
+    def call_tool(
+        cls,
+        thought: str,
+        tool_name: str,
+        tool_arguments: dict[str, Any] | None = None,
+    ) -> "_ProviderStep":
+        return cls(
+            action="tool",
+            thought=thought,
+            tool_name=tool_name,
+            tool_arguments=tool_arguments or {},
+        )
+
+    @classmethod
+    def call_tools(
+        cls,
+        thought: str,
+        tool_calls: list[dict[str, Any]],
+    ) -> "_ProviderStep":
+        if not tool_calls:
+            raise ValueError("tool_calls 不能为空。")
+        first_tool = tool_calls[0]
+        return cls(
+            action="tool",
+            thought=thought,
+            tool_name=str(first_tool.get("tool_name", "")).strip() or None,
+            tool_arguments=first_tool.get("tool_arguments", {}) or {},
+            tool_calls=tool_calls,
+        )
+
+    @classmethod
+    def finish(cls, thought: str, final_answer: str) -> "_ProviderStep":
+        return cls(action="final", thought=thought, final_answer=final_answer)
+
+    def normalized_tool_calls(self) -> list[dict[str, Any]]:
+        if self.tool_calls:
+            return self.tool_calls
+        if self.tool_name is None:
+            return []
+        return [
+            {
+                "tool_name": self.tool_name,
+                "tool_arguments": self.tool_arguments,
+            }
+        ]
+
+
+@dataclass(slots=True)
+class _ProviderStreamUpdate:
+    raw_output: str
+    action: str | None = None
+    thought: str | None = None
+    tool_name: str | None = None
+    final_answer: str | None = None
+    streamed_tool_call_id: str | None = None
+    streamed_tool_name: str | None = None
+    streamed_tool_argument_name: str | None = None
+    streamed_tool_input: str | None = None
+
+
+class OpenAICompatibleModel(BaseChatModel):
     """OpenAI-compatible model adapter.
 
-    It asks the provider for one model step, then normalizes text/tool calls
-    into the framework's ModelStep shape.
+    It asks the provider for one Zonix model response, using SuperCode's
+    provider client and prompt builders.
     """
 
     def __init__(self, client: OpenAICompatibleClient) -> None:
+        super().__init__(name=f"supercode:{client.config.model}")
         self.client = client
 
     _STREAMABLE_TOOL_INPUT_SPECS: dict[str, tuple[str, str, str]] = {
@@ -30,16 +108,195 @@ class OpenAICompatibleModel(ModelAdapter):
         "apply_patch": ("new_content", "new_content", "string"),
         "replace_file": ("new_content", "new_content", "string"),
         "save_plan": ("arguments", "tool_arguments", "object"),
+        "ask_plan_questions": ("arguments", "tool_arguments", "object"),
     }
 
-    def next_step(
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        return await asyncio.to_thread(self._complete_sync, request, None, ())
+
+    async def stream_complete(
         self,
+        request: ModelRequest,
+        emit: SupportsEmit,
+        path: tuple[str, ...],
+    ) -> ModelResponse:
+        loop = asyncio.get_running_loop()
+
+        def emit_sync(event: object) -> None:
+            future = asyncio.run_coroutine_threadsafe(emit(event), loop)
+            future.result()
+
+        return await asyncio.to_thread(self._complete_sync, request, emit_sync, path)
+
+    def _complete_sync(
+        self,
+        request: ModelRequest,
+        emit_sync: Callable[[object], None] | None,
+        path: tuple[str, ...],
+    ) -> ModelResponse:
+        state = self._state_from_request(request)
+        tool_definitions = self._tool_definitions_from_request(request)
+        streamed_text_emitted = ""
+        streamed_thought_emitted = ""
+        streamed_tool_input_by_key: dict[tuple[str, str], str] = {}
+        started_streaming_tool_inputs: set[tuple[str, str]] = set()
+        started_streaming_tool_call_ids: set[str] = set()
+
+        def on_stream(update: _ProviderStreamUpdate) -> None:
+            nonlocal streamed_text_emitted, streamed_thought_emitted
+            if emit_sync is None:
+                return
+            if update.thought:
+                delta = (
+                    update.thought[len(streamed_thought_emitted) :]
+                    if update.thought.startswith(streamed_thought_emitted)
+                    else update.thought
+                )
+                streamed_thought_emitted = update.thought
+                if delta:
+                    emit_sync(ReasoningDelta(path, "reasoning_0", delta))
+            if update.action == "final" and update.final_answer is not None:
+                delta = (
+                    update.final_answer[len(streamed_text_emitted) :]
+                    if update.final_answer.startswith(streamed_text_emitted)
+                    else update.final_answer
+                )
+                streamed_text_emitted = update.final_answer
+                if delta:
+                    emit_sync(TextDelta(path, "text_0", delta))
+            if update.streamed_tool_input is not None:
+                tool_name = update.streamed_tool_name or "tool"
+                argument_name = update.streamed_tool_argument_name or ""
+                tool_call_id = update.streamed_tool_call_id or f"streaming-{tool_name}"
+                key = (tool_call_id, argument_name)
+                previous = streamed_tool_input_by_key.get(key, "")
+                delta = (
+                    update.streamed_tool_input[len(previous) :]
+                    if update.streamed_tool_input.startswith(previous)
+                    else update.streamed_tool_input
+                )
+                streamed_tool_input_by_key[key] = update.streamed_tool_input
+                if delta:
+                    if key not in started_streaming_tool_inputs:
+                        started_streaming_tool_inputs.add(key)
+                        started_streaming_tool_call_ids.add(tool_call_id)
+                        emit_sync(ToolInputStart(path, tool_call_id, tool_name))
+                    emit_sync(ToolInputDelta(path, tool_call_id, delta))
+
+        step = self._next_provider_step(
+            request=request,
+            state=state,
+            tool_definitions=tool_definitions,
+            on_stream=on_stream if emit_sync is not None else None,
+        )
+        response = self._step_to_model_response(step)
+        if emit_sync is not None and response.tool_calls:
+            for call in response.tool_calls:
+                if call.call_id not in started_streaming_tool_call_ids:
+                    emit_sync(ToolInputStart(path, call.call_id, call.tool))
+                emit_sync(ToolInputAvailable(path, call.call_id, call.tool, call.input))
+        return response
+
+    def _state_from_request(self, request: ModelRequest) -> AgentState:
+        ctx = request.ctx
+        state = getattr(ctx, "state", None)
+        if isinstance(state, AgentState):
+            return state
+        return AgentState(task="SuperCode Zonix run", current_input=str(request.task or ""))
+
+    def _tool_definitions_from_request(
+        self,
+        request: ModelRequest,
+    ) -> dict[str, dict[str, object]]:
+        definitions: dict[str, dict[str, object]] = {}
+        for item in request.tools:
+            if not isinstance(item, dict):
+                continue
+            function = item.get("function")
+            if not isinstance(function, dict):
+                continue
+            name = str(function.get("name") or "").strip()
+            if not name:
+                continue
+            definitions[name] = {
+                "description": str(function.get("description") or ""),
+                "input_schema": (
+                    function.get("parameters")
+                    if isinstance(function.get("parameters"), dict)
+                    else None
+                ),
+            }
+        return definitions
+
+    def _step_to_model_response(self, step: _ProviderStep) -> ModelResponse:
+        usage = self._latest_zonix_usage()
+        message_data = self._provider_message_data(step)
+        if step.action == "final":
+            return ModelResponse(
+                text=step.final_answer or "",
+                usage=usage,
+                message_data=message_data,
+                raw={"provider_response_items": step.provider_response_items},
+            )
+        raw_tool_calls = step.normalized_tool_calls()
+        tool_calls = []
+        for index, raw_call in enumerate(raw_tool_calls, start=1):
+            tool_name = str(raw_call["tool_name"])
+            explicit_call_id = str(raw_call.get("tool_call_id") or raw_call.get("id") or "").strip()
+            fallback_call_id = (
+                f"streaming-{tool_name}"
+                if len(raw_tool_calls) == 1
+                else f"streaming-{tool_name}-{index}"
+            )
+            tool_calls.append(
+                ZonixToolCall(
+                    call_id=explicit_call_id or fallback_call_id or f"call_{uuid.uuid4().hex}",
+                    tool=tool_name,
+                    input=raw_call.get("tool_arguments", {}) or {},
+                )
+            )
+        return ModelResponse(
+            text="",
+            tool_calls=tool_calls,
+            usage=usage,
+            message_data=message_data,
+            raw={"provider_response_items": step.provider_response_items},
+        )
+
+    def _provider_message_data(self, step: _ProviderStep) -> dict[str, Any]:
+        if not step.provider_response_items:
+            return {}
+        return {
+            "response_output_items": [
+                json.loads(json.dumps(item, ensure_ascii=False))
+                for item in step.provider_response_items
+                if isinstance(item, dict)
+            ]
+        }
+
+    def _latest_zonix_usage(self) -> ZonixUsage:
+        usage = self.latest_usage() or {}
+        return ZonixUsage(
+            input_tokens=int(usage.get("inputTokens", usage.get("input_tokens", 0)) or 0),
+            output_tokens=int(usage.get("outputTokens", usage.get("output_tokens", 0)) or 0),
+            total_tokens=int(usage.get("totalTokens", usage.get("total_tokens", 0)) or 0),
+            model_calls=1,
+        )
+
+    def _next_provider_step(
+        self,
+        request: ModelRequest,
         state: AgentState,
         tool_definitions: dict[str, dict[str, Any]],
-        on_stream: Callable[[ModelStreamUpdate], None] | None = None,
-    ) -> ModelStep:
+        on_stream: Callable[[_ProviderStreamUpdate], None] | None = None,
+    ) -> _ProviderStep:
         """调用真实模型，决定下一步动作。"""
-        native_messages = self._build_messages(state, tool_definitions, response_mode="native_tools")
+        native_messages = self._build_messages(
+            request,
+            state,
+            tool_definitions,
+            response_mode="native_tools",
+        )
         native_tools = self._build_native_tool_specs(tool_definitions)
 
         try:
@@ -68,7 +325,7 @@ class OpenAICompatibleModel(ModelAdapter):
                     if stream_text_as_final and streamed_text != streamed_text_emitted:
                         streamed_text_emitted = streamed_text
                         on_stream(
-                            ModelStreamUpdate(
+                            _ProviderStreamUpdate(
                                 raw_output=streamed_text,
                                 action="final",
                                 final_answer=streamed_text,
@@ -79,7 +336,7 @@ class OpenAICompatibleModel(ModelAdapter):
                     nonlocal streamed_reasoning
                     streamed_reasoning += delta
                     on_stream(
-                        ModelStreamUpdate(
+                        _ProviderStreamUpdate(
                             raw_output=streamed_reasoning,
                             thought=streamed_reasoning,
                         )
@@ -96,9 +353,10 @@ class OpenAICompatibleModel(ModelAdapter):
                         )
                     )
                     on_stream(
-                        ModelStreamUpdate(
+                        _ProviderStreamUpdate(
                             raw_output=delta_update.arguments,
                             tool_name=tool_name,
+                            streamed_tool_call_id=delta_update.id,
                             streamed_tool_name=tool_name,
                             streamed_tool_argument_name=streamed_tool_argument_name,
                             streamed_tool_input=streamed_tool_input,
@@ -118,7 +376,7 @@ class OpenAICompatibleModel(ModelAdapter):
                     if final_text and final_text != streamed_text_emitted:
                         streamed_text_emitted = final_text
                         on_stream(
-                            ModelStreamUpdate(
+                            _ProviderStreamUpdate(
                                 raw_output=final_text,
                                 action="final",
                                 final_answer=final_text,
@@ -132,7 +390,12 @@ class OpenAICompatibleModel(ModelAdapter):
             if "既没有返回 tool_calls，也没有返回可用文本内容" not in str(exc):
                 raise
 
-        messages = self._build_messages(state, tool_definitions, response_mode="legacy_json")
+        messages = self._build_messages(
+            request,
+            state,
+            tool_definitions,
+            response_mode="legacy_json",
+        )
         if on_stream is None:
             raw_output = self.client.chat_messages(messages)
         else:
@@ -146,7 +409,7 @@ class OpenAICompatibleModel(ModelAdapter):
                     self._extract_partial_streamable_tool_input(current_output, tool_name)
                 )
                 on_stream(
-                    ModelStreamUpdate(
+                    _ProviderStreamUpdate(
                         raw_output=current_output,
                         action=self._extract_partial_string_field(current_output, "action"),
                         thought=self._extract_partial_string_field(current_output, "thought"),
@@ -199,16 +462,113 @@ class OpenAICompatibleModel(ModelAdapter):
 
     def _build_messages(
         self,
+        request: ModelRequest,
         state: AgentState,
         tool_definitions: dict[str, dict[str, Any]],
         response_mode: str = "legacy_json",
     ) -> list[dict[str, object]]:
-        system_prompt = self._build_system_prompt(tool_definitions, response_mode=response_mode)
-        user_prompt = self._build_user_prompt(state)
-        return [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
+        messages = self._provider_messages_from_request(request)
+        if response_mode == "legacy_json":
+            fallback_prompt = self._build_legacy_protocol_prompt(tool_definitions)
+            if fallback_prompt:
+                messages = self._merge_system_prompt(messages, fallback_prompt)
+        return messages
+
+    def _merge_system_prompt(
+        self,
+        messages: list[dict[str, object]],
+        prompt: str,
+    ) -> list[dict[str, object]]:
+        if not messages:
+            return [{"role": "system", "content": prompt}]
+        first = messages[0]
+        if first.get("role") == "system":
+            content = str(first.get("content") or "").strip()
+            return [
+                {
+                    **first,
+                    "content": "\n\n".join(part for part in [content, prompt] if part),
+                },
+                *messages[1:],
+            ]
+        return [{"role": "system", "content": prompt}, *messages]
+
+    def _provider_messages_from_request(
+        self,
+        request: ModelRequest,
+    ) -> list[dict[str, object]]:
+        messages: list[dict[str, object]] = []
+        for message in request.messages:
+            converted = self._provider_message_from_zonix_message(message)
+            if converted is not None:
+                messages.append(converted)
+        return messages
+
+    def _provider_message_from_zonix_message(
+        self,
+        message: ZonixMessage,
+    ) -> dict[str, object] | None:
+        role = str(message.role or "").strip()
+        if role not in {"system", "user", "assistant", "tool"}:
+            return None
+
+        item: dict[str, object] = {
+            "role": role,
+            "content": str(message.content or ""),
+        }
+        if message.name and role != "tool":
+            item["name"] = message.name
+        if message.tool_call_id:
+            item["tool_call_id"] = message.tool_call_id
+
+        if role == "assistant":
+            response_output_items = message.data.get("response_output_items")
+            if isinstance(response_output_items, list):
+                item["response_output_items"] = [
+                    json.loads(json.dumps(raw_item, ensure_ascii=False))
+                    for raw_item in response_output_items
+                    if isinstance(raw_item, dict)
+                ]
+            tool_calls = self._provider_tool_calls_from_message_data(message.data)
+            if tool_calls:
+                item["tool_calls"] = tool_calls
+            reasoning_content = self._message_reasoning_content(message)
+            if reasoning_content:
+                item["reasoning_content"] = reasoning_content
+
+        return item
+
+    def _provider_tool_calls_from_message_data(
+        self,
+        data: dict[str, Any],
+    ) -> list[dict[str, object]]:
+        raw_tool_calls = data.get("tool_calls")
+        if not isinstance(raw_tool_calls, list):
+            return []
+
+        tool_calls: list[dict[str, object]] = []
+        for index, raw_call in enumerate(raw_tool_calls, start=1):
+            if not isinstance(raw_call, dict):
+                continue
+            tool_name = str(raw_call.get("tool") or raw_call.get("name") or "").strip()
+            if not tool_name:
+                continue
+            arguments = raw_call.get("input", raw_call.get("arguments", {}))
+            tool_calls.append(
+                {
+                    "id": str(raw_call.get("call_id") or raw_call.get("id") or f"tool-call-{index}"),
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "arguments": (
+                            arguments
+                            if isinstance(arguments, str)
+                            else json.dumps(arguments if isinstance(arguments, dict) else {}, ensure_ascii=False)
+                        ),
+                    },
+                }
+            )
+        return tool_calls
 
     def _build_system_prompt(
         self,
@@ -266,6 +626,12 @@ class OpenAICompatibleModel(ModelAdapter):
             ]
         )
 
+    def _build_legacy_protocol_prompt(
+        self,
+        tool_definitions: dict[str, dict[str, Any]],
+    ) -> str:
+        return self._build_system_prompt(tool_definitions, response_mode="legacy_json")
+
     def _build_native_tool_specs(
         self,
         tool_definitions: dict[str, dict[str, Any]],
@@ -273,9 +639,9 @@ class OpenAICompatibleModel(ModelAdapter):
         tool_specs: list[dict[str, object]] = []
         for tool_name, metadata in tool_definitions.items():
             description = str(metadata.get("description", "")).strip()
-            parameters_schema = metadata.get("parameters_schema")
-            if not isinstance(parameters_schema, dict):
-                parameters_schema = {
+            input_schema = metadata.get("input_schema")
+            if not isinstance(input_schema, dict):
+                input_schema = {
                     "type": "object",
                     "properties": {},
                     "additionalProperties": True,
@@ -286,17 +652,26 @@ class OpenAICompatibleModel(ModelAdapter):
                     "function": {
                         "name": tool_name,
                         "description": description,
-                        "parameters": parameters_schema,
+                        "parameters": input_schema,
                     },
                 }
             )
         return tool_specs
 
-    def _build_user_prompt(self, state: AgentState) -> str:
+    def _build_user_prompt(
+        self,
+        state: AgentState,
+        *,
+        conversation_text: str | None = None,
+        latest_user_message: str | None = None,
+    ) -> str:
         """构造用户提示词。"""
 
         step_records = state.data.get("step_records", [])
-        conversation_text = self._format_conversation(state.conversation_messages)
+        conversation_text = conversation_text or self._format_conversation(
+            state.conversation_messages
+        )
+        latest_user_message = latest_user_message or state.current_input
         include_thoughts = bool(state.data.get("include_thoughts_in_context", False))
         history_text = self._format_history(
             step_records,
@@ -310,7 +685,7 @@ class OpenAICompatibleModel(ModelAdapter):
                 "对话历史：",
                 conversation_text,
                 "",
-                f"用户本轮最新问题：{state.current_input}",
+                f"用户本轮最新问题：{latest_user_message}",
                 "",
                 "当前这一轮已执行步骤：",
                 history_text,
@@ -319,7 +694,36 @@ class OpenAICompatibleModel(ModelAdapter):
             ]
         )
 
-    def _format_conversation(self, messages: list[ConversationMessage], limit: int = 12) -> str:
+    def _split_request_messages(
+        self,
+        request: ModelRequest,
+        state: AgentState,
+    ) -> tuple[list[ZonixMessage], str]:
+        current_input = str(request.task or state.current_input or "").strip()
+        conversation_messages = [
+            message
+            for message in request.messages
+            if message.role in {"user", "assistant"} and str(message.content or "").strip()
+        ]
+        if (
+            conversation_messages
+            and conversation_messages[-1].role == "user"
+            and current_input
+            and str(conversation_messages[-1].content or "").strip() == current_input
+        ):
+            return conversation_messages[:-1], current_input
+        return conversation_messages, current_input
+
+    def _message_reasoning_content(self, message: object) -> str:
+        direct = str(getattr(message, "reasoning_content", "") or "").strip()
+        if direct:
+            return direct
+        data = getattr(message, "data", None)
+        if isinstance(data, dict):
+            return str(data.get("reasoning_content") or "").strip()
+        return ""
+
+    def _format_conversation(self, messages: list[object], limit: int = 12) -> str:
         """格式化最近的多轮对话历史。"""
 
         if not messages:
@@ -328,8 +732,8 @@ class OpenAICompatibleModel(ModelAdapter):
         recent_messages = messages[-limit:]
         lines: list[str] = []
         for message in recent_messages:
-            role_name = "用户" if message.role == "user" else "助手"
-            lines.append(f"{role_name}: {message.content}")
+            role_name = "用户" if getattr(message, "role", "") == "user" else "助手"
+            lines.append(f"{role_name}: {getattr(message, 'content', '')}")
         return "\n".join(lines)
 
     def _format_history(
@@ -747,12 +1151,13 @@ class OpenAICompatibleModel(ModelAdapter):
             return self._recover_save_plan_arguments(arguments_text)
         return None
 
-    def _completion_to_step(self, completion: CompletionResponse) -> ModelStep:
+    def _completion_to_step(self, completion: CompletionResponse) -> _ProviderStep:
         if completion.tool_calls:
             normalized_calls: list[dict[str, Any]] = []
             for tool_call in completion.tool_calls:
                 normalized_calls.append(
                     {
+                        "tool_call_id": tool_call.id,
                         "tool_name": tool_call.name,
                         "tool_arguments": self._parse_tool_arguments_text(
                             tool_call.arguments,
@@ -760,7 +1165,7 @@ class OpenAICompatibleModel(ModelAdapter):
                         ),
                     }
                 )
-            return ModelStep(
+            return _ProviderStep(
                 action="tool",
                 thought=completion.reasoning_text,
                 tool_name=str(normalized_calls[0].get("tool_name", "")).strip() or None,
@@ -771,7 +1176,7 @@ class OpenAICompatibleModel(ModelAdapter):
 
         final_text = completion.text.strip()
         if final_text:
-            return ModelStep(
+            return _ProviderStep(
                 action="final",
                 thought=completion.reasoning_text,
                 final_answer=final_text,
@@ -796,7 +1201,7 @@ class OpenAICompatibleModel(ModelAdapter):
                 return recovered
             try:
                 parsed = self._repair_and_parse_json(cleaned)
-            except Exception as inner_exc:
+            except Exception:
                 raise ValueError(f"工具 {tool_name} 的 arguments 不是合法 JSON：{arguments_text}") from exc
         if not isinstance(parsed, dict):
             raise ValueError(f"工具 {tool_name} 的 arguments 必须是对象。")
@@ -1015,7 +1420,7 @@ class OpenAICompatibleModel(ModelAdapter):
         parsed, _ = self._parse_relaxed_json_object(text, start)
         return parsed
 
-    def _to_step(self, payload: dict[str, object]) -> ModelStep:
+    def _to_step(self, payload: dict[str, object]) -> _ProviderStep:
         """把 JSON 结构转换成框架里的模型步骤。"""
 
         action = str(payload.get("action", "")).strip().lower()
@@ -1045,11 +1450,12 @@ class OpenAICompatibleModel(ModelAdapter):
                         raise ValueError("tool_calls 中的 tool_arguments 不是对象。")
                     normalized_calls.append(
                         {
+                            "tool_call_id": item.get("tool_call_id") or item.get("id"),
                             "tool_name": tool_name,
                             "tool_arguments": tool_arguments,
                         }
                     )
-                return ModelStep.call_tools(thought=thought, tool_calls=normalized_calls)
+                return _ProviderStep.call_tools(thought=thought, tool_calls=normalized_calls)
 
             tool_name = str(payload.get("tool_name") or payload.get("tool") or "").strip()
             tool_arguments = payload.get("tool_arguments", payload.get("args", {}))
@@ -1057,7 +1463,7 @@ class OpenAICompatibleModel(ModelAdapter):
                 raise ValueError("模型决定调用工具，但没有返回 tool_name。")
             if not isinstance(tool_arguments, dict):
                 raise ValueError("模型返回的 tool_arguments 不是对象。")
-            return ModelStep.call_tool(
+            return _ProviderStep.call_tool(
                 thought=thought,
                 tool_name=tool_name,
                 tool_arguments=tool_arguments,
@@ -1067,8 +1473,9 @@ class OpenAICompatibleModel(ModelAdapter):
             final_answer = str(payload.get("final_answer", "")).strip()
             if not final_answer:
                 raise ValueError("模型决定结束，但没有返回 final_answer。")
-            return ModelStep.finish(thought=thought, final_answer=final_answer)
+            return _ProviderStep.finish(thought=thought, final_answer=final_answer)
 
         raise ValueError(
             "模型返回了不支持的 action，且无法从 tool_name/tool_calls/final_answer 推断动作。"
         )
+

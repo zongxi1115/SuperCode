@@ -10,7 +10,6 @@ from fastapi_app.api_models import PlanDraftUpdateRequest, PlanSubmitRequest
 from fastapi_app.runtime.session import (
     normalize_plan_state,
     set_session_phase,
-    sync_session_runtime_state_for_agent,
     update_plan_state,
 )
 
@@ -78,6 +77,7 @@ def update_current_plan_draft(
     *,
     title: str | None,
     markdown: str,
+    sync_session_runtime_state_for_agent: Callable[[Any], None],
 ) -> dict[str, Any]:
     normalized_markdown = str(markdown or "").strip()
     if not normalized_markdown:
@@ -145,6 +145,7 @@ def activate_plan_for_coding(
     *,
     rebuild_chat_session_for_agent_type: Callable[[Any, str], None],
     invalidate_session_context_usage: Callable[[Any], None],
+    sync_session_runtime_state_for_agent: Callable[[Any], None],
 ) -> tuple[dict[str, Any], str]:
     plan = _resolve_plan_payload(session, request)
     coding_input = _build_coding_input_from_plan(plan)
@@ -190,6 +191,7 @@ def register_plan_routes(
     require_session: Callable[[str], Any],
     rebuild_chat_session_for_agent_type: Callable[[Any, str], None],
     invalidate_session_context_usage: Callable[[Any], None],
+    sync_session_runtime_state_for_agent: Callable[[Any], None],
 ) -> None:
     @app.get("/api/sessions/{session_id}/plan-draft/current")
     async def get_current_plan_draft(session_id: str) -> JSONResponse:
@@ -217,6 +219,7 @@ def register_plan_routes(
             session,
             title=request.title,
             markdown=request.markdown,
+            sync_session_runtime_state_for_agent=sync_session_runtime_state_for_agent,
         )
         return JSONResponse(
             {
@@ -237,6 +240,7 @@ def register_plan_routes(
             request,
             rebuild_chat_session_for_agent_type=rebuild_chat_session_for_agent_type,
             invalidate_session_context_usage=invalidate_session_context_usage,
+            sync_session_runtime_state_for_agent=sync_session_runtime_state_for_agent,
         )
         return JSONResponse(
             {

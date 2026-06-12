@@ -184,6 +184,7 @@ register_plan_routes(
     require_session=require_session,
     rebuild_chat_session_for_agent_type=rebuild_chat_session_for_agent_type,
     invalidate_session_context_usage=invalidate_session_context_usage,
+    sync_session_runtime_state_for_agent=sync_session_runtime_state_for_agent,
 )
 
 register_misc_routes(

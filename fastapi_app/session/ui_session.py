@@ -8,9 +8,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
-from agent import ChatSession
 from coding_agent import InteractiveCommandSession
 from deploy_agent import DeployConnectionManager
+from fastapi_app.runtime.zonix_runner import ZonixChatSession
 
 from fastapi_app.agent_router import normalize_route_state
 from fastapi_app.app_config import DEFAULT_BROWSER_PREVIEW_URL, DEFAULT_OPEN_FILES, DEFAULT_SELECTED_FILE, is_desktop_mode
@@ -41,7 +41,6 @@ from fastapi_app.session_history import is_subagent_record
 from fastapi_app.skills import list_available_skill_summaries
 from fastapi_app.workspace_utils import (
     build_directory_tree_node,
-    build_file_tree,
     build_file_tree_root,
     read_text_file,
     normalize_relative_path,
@@ -86,7 +85,7 @@ class UISession:
     terminal_runtimes: dict[str, TerminalRuntime] = field(default_factory=dict, init=False, repr=False)
     default_terminal_id: str | None = field(default=None, init=False, repr=False)
     interactive_command_session: InteractiveCommandSession | None = field(default=None, repr=False)
-    chat_session: ChatSession | None = None
+    chat_session: ZonixChatSession | None = None
     is_generating: bool = False
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
     cached_file_tree: list[dict[str, Any]] = field(default_factory=list, repr=False)

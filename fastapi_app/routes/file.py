@@ -355,6 +355,22 @@ def register_file_routes(
         target = resolve_preview_path(preview_path, session.workspace)
         return FileResponse(target)
 
+    @app.get("/api/files/preview")
+    async def preview_workspace_file(
+        session_id: str = Query(...),
+        path: str = Query(...),
+    ) -> FileResponse:
+        _session, target, _resolved_path = resolve_workspace_target(
+            session_id,
+            path,
+            deps=deps,
+        )
+        if not target.exists():
+            raise HTTPException(status_code=404, detail="文件不存在")
+        if not target.is_file():
+            raise HTTPException(status_code=400, detail="目标不是文件")
+        return FileResponse(target)
+
     @app.get("/api/preview/select-bridge.js")
     async def get_preview_select_bridge_script() -> Response:
         return Response(

@@ -9,7 +9,7 @@ from typing import Any, Callable
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
 
-from coding_agent.tools import execute_git_commit, execute_git_tag, init_git_repo
+from coding_agent.git_tools import execute_git_commit, execute_git_tag, init_git_repo
 from fastapi_app.api_models import GitCommitRequest, GitTagRequest
 from fastapi_app.workspace_utils import resolve_workspace_path
 

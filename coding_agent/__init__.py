@@ -1,73 +1,26 @@
-"""编码智能体专用包。
+"""编码智能体专用包。"""
 
-这里放与“编码任务”强相关的提示词模型和工具实现。
-"""
-
-from .model import (
-    CodeExplorationPromptModel,
-    CodingPromptModel,
-)
-from .tools import (
-    CreateTaskTool,
-    DelegateCodeExplorationTool,
-    ExcecuteTool,
-    ExecuteTool,
-    FinishTaskTool,
-    GitCommitTool,
-    GitLogTool,
-    GitTagTool,
-    GetDocsTool,
-    GetTaskStatusTool,
-    GreepToolCompat,
-    GrepFileTool,
-    InteractiveCommandSession,
-    ListFileTool,
-    OpenBrowserTool,
-    ReadCurrentPlanTool,
-    ReadProjectDocsTool,
-    ReadFileTool,
-    ReplaceFileTool,
-    TerminalInputTool,
-    TerminalWaitTool,
-    WriteProjectDocsTool,
-    WriteFileTool,
+from .agent import build_code_exploration_agent, build_coding_agent
+from .git_tools import execute_git_commit, execute_git_tag, init_git_repo
+from .file_tools import delete_file_in_workspace
+from .model import CodeExplorationPromptModel, CodingPromptModel
+from .registry import (
     build_code_exploration_tools,
     build_coding_tools,
     build_project_docs_tools,
-    execute_git_commit,
-    execute_git_tag,
-    init_git_repo,
 )
+from .terminal_tools import InteractiveCommandSession
 
 __all__ = [
-    "CodingPromptModel",
     "CodeExplorationPromptModel",
-    "CreateTaskTool",
-    "DelegateCodeExplorationTool",
-    "ExcecuteTool",
-    "ExecuteTool",
-    "FinishTaskTool",
-    "GitCommitTool",
-    "GitLogTool",
-    "GitTagTool",
-    "GetDocsTool",
-    "GetTaskStatusTool",
-    "GreepToolCompat",
-    "GrepFileTool",
+    "CodingPromptModel",
     "InteractiveCommandSession",
-    "ListFileTool",
-    "OpenBrowserTool",
-    "ReadCurrentPlanTool",
-    "ReadProjectDocsTool",
-    "ReadFileTool",
-    "ReplaceFileTool",
-    "TerminalInputTool",
-    "TerminalWaitTool",
-    "WriteProjectDocsTool",
-    "WriteFileTool",
+    "build_code_exploration_agent",
     "build_code_exploration_tools",
+    "build_coding_agent",
     "build_coding_tools",
     "build_project_docs_tools",
+    "delete_file_in_workspace",
     "execute_git_commit",
     "execute_git_tag",
     "init_git_repo",

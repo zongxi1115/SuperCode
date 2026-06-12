@@ -401,6 +401,9 @@ export type TerminalInfo = {
   rootPid?: number | null;
   status?: string | null;
   startedAt?: number | null;
+  returnCode?: number | null;
+  terminatedAt?: number | null;
+  processCount?: number | null;
 };
 
 export type ModelOption = {

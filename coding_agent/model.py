@@ -7,6 +7,7 @@ from pathlib import Path
 from agent.openai_model import OpenAICompatibleModel
 from agent.llm_client import OpenAICompatibleClient
 from agent.schema import AgentState, StepRecord, ToolResult
+from zonix.models.base import ModelRequest
 
 
 MAX_CONVERSATION_MESSAGES = 12
@@ -46,23 +47,32 @@ class CodingPromptModel(OpenAICompatibleModel):
         self.prompt_path = Path(prompt_path) if prompt_path is not None else self._default_prompt_path()
         self.workspace = str(workspace) if workspace is not None else None
 
-    def _build_system_prompt(
+    def build_prompt_chain(
         self,
         tool_definitions: dict[str, dict[str, object]],
-        response_mode: str = "legacy_json",
+    ) -> list[str]:
+        return [
+            self._build_base_prompt(),
+            self._build_system_info(),
+            self.build_tool_registry_prompt(tool_definitions),
+            self.build_native_protocol_prompt(),
+        ]
+
+    def build_tool_registry_prompt(
+        self,
+        tool_definitions: dict[str, dict[str, object]],
     ) -> str:
-        base_prompt = self.prompt_path.read_text(encoding="utf-8").strip()
         tool_lines = [
             f"- {tool_name}: {str(metadata.get('description', '')).strip()}"
             for tool_name, metadata in tool_definitions.items()
         ]
-        system_info = self._build_system_info()
+        return "\n".join(["## 当前工具注册表", *tool_lines])
 
-        if response_mode == "native_tools":
-            protocol_lines = [
+    def build_native_protocol_prompt(self) -> str:
+        return "\n".join(
+            [
                 "## 输出协议",
-                "当前接口已启用原生 tool calling。",
-                "如果需要调用工具，必须使用原生 tool calling，不要在文本里输出 action/tool_name/tool_arguments JSON。",
+                "当模型请求携带原生 tools 时，必须使用原生 tool calling，不要在文本里输出 action/tool_name/tool_arguments JSON。",
                 "如果不需要调用工具，直接输出给用户的最终答复文本。",
                 "规则：",
                 "1. 多个互不依赖的只读探索动作可以一次返回多个 tool calls，让系统并行执行。",
@@ -72,6 +82,8 @@ class CodingPromptModel(OpenAICompatibleModel):
                 "4.1 定位文件时优先使用 glob_file 和 grep_file，不要默认展开整个仓库。",
                 "4.2 grep_file 优先先用 output_mode=files_with_matches 看命中分布，再按需用 output_mode=content。",
                 "4.3 read_file 默认从文件开头读；返回会带 total_lines、total_chars 等元信息；如果工具提示已截断，必须继续用更小的 offset/limit 或 start_line/end_line 分段读取后续内容。",
+                "4.4 编辑单个文件前，尽量一次性读完整个相关文件或足够大的连续范围；不要为了省一小段上下文反复 read_file。",
+                "4.5 修改同一个文件时，优先把多处变更合并到一次 apply_patch 的 edits 里；除非工具报错或上下文不足，不要 patch 一次再读一次再 patch。",
                 "5. 普通答疑可以直接输出最终文本；需要查看或修改项目时再调用工具。",
                 "6. 命令执行工具优先使用 `excecute`；如果输出里提到 `execute`，可视为同义工具。调用时必须提供 `content` 和 `timeout`（秒），并可选传 `terminal_id`。",
                 "7. 如果 execute/excecute 返回的结果里 `status` 是 `running` 且 `awaiting_input` 为 true，说明命令很可能在等输入。优先参考 `input_prompt` / `input_request`，并调用 `terminal_input`；输入文本用 `content`，按回车/Tab/Ctrl+C 等按键用 `key`（如 `enter`、`tab`、`ctrl+c`）。如果结果里带有 `terminal_id`，后续继续交互时要沿用同一个 `terminal_id`。",
@@ -84,10 +96,13 @@ class CodingPromptModel(OpenAICompatibleModel):
                 "14. 当命令不存在、运行时/SDK/系统包缺失、PATH 未配置，或需要用 winget 搜索/安装系统包时，先调用 get_docs，参数 type=environment_setup，读取集中流程文档后再给用户渐进式提示。安装会改变用户机器环境，除非用户已明确要求执行，否则先展示将执行的命令并等待确认。",
                 *HTML_ARTIFACT_OUTPUT_RULES,
             ]
-        else:
-            protocol_lines = [
-                "## 输出协议",
-                "你必须始终只输出一个 JSON 对象，不要输出 Markdown，不要输出解释。",
+        )
+
+    def build_legacy_protocol_prompt(self) -> str:
+        return "\n".join(
+            [
+                "## JSON fallback 输出协议",
+                "当前模型接口不可用原生 tool calling 时，你必须始终只输出一个 JSON 对象，不要输出 Markdown，不要输出解释。",
                 (
                     'JSON 格式：{"action":"tool 或 final","thought":"当前思路",'
                     '"tool_name":"工具名","tool_arguments":{},'
@@ -103,6 +118,8 @@ class CodingPromptModel(OpenAICompatibleModel):
                 "5.1 定位文件时优先使用 glob_file 和 grep_file，不要默认展开整个仓库。",
                 "5.2 grep_file 优先先用 output_mode=files_with_matches 看命中分布，再按需用 output_mode=content。",
                 "5.3 read_file 默认从文件开头读；返回会带 total_lines、total_chars 等元信息；如果工具提示已截断，必须继续用更小的 offset/limit 或 start_line/end_line 分段读取后续内容。",
+                "5.4 编辑单个文件前，尽量一次性读完整个相关文件或足够大的连续范围；不要为了省一小段上下文反复 read_file。",
+                "5.5 修改同一个文件时，优先把多处变更合并到一次 apply_patch 的 edits 里；除非工具报错或上下文不足，不要 patch 一次再读一次再 patch。",
                 "6. 普通答疑可以直接 final；需要查看或修改项目时再调用工具。",
                 "7. 命令执行工具优先使用 `excecute`；如果输出里提到 `execute`，可视为同义工具。调用时必须提供 `content` 和 `timeout`（秒），并可选传 `terminal_id`。",
                 "8. 如果 execute/excecute 返回的结果里 `status` 是 `running` 且 `awaiting_input` 为 true，说明命令很可能在等输入。优先参考 `input_prompt` / `input_request`，并调用 `terminal_input`；输入文本用 `content`，按回车/Tab/Ctrl+C 等按键用 `key`（如 `enter`、`tab`、`ctrl+c`）。如果结果里带有 `terminal_id`，后续继续交互时要沿用同一个 `terminal_id`。",
@@ -114,74 +131,75 @@ class CodingPromptModel(OpenAICompatibleModel):
                 "14. 当命令不存在、运行时/SDK/系统包缺失、PATH 未配置，或需要用 winget 搜索/安装系统包时，先调用 get_docs，参数 type=environment_setup，读取集中流程文档后再给用户渐进式提示。安装会改变用户机器环境，除非用户已明确要求执行，否则先展示将执行的命令并等待确认。",
                 *HTML_ARTIFACT_OUTPUT_RULES,
             ]
-
-        return "\n\n".join(
-            [
-                base_prompt,
-                system_info,
-                "## 当前工具注册表",
-                "\n".join(tool_lines),
-                "\n".join(protocol_lines),
-            ]
         )
+
+    def build_runtime_context_prompt(self, ctx: object, task: object | None = None) -> str:
+        state = getattr(ctx, "state", None)
+        if not isinstance(state, AgentState):
+            return ""
+
+        system_content: list[str] = []
+        for context in (
+            self._build_runtime_state_context(state),
+            self._build_long_term_memory_context(state),
+            self._build_planning_records_context(state),
+            self._build_tool_records_context(state),
+            self._build_available_skills_context(state),
+            self._build_active_skills_context(state),
+        ):
+            if context:
+                system_content.append(context)
+        return "\n\n".join(system_content)
+
+    def _build_base_prompt(self) -> str:
+        return self.prompt_path.read_text(encoding="utf-8").strip()
+
+    def _build_system_prompt(
+        self,
+        tool_definitions: dict[str, dict[str, object]],
+        response_mode: str = "legacy_json",
+    ) -> str:
+        prompts = self.build_prompt_chain(tool_definitions)
+        prompts[-1] = (
+            self.build_native_protocol_prompt()
+            if response_mode == "native_tools"
+            else self.build_legacy_protocol_prompt()
+        )
+        return "\n\n".join(prompt for prompt in prompts if prompt)
+
+    def _build_legacy_protocol_prompt(
+        self,
+        tool_definitions: dict[str, dict[str, object]],
+    ) -> str:
+        return self.build_legacy_protocol_prompt()
 
     def _build_messages(
         self,
+        request: ModelRequest,
         state: AgentState,
         tool_definitions: dict[str, dict[str, object]],
         response_mode: str = "legacy_json",
     ) -> list[dict[str, object]]:
-        system_content = [self._build_system_prompt(tool_definitions, response_mode=response_mode)]
-
-        runtime_state_context = self._build_runtime_state_context(state)
-        if runtime_state_context:
-            system_content.append(runtime_state_context)
-
-        long_term_memory_context = self._build_long_term_memory_context(state)
-        if long_term_memory_context:
-            system_content.append(long_term_memory_context)
-
-        planning_records_context = self._build_planning_records_context(state)
-        if planning_records_context:
-            system_content.append(planning_records_context)
-
-        tool_records_context = self._build_tool_records_context(state)
-        if tool_records_context:
-            system_content.append(tool_records_context)
-
-        available_skills_context = self._build_available_skills_context(state)
-        if available_skills_context:
-            system_content.append(available_skills_context)
-
-        active_skills_context = self._build_active_skills_context(state)
-        if active_skills_context:
-            system_content.append(active_skills_context)
-
-        messages: list[dict[str, object]] = [
-            {"role": "system", "content": "\n\n".join(system_content)}
-        ]
-
-        previous_messages, latest_user_message = self._split_latest_user_message(state)
-        messages.extend(self._conversation_messages_for_model(previous_messages))
-
-        user_content = []
-        if latest_user_message:
-            user_content.append(latest_user_message)
-        elif state.current_input.strip():
-            user_content.append(state.current_input.strip())
-
-        current_turn_history = self._build_current_turn_history(state)
-        if current_turn_history and response_mode != "native_tools":
-            user_content.append("")
-            user_content.append(current_turn_history)
-            user_content.append(self._build_continuation_instruction(response_mode))
-
-        if user_content:
-            messages.append({"role": "user", "content": "\n".join(user_content)})
-
-        if response_mode == "native_tools":
-            messages.extend(self._build_current_turn_native_messages(state))
-
+        messages = super()._build_messages(
+            request,
+            state,
+            tool_definitions,
+            response_mode=response_mode,
+        )
+        if response_mode != "native_tools":
+            current_turn_history = self._build_current_turn_history(state)
+            if current_turn_history:
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": "\n\n".join(
+                            [
+                                current_turn_history,
+                                self._build_continuation_instruction(response_mode),
+                            ]
+                        ),
+                    }
+                )
         return messages
 
     def _build_runtime_state_context(self, state: AgentState) -> str:
@@ -226,19 +244,6 @@ class CodingPromptModel(OpenAICompatibleModel):
             "如果用户目标已经完成，必须 action=final，不要继续调用工具。"
         )
 
-    def _split_latest_user_message(self, state: AgentState) -> tuple[list[object], str]:
-        messages = list(state.conversation_messages)
-        current_input = state.current_input.strip()
-        if not messages:
-            return [], current_input
-
-        last_message = messages[-1]
-        last_role = str(getattr(last_message, "role", ""))
-        last_content = str(getattr(last_message, "content", ""))
-        if last_role == "user" and current_input and last_content.strip() == current_input:
-            return messages[:-1], last_content
-        return messages, current_input
-
     def _conversation_messages_for_model(self, raw_messages: list[object]) -> list[dict[str, object]]:
         model_messages: list[dict[str, object]] = []
         for message in raw_messages[-MAX_CONVERSATION_MESSAGES:]:
@@ -249,7 +254,7 @@ class CodingPromptModel(OpenAICompatibleModel):
             if content.startswith("[内部工具轨迹摘要]"):
                 continue
             model_message: dict[str, object] = {"role": role, "content": content}
-            reasoning_content = str(getattr(message, "reasoning_content", "") or "").strip()
+            reasoning_content = self._message_reasoning_content(message)
             if role == "assistant" and reasoning_content:
                 model_message["reasoning_content"] = reasoning_content
             model_messages.append(model_message)
@@ -584,7 +589,7 @@ class CodingPromptModel(OpenAICompatibleModel):
             f"- 操作系统：{platform.system()} {platform.release()} ({platform.machine()})",
         ]
         if platform.system() == "Windows":
-            lines.append(f"- 注意Powershell分隔请使用分号")
+            lines.append("- 注意Powershell分隔请使用分号")
         if self.workspace:
             lines.append(f"- 工作区路径：{self.workspace}")
         return "\n".join(lines)

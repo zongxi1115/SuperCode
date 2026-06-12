@@ -10,7 +10,6 @@ from typing import Any, Callable
 
 from fastapi import HTTPException
 
-from agent import Agent
 from deploy_agent import DeployConnectionManager
 from fastapi_app.session_history import extract_message_thought_text, seed_chat_session_history
 from fastapi_app.workspace_utils import resolve_workspace_path
@@ -289,7 +288,7 @@ def rebuild_chat_session_for_existing_history(
     session._ensure_default_terminal(workspace)
     if session.chat_session is not None:
         seed_chat_session_history(session.chat_session, session.history_messages, session.history_tools)
-    if session.chat_session is not None and isinstance(session.chat_session.agent, Agent):
+    if session.chat_session is not None:
         deps.attach_agent_runtime_metadata(
             session.chat_session.agent,
             session_id=session.session_id,

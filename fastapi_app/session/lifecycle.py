@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from agent import Agent
 from coding_agent import InteractiveCommandSession
 from deploy_agent import DeployConnectionManager
 
@@ -124,7 +123,7 @@ class SessionRegistry:
         session._ensure_default_terminal(state.workspace)
         if session.chat_session is not None:
             seed_chat_session_history(session.chat_session, state.history_messages, state.history_tools)
-        if session.chat_session is not None and isinstance(session.chat_session.agent, Agent):
+        if session.chat_session is not None:
             attach_agent_runtime_metadata(
                 session.chat_session.agent,
                 session_id=session.session_id,

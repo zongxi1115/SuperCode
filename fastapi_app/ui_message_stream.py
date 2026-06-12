@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -155,15 +156,33 @@ class UIMessageStreamAdapter:
             tool_call_id = str(payload.get("id") or "").strip()
             if not tool_call_id:
                 return []
+            tool_name = str(
+                payload.get("name")
+                or self.tool_names_by_id.get(tool_call_id)
+                or self._streaming_tool_name_from_id(tool_call_id)
+                or ""
+            ).strip()
+            parts = [*self._ensure_started(str(payload.get("assistant_id") or ""))]
+            if tool_name:
+                self.tool_names_by_id[tool_call_id] = tool_name
+                if tool_call_id not in self.streaming_tool_input_ids:
+                    self.streaming_tool_input_ids.add(tool_call_id)
+                    parts.append(
+                        {
+                            "type": "tool-input-start",
+                            "toolCallId": tool_call_id,
+                            "toolName": tool_name,
+                        }
+                    )
             self.streaming_tool_input_ids.add(tool_call_id)
-            return [
-                *self._ensure_started(str(payload.get("assistant_id") or "")),
+            parts.append(
                 {
                     "type": "tool-input-delta",
                     "toolCallId": tool_call_id,
                     "inputTextDelta": str(payload.get("delta") or ""),
-                },
-            ]
+                }
+            )
+            return parts
 
         if event_type == "tool_result":
             tool_call_id = str(payload.get("id") or "").strip()
@@ -352,6 +371,11 @@ class UIMessageStreamAdapter:
             if isinstance(new_content, str):
                 return new_content
             edits = arguments.get("edits")
+            if isinstance(edits, str):
+                try:
+                    edits = json.loads(edits)
+                except json.JSONDecodeError:
+                    return edits
             if isinstance(edits, list):
                 edit_contents = [
                     edit.get("new_content")
@@ -361,10 +385,20 @@ class UIMessageStreamAdapter:
                 return "\n\n".join(edit_contents)
             return ""
 
+        if tool_name in {"save_plan", "ask_plan_questions"}:
+            return json.dumps(arguments, ensure_ascii=False) if arguments else ""
+
         return ""
 
     def _chunk_text(self, text: str, chunk_size: int = 96) -> list[str]:
         return [text[index : index + chunk_size] for index in range(0, len(text), chunk_size)]
+
+    @staticmethod
+    def _streaming_tool_name_from_id(tool_call_id: str) -> str:
+        prefix = "streaming-"
+        if not tool_call_id.startswith(prefix):
+            return ""
+        return tool_call_id[len(prefix) :].strip()
 
     def _safe_id(self, value: str | None) -> str:
         sanitized = re.sub(r"[^a-zA-Z0-9_-]+", "_", value or "message").strip("_")

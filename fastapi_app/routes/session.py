@@ -8,11 +8,9 @@ from typing import Any, Callable
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
 
-from agent import Agent
-from coding_agent import InteractiveCommandSession
-from coding_agent.tools import init_git_repo
-from fastapi_app.api_models import CreateSessionRequest, CreateSessionResponse
-from fastapi_app.workspace_utils import build_default_open_files, pick_default_file, resolve_workspace_path
+from coding_agent.git_tools import init_git_repo
+from fastapi_app.api_models import CreateSessionRequest
+from fastapi_app.workspace_utils import build_default_open_files, pick_default_file
 
 
 @dataclass(frozen=True)
@@ -174,7 +172,7 @@ def register_session_routes(
             max_context_tokens=context_limit,
         )
         session._ensure_default_terminal(workspace)
-        if session.chat_session is not None and isinstance(session.chat_session.agent, Agent):
+        if session.chat_session is not None:
             deps.attach_agent_runtime_metadata(
                 session.chat_session.agent,
                 session_id=session.session_id,
