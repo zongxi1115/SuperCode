@@ -1290,6 +1290,46 @@ export default function App() {
     [sessionId]
   );
 
+  const handleClosePlanSteps = useCallback(async () => {
+    setSessionContext((prev) =>
+      prev
+        ? {
+            ...prev,
+            planSteps: [],
+          }
+        : prev,
+    );
+
+    if (!sessionId) return;
+
+    try {
+      const res = await apiFetch(`/api/sessions/${sessionId}/tasks`, {
+        method: 'DELETE',
+      });
+      const payload = await res.json();
+      if (!res.ok) {
+        throw new Error(String(payload.detail ?? '关闭计划失败'));
+      }
+      setSessionContext((prev) =>
+        prev
+          ? {
+              ...prev,
+              planState:
+                payload.planState && typeof payload.planState === 'object'
+                  ? payload.planState
+                  : prev.planState,
+              planSteps: Array.isArray(payload.planSteps)
+                ? payload.planSteps as PlanStep[]
+                : [],
+            }
+          : prev,
+      );
+    } catch (error) {
+      console.error('关闭计划失败:', error);
+      void loadSessionContext({ silent: true });
+    }
+  }, [loadSessionContext, sessionId]);
+
   const [shouldRestoreSession, setShouldRestoreSession] = useState(() => {
     const lastSession = getLastSession();
     return !initialUrlState.sessionId && !!(lastSession && lastSession.workspace);
@@ -4347,6 +4387,7 @@ export default function App() {
         onResolveConnectInput={resolveConnectInput}
         onResolvePlanQuestionsInput={resolvePlanQuestionsInput}
         onViewPlan={openPlanDraftPanel}
+        onClosePlanSteps={handleClosePlanSteps}
         agentMode={selectedAgentMode}
         onAgentModeChange={setSelectedAgentMode}
         elementAttachments={elementAttachments}

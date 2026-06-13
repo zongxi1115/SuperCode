@@ -251,6 +251,7 @@ type ChatPanelProps = {
     answers: QuizSubmission,
   ) => void | Promise<void>;
   onViewPlan?: (title: string, markdown: string) => void;
+  onClosePlanSteps?: () => void | Promise<void>;
   agentMode: AgentMode;
   onAgentModeChange: (mode: AgentMode) => void;
   onModelChange: (modelId: string) => void;
@@ -472,6 +473,15 @@ function getToolTitle(name: string, args: Record<string, unknown>): string {
 
 function getToolIcon(name: string) {
   return TOOL_ICONS[name] ?? <FileCodeIcon className="size-4" />;
+}
+
+function isAutoCollapsibleToolState(state: ToolCallRecord["state"]) {
+  return (
+    state === "completed" ||
+    state === "output-available" ||
+    state === "output-denied" ||
+    state === "error"
+  );
 }
 
 type PlanQuestionSource = ToolCallRecord["inputRequest"]["questions"][number];
@@ -3137,9 +3147,11 @@ function PlanDraftCard({
 function PlanToggle({
   planSteps,
   isStreaming,
+  onClose,
 }: {
   planSteps: PlanStep[];
   isStreaming: boolean;
+  onClose?: () => void | Promise<void>;
 }) {
   const [isOpen, setIsOpen] = useState(false);
 
@@ -3151,23 +3163,35 @@ function PlanToggle({
 
   return (
     <div className="px-3">
-      <button
-        type="button"
-        onClick={() => setIsOpen((prev) => !prev)}
-        className="flex items-center gap-2 w-full rounded-md px-2 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
-      >
-        <ListChecks className="size-3.5 shrink-0" />
-        <span className="flex-1 text-left">计划</span>
-        <span className="text-[10px] tabular-nums">
-          {completedCount}/{planSteps.length}
-        </span>
-        <motion.div
-          animate={{ rotate: isOpen ? 180 : 0 }}
-          transition={{ type: "spring", stiffness: 300, damping: 25 }}
+      <div className="flex w-full items-center gap-1 rounded-md text-xs text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground">
+        <button
+          type="button"
+          onClick={() => setIsOpen((prev) => !prev)}
+          className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left"
         >
-          <ChevronDown className="size-3" />
-        </motion.div>
-      </button>
+          <ListChecks className="size-3.5 shrink-0" />
+          <span className="flex-1 text-left">计划</span>
+          <span className="text-[10px] tabular-nums">
+            {completedCount}/{planSteps.length}
+          </span>
+          <motion.div
+            animate={{ rotate: isOpen ? 180 : 0 }}
+            transition={{ type: "spring", stiffness: 300, damping: 25 }}
+          >
+            <ChevronDown className="size-3" />
+          </motion.div>
+        </button>
+        <button
+          type="button"
+          aria-label="关闭计划"
+          title="关闭计划"
+          disabled={isStreaming}
+          onClick={() => void onClose?.()}
+          className="mr-1 flex size-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground/70 transition-colors hover:bg-background/80 hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+        >
+          <XIcon className="size-3" />
+        </button>
+      </div>
 
       <AnimatePresence>
         {isOpen && (
@@ -4072,6 +4096,7 @@ const MessageList = memo(function MessageList({
   const [taskOpenState, setTaskOpenState] = useState<Record<string, boolean>>(
     {},
   );
+  const latestRunningToolIdRef = useRef<string | null>(null);
   const [hoveredMsgId, setHoveredMsgId] = useState<string | null>(null);
   const [editingMsgId, setEditingMsgId] = useState<string | null>(null);
   const [editContent, setEditContent] = useState("");
@@ -4168,13 +4193,23 @@ const MessageList = memo(function MessageList({
   }, [getMessageToolCalls, messages]);
 
   useEffect(() => {
+    const previousLatestRunningToolId = latestRunningToolIdRef.current;
+    if (previousLatestRunningToolId === latestRunningToolId) {
+      return;
+    }
+
+    latestRunningToolIdRef.current = latestRunningToolId;
+    if (!latestRunningToolId) {
+      return;
+    }
+
     setTaskOpenState((prev) => {
       let changed = false;
       const next = { ...prev };
 
       for (const message of messages) {
         for (const toolCall of getMessageToolCalls(message)) {
-          if (latestRunningToolId && toolCall.id === latestRunningToolId) {
+          if (toolCall.id === latestRunningToolId) {
             if (next[toolCall.id] !== true) {
               next[toolCall.id] = true;
               changed = true;
@@ -4182,18 +4217,10 @@ const MessageList = memo(function MessageList({
             continue;
           }
 
-          const shouldCollapseBeforeNextTool =
-            latestRunningToolId !== null &&
-            (toolCall.state === "completed" ||
-              toolCall.state === "output-available" ||
-              toolCall.state === "output-denied" ||
-              toolCall.state === "error");
-          const shouldAutoCollapse =
-            shouldCollapseBeforeNextTool ||
-            (toolCall.name === "save_plan" &&
-              (toolCall.state === "completed" ||
-                toolCall.state === "output-available"));
-          if (shouldAutoCollapse && next[toolCall.id] !== false) {
+          if (
+            isAutoCollapsibleToolState(toolCall.state) &&
+            next[toolCall.id] !== false
+          ) {
             next[toolCall.id] = false;
             changed = true;
           }
@@ -4231,13 +4258,11 @@ const MessageList = memo(function MessageList({
       tc.name === "delegate_code_exploration" ||
       tc.inputRequest?.kind === "plan_questions";
     const toolTitle = `${getToolTitle(tc.name, tc.arguments ?? {})} · ${statusLabel}`;
-    const hasControlledOpen =
-      latestRunningToolId !== null ||
-      Object.prototype.hasOwnProperty.call(taskOpenState, tc.id);
-    const controlledOpen =
-      latestRunningToolId !== null && tc.id !== latestRunningToolId
-        ? false
-        : (taskOpenState[tc.id] ?? shouldOpen);
+    const hasControlledOpen = Object.prototype.hasOwnProperty.call(
+      taskOpenState,
+      tc.id,
+    );
+    const controlledOpen = taskOpenState[tc.id] ?? shouldOpen;
 
     return (
       <Task
@@ -5921,6 +5946,7 @@ export function ChatPanel({
   onResolveConnectInput,
   onResolvePlanQuestionsInput,
   onViewPlan,
+  onClosePlanSteps,
   agentMode,
   onAgentModeChange,
   onModelChange,
@@ -6545,7 +6571,11 @@ export function ChatPanel({
   const composer = (
     <div className="shrink-0 border-t bg-background">
       <div className={cn("mx-auto w-full", CHAT_CONTENT_MAX_WIDTH)}>
-        <PlanToggle planSteps={planSteps} isStreaming={isLoading} />
+        <PlanToggle
+          planSteps={planSteps}
+          isStreaming={isLoading}
+          onClose={onClosePlanSteps}
+        />
         <div className="p-3 pt-2">
           <div className="flex flex-col rounded-lg border bg-muted/30 p-2 shadow-sm focus-within:ring-1 focus-within:ring-ring">
             <input

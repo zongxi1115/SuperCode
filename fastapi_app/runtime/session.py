@@ -346,6 +346,17 @@ def finish_task_step_in_session(session: Any, step_id: str) -> dict[str, Any]:
     }
 
 
+def clear_task_plan_in_session(session: Any) -> None:
+    update_plan_state(
+        session,
+        tasks=[],
+        active_task_id=None,
+        active_step_id=None,
+    )
+    session.plan_steps = []
+    session.touch()
+
+
 def build_task_status_payload(session: Any, task_id: str | None = None) -> dict[str, Any]:
     plan_state = normalize_plan_state(session.plan_state)
     tasks = _normalize_plan_tasks(plan_state.get("tasks"))

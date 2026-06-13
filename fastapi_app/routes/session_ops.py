@@ -20,6 +20,7 @@ class SessionOpsRouteDeps:
     require_session: Callable[[str], Any]
     create_task_in_session: Callable[..., dict[str, Any]]
     finish_task_step_in_session: Callable[[Any, str], dict[str, Any]]
+    clear_task_plan_in_session: Callable[[Any], None]
     build_task_status_payload: Callable[[Any, str | None], dict[str, Any]]
     session_has_pending_context_interaction: Callable[[Any], bool]
     compress_session_context: Callable[..., Any]
@@ -69,6 +70,18 @@ def register_session_ops_routes(
             {
                 "ok": True,
                 **result,
+                "planState": session.plan_state,
+                "planSteps": session.plan_steps,
+            }
+        )
+
+    @app.delete("/api/sessions/{session_id}/tasks")
+    async def clear_task_plan_endpoint(session_id: str) -> JSONResponse:
+        session = deps.require_session(session_id)
+        deps.clear_task_plan_in_session(session)
+        return JSONResponse(
+            {
+                "ok": True,
                 "planState": session.plan_state,
                 "planSteps": session.plan_steps,
             }

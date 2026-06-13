@@ -66,7 +66,12 @@ from fastapi_app.session_history import (
 from fastapi_app.routes.session import SessionRouteDeps, register_session_routes
 from fastapi_app.routes.session_ops import SessionOpsRouteDeps, register_session_ops_routes
 from fastapi_app.routes.plan import register_plan_routes
-from fastapi_app.runtime.session import build_task_status_payload, create_task_in_session, finish_task_step_in_session
+from fastapi_app.runtime.session import (
+    build_task_status_payload,
+    clear_task_plan_in_session,
+    create_task_in_session,
+    finish_task_step_in_session,
+)
 from fastapi_app.routes.terminal import TerminalRouteDeps, register_terminal_routes
 from fastapi_app.runtime.terminal import TerminalRuntimeBase
 from fastapi_app.routes.tool_interaction import ToolInteractionRouteDeps, register_tool_interaction_routes
@@ -331,6 +336,7 @@ register_session_ops_routes(
         require_session=require_session,
         create_task_in_session=create_task_in_session,
         finish_task_step_in_session=finish_task_step_in_session,
+        clear_task_plan_in_session=clear_task_plan_in_session,
         build_task_status_payload=build_task_status_payload,
         session_has_pending_context_interaction=session_has_pending_context_interaction,
         compress_session_context=compress_session_context,
