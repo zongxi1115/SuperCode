@@ -9,6 +9,15 @@ from pathlib import Path
 import uvicorn
 
 
+def _ensure_standard_streams() -> None:
+    if sys.stdin is None:
+        sys.stdin = open(os.devnull, "r", encoding="utf-8")
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")
+
+
 def _read_port() -> int:
     raw_port = os.environ.get("SUPERCODE_PORT", "3001").strip()
     try:
@@ -81,11 +90,12 @@ def _start_parent_watchdog() -> None:
 def main() -> None:
     host = os.environ.get("SUPERCODE_HOST", "127.0.0.1").strip() or "127.0.0.1"
     port = _read_port()
+    _ensure_standard_streams()
     _ensure_state_dir()
     _start_parent_watchdog()
     from fastapi_app.main import app
 
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    uvicorn.run(app, host=host, port=port, log_level="info", use_colors=False)
 
 
 if __name__ == "__main__":

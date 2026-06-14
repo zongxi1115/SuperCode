@@ -315,11 +315,11 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                 for row in connection.execute("PRAGMA table_info(sessions)").fetchall()
             }
             if "route_state" in existing_columns or "history_messages" in existing_columns:
-                self._drop_session_tables(connection, keep_legacy=True)
                 connection.execute(f"ALTER TABLE sessions RENAME TO {LEGACY_SESSIONS_TABLE}")
                 legacy_rows = connection.execute(
                     f"SELECT * FROM {LEGACY_SESSIONS_TABLE} ORDER BY updated_at DESC, created_at DESC"
                 ).fetchall()
+                self._drop_session_tables(connection, keep_legacy=True)
             else:
                 self._drop_session_tables(connection)
         self._ensure_runtime_schema(connection)
