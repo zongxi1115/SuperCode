@@ -10,7 +10,6 @@ import {
   GlobeIcon,
   LightbulbIcon,
   MessageSquareIcon,
-  PencilIcon,
 } from "lucide-react";
 import { getFileIcon } from "@/lib/file-icons";
 import { motion, useReducedMotion } from "motion/react";
@@ -46,6 +45,7 @@ type ChatComposerEditorProps = {
   focusRevision?: number;
   onChange: (value: string) => void;
   onSubmit: () => void;
+  onFiles?: (files: File[]) => void;
 };
 
 type MentionAttrs = {
@@ -318,6 +318,7 @@ export function ChatComposerEditor({
   focusRevision,
   onChange,
   onSubmit,
+  onFiles,
 }: ChatComposerEditorProps) {
   const anchorRef = useRef<HTMLDivElement>(null);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
@@ -370,6 +371,8 @@ export function ChatComposerEditor({
   useEffect(() => { filteredSuggestionsRef.current = filteredSuggestions; }, [filteredSuggestions]);
   useEffect(() => { selectedIndexRef.current = selectedIndex; }, [selectedIndex]);
   useEffect(() => { onSubmitRef.current = onSubmit; }, [onSubmit]);
+  const onFilesRef = useRef(onFiles);
+  useEffect(() => { onFilesRef.current = onFiles; }, [onFiles]);
 
   const refreshEditorMetrics = useCallback(() => {
     const scrollArea = scrollAreaRef.current;
@@ -495,6 +498,21 @@ export function ChatComposerEditor({
           }
           return false;
         },
+        handlePaste: (view, event) => {
+          const files = Array.from(event.clipboardData?.files ?? []);
+          if (files.length > 0 && onFilesRef.current) {
+            event.preventDefault();
+            onFilesRef.current(files);
+            return true;
+          }
+          event.preventDefault();
+          const pastedText = event.clipboardData?.getData("text/plain") ?? "";
+          if (pastedText && editor) {
+            editor.commands.insertContent(pastedText);
+            requestAnimationFrame(refreshEditorMetrics);
+          }
+          return true;
+        },
         attributes: {
           class:
             "min-h-[80px] whitespace-pre-wrap break-words bg-transparent px-1 py-1.5 text-sm leading-6 text-foreground outline-none [word-break:break-word]",
@@ -558,17 +576,6 @@ export function ChatComposerEditor({
     [activeMention, editor, insertSuggestionDirectly],
   );
 
-  const handlePaste = useCallback(
-    (e: React.ClipboardEvent<HTMLDivElement>) => {
-      if (!editor) return;
-      e.preventDefault();
-      const pastedText = e.clipboardData.getData("text/plain");
-      editor.chain().focus().insertContent(pastedText).run();
-      requestAnimationFrame(refreshEditorMetrics);
-    },
-    [editor, refreshEditorMetrics],
-  );
-
   const handleEditorScroll = useCallback(() => {
     refreshEditorMetrics();
   }, [refreshEditorMetrics]);
@@ -627,7 +634,6 @@ export function ChatComposerEditor({
       >
         <div
           ref={scrollAreaRef}
-          onPaste={handlePaste}
           onScroll={handleEditorScroll}
           className={cn(
             "h-full pr-2",

@@ -14,11 +14,31 @@ from .llm_client import (
     UnsupportedToolCallingError,
 )
 from .schema import AgentState, StepRecord
-from zonix.events import ReasoningDelta, TextDelta, ToolInputAvailable, ToolInputDelta, ToolInputStart
+from zonix.content import (
+    content_blocks,
+    content_text,
+    has_image_content,
+    image_detail,
+    image_source,
+)
+from zonix.events import (
+    ReasoningDelta,
+    TextDelta,
+    ToolInputAvailable,
+    ToolInputDelta,
+    ToolInputStart,
+)
 from zonix.models.base import BaseChatModel, ModelRequest, ModelResponse, SupportsEmit
 from zonix.types import Message as ZonixMessage
 from zonix.types import ToolCall as ZonixToolCall
 from zonix.types import Usage as ZonixUsage
+
+
+def _anthropic_base_url(base_url: str) -> str:
+    normalized = base_url.rstrip("/")
+    if normalized.endswith("/v1"):
+        return normalized[:-3].rstrip("/")
+    return normalized
 
 
 @dataclass(slots=True)
@@ -100,8 +120,12 @@ class OpenAICompatibleModel(BaseChatModel):
     """
 
     def __init__(self, client: OpenAICompatibleClient) -> None:
-        super().__init__(name=f"supercode:{client.config.model}")
         self.client = client
+        self.provider_model = self._build_provider_model()
+        self._delegate_usage: ZonixUsage | None = None
+        super().__init__(
+            name=self.provider_model.name if self.provider_model is not None else f"supercode:{client.config.model}"
+        )
 
     _STREAMABLE_TOOL_INPUT_SPECS: dict[str, tuple[str, str, str]] = {
         "write_file": ("content", "content", "string"),
@@ -112,6 +136,10 @@ class OpenAICompatibleModel(BaseChatModel):
     }
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
+        if self.provider_model is not None:
+            response = await self.provider_model.complete(request)
+            self._delegate_usage = response.usage
+            return response
         return await asyncio.to_thread(self._complete_sync, request, None, ())
 
     async def stream_complete(
@@ -120,6 +148,11 @@ class OpenAICompatibleModel(BaseChatModel):
         emit: SupportsEmit,
         path: tuple[str, ...],
     ) -> ModelResponse:
+        if self.provider_model is not None:
+            response = await self.provider_model.stream_complete(request, emit, path)
+            self._delegate_usage = response.usage
+            return response
+
         loop = asyncio.get_running_loop()
 
         def emit_sync(event: object) -> None:
@@ -127,6 +160,19 @@ class OpenAICompatibleModel(BaseChatModel):
             future.result()
 
         return await asyncio.to_thread(self._complete_sync, request, emit_sync, path)
+
+    def _build_provider_model(self) -> BaseChatModel | None:
+        provider = str(getattr(self.client.config, "provider", "") or "").strip().lower()
+        if provider != "anthropic":
+            return None
+
+        from zonix.models import Anthropic
+
+        return Anthropic(
+            model=self.client.config.model,
+            api_key=self.client.config.api_key,
+            base_url=_anthropic_base_url(self.client.config.base_url),
+        )
 
     def _complete_sync(
         self,
@@ -202,7 +248,10 @@ class OpenAICompatibleModel(BaseChatModel):
         state = getattr(ctx, "state", None)
         if isinstance(state, AgentState):
             return state
-        return AgentState(task="SuperCode Zonix run", current_input=str(request.task or ""))
+        return AgentState(
+            task="SuperCode Zonix run",
+            current_input=content_text(request.task, include_images=True),
+        )
 
     def _tool_definitions_from_request(
         self,
@@ -426,6 +475,14 @@ class OpenAICompatibleModel(BaseChatModel):
         return self._to_step(payload)
 
     def latest_usage(self) -> dict[str, int] | None:
+        if self._delegate_usage is not None:
+            return {
+                "inputTokens": self._delegate_usage.input_tokens,
+                "outputTokens": self._delegate_usage.output_tokens,
+                "reasoningTokens": self._delegate_usage.reasoning_tokens,
+                "cachedInputTokens": self._delegate_usage.cached_input_tokens,
+                "totalTokens": self._delegate_usage.total_tokens,
+            }
         return self.client.last_usage
 
     def _should_stream_native_text_as_final(
@@ -483,7 +540,7 @@ class OpenAICompatibleModel(BaseChatModel):
             return [{"role": "system", "content": prompt}]
         first = messages[0]
         if first.get("role") == "system":
-            content = str(first.get("content") or "").strip()
+            content = content_text(first.get("content"), include_images=True).strip()
             return [
                 {
                     **first,
@@ -514,7 +571,11 @@ class OpenAICompatibleModel(BaseChatModel):
 
         item: dict[str, object] = {
             "role": role,
-            "content": str(message.content or ""),
+            "content": (
+                content_text(message.content)
+                if role in {"system", "tool"}
+                else self._openai_chat_content(message.content)
+            ),
         }
         if message.name and role != "tool":
             item["name"] = message.name
@@ -537,6 +598,29 @@ class OpenAICompatibleModel(BaseChatModel):
                 item["reasoning_content"] = reasoning_content
 
         return item
+
+    def _openai_chat_content(self, content: object) -> str | list[dict[str, object]]:
+        if content is None or isinstance(content, str):
+            return content or ""
+
+        parts: list[dict[str, object]] = []
+        for block in content_blocks(content):
+            block_type = str(block.get("type") or "").strip()
+            if block_type in {"text", "input_text"}:
+                text = block.get("text", block.get("content"))
+                if isinstance(text, str) and text:
+                    parts.append({"type": "text", "text": text})
+                continue
+            if block_type in {"image", "image_url", "input_image"}:
+                source = image_source(block)
+                if not source:
+                    continue
+                image_url: dict[str, object] = {"url": source}
+                detail = image_detail(block)
+                if detail:
+                    image_url["detail"] = detail
+                parts.append({"type": "image_url", "image_url": image_url})
+        return parts or content_text(content)
 
     def _provider_tool_calls_from_message_data(
         self,
@@ -699,17 +783,18 @@ class OpenAICompatibleModel(BaseChatModel):
         request: ModelRequest,
         state: AgentState,
     ) -> tuple[list[ZonixMessage], str]:
-        current_input = str(request.task or state.current_input or "").strip()
+        current_input = str(state.current_input or content_text(request.task)).strip()
         conversation_messages = [
             message
             for message in request.messages
-            if message.role in {"user", "assistant"} and str(message.content or "").strip()
+            if message.role in {"user", "assistant"}
+            and (content_text(message.content).strip() or has_image_content(message.content))
         ]
         if (
             conversation_messages
             and conversation_messages[-1].role == "user"
             and current_input
-            and str(conversation_messages[-1].content or "").strip() == current_input
+            and content_text(conversation_messages[-1].content).strip() == current_input
         ):
             return conversation_messages[:-1], current_input
         return conversation_messages, current_input
@@ -733,7 +818,8 @@ class OpenAICompatibleModel(BaseChatModel):
         lines: list[str] = []
         for message in recent_messages:
             role_name = "用户" if getattr(message, "role", "") == "user" else "助手"
-            lines.append(f"{role_name}: {getattr(message, 'content', '')}")
+            message_text = content_text(getattr(message, "content", ""), include_images=True)
+            lines.append(f"{role_name}: {message_text}")
         return "\n".join(lines)
 
     def _format_history(

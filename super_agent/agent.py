@@ -4,11 +4,23 @@ from pathlib import Path
 from typing import Any
 
 from agent.llm_client import OpenAICompatibleClient
-from zonix import Agent, agent as build_zonix_agent
+from zonix import Agent
+from zonix import agent as build_zonix_agent
 from zonix.tools import ToolDefinition
 
-from .model import DeployPromptModel
-from .registry import build_deploy_tools
+from .model import SuperPromptModel
+from .registry import build_super_tools
+
+
+def _attach_runtime_metadata(
+    agent: Agent,
+    *,
+    workspace: str | Path,
+    metadata: dict[str, Any] | None,
+) -> Agent:
+    agent.workspace = Path(workspace).resolve()
+    agent.tool_context_metadata = dict(metadata or {})
+    return agent
 
 
 def _tool_definitions(tools: list[ToolDefinition]) -> dict[str, dict[str, object]]:
@@ -21,18 +33,18 @@ def _tool_definitions(tools: list[ToolDefinition]) -> dict[str, dict[str, object
     }
 
 
-def build_deploy_agent(
+def build_super_agent(
     client: OpenAICompatibleClient,
     *,
     workspace: str | Path,
     tools: list[ToolDefinition] | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> Agent:
-    resolved_tools = tools if tools is not None else build_deploy_tools()
-    model = DeployPromptModel(client, workspace=workspace)
+    resolved_tools = tools if tools is not None else build_super_tools()
+    model = SuperPromptModel(client, workspace=workspace)
     agent = build_zonix_agent(
-        "deploy",
-        role="SuperCode deployment agent",
+        "super",
+        role="SuperCode super mode agent",
         model=model,
         recover_tool_input_errors=True,
     )
@@ -42,6 +54,4 @@ def build_deploy_agent(
     agent.prompt(model.build_native_protocol_prompt())
     agent.prompt(model.build_runtime_context_prompt)
     agent.use(*resolved_tools)
-    agent.workspace = Path(workspace).resolve()
-    agent.tool_context_metadata = dict(metadata or {})
-    return agent
+    return _attach_runtime_metadata(agent, workspace=workspace, metadata=metadata)

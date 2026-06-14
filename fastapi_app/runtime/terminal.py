@@ -21,6 +21,8 @@ from fastapi_app.api_models import TerminalSnapshotResponse
 MAX_TERMINAL_OUTPUT_CHARS = 300_000
 TERMINAL_CWD_TAIL_CHARS = 4096
 PIPE_READ_CHUNK_SIZE = 4096
+TERMINAL_SUBSCRIBER_BATCH_SECONDS = 0.016
+TERMINAL_SUBSCRIBER_BATCH_CHARS = 65_536
 
 
 def _hidden_windows_process_kwargs() -> dict[str, Any]:
@@ -47,11 +49,14 @@ TERMINAL_INTERRUPT_KEYS = {
     "\x03",
 }
 
+TERMINAL_ENTER_KEYS = {
+    "enter",
+    "return",
+    "newline",
+    "linefeed",
+}
+
 TERMINAL_KEY_INPUTS = {
-    "enter": "\n",
-    "return": "\n",
-    "newline": "\n",
-    "linefeed": "\n",
     "tab": "\t",
     "escape": "\x1b",
     "esc": "\x1b",
@@ -95,6 +100,17 @@ class TerminalRuntimeBase:
     lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     output_subscribers: list[Callable[[str], None]] = field(
         default_factory=list,
+        init=False,
+        repr=False,
+    )
+    subscriber_output_chunks: list[str] = field(
+        default_factory=list,
+        init=False,
+        repr=False,
+    )
+    subscriber_output_chars: int = field(default=0, init=False, repr=False)
+    subscriber_output_timer: threading.Timer | None = field(
+        default=None,
         init=False,
         repr=False,
     )
@@ -251,22 +267,25 @@ class TerminalRuntimeBase:
     def append_output(self, text: str) -> None:
         if text == "":
             return
+        batch: str | None = None
+        subscribers: list[Callable[[str], None]] = []
         with self.lock:
             self.output_buffer.append(text)
             self.recent_output_tail = (
                 f"{self.recent_output_tail}{text}"
             )[-TERMINAL_CWD_TAIL_CHARS:]
-            inferred_cwd = self._infer_current_directory(self.recent_output_tail)
+            inferred_cwd = (
+                self._infer_current_directory(self.recent_output_tail)
+                if self._should_infer_current_directory(text)
+                else None
+            )
             if inferred_cwd:
                 self.current_directory = inferred_cwd
             self.revision += 1
-            subscribers = list(self.output_subscribers)
+            batch, subscribers = self._queue_subscriber_output_locked(text)
 
-        for subscriber in subscribers:
-            try:
-                subscriber(text)
-            except Exception:
-                continue
+        if batch is not None:
+            self._deliver_subscriber_output(batch, subscribers)
 
     def _infer_current_directory(self, text: str) -> str | None:
         matches = list(self.prompt_pattern.finditer(text))
@@ -274,10 +293,70 @@ class TerminalRuntimeBase:
             return None
         return matches[-1].group("path").strip()
 
+    def _should_infer_current_directory(self, text: str) -> bool:
+        if "PS " not in self.recent_output_tail or ">" not in self.recent_output_tail:
+            return False
+        return "PS " in text or ">" in text
+
+    def _queue_subscriber_output_locked(
+        self,
+        text: str,
+    ) -> tuple[str | None, list[Callable[[str], None]]]:
+        if not self.output_subscribers:
+            return None, []
+
+        self.subscriber_output_chunks.append(text)
+        self.subscriber_output_chars += len(text)
+        if self.subscriber_output_chars >= TERMINAL_SUBSCRIBER_BATCH_CHARS:
+            timer = self.subscriber_output_timer
+            self.subscriber_output_timer = None
+            if timer is not None:
+                timer.cancel()
+            return self._take_subscriber_output_locked()
+
+        if self.subscriber_output_timer is None:
+            timer = threading.Timer(
+                TERMINAL_SUBSCRIBER_BATCH_SECONDS,
+                self._flush_subscriber_output,
+            )
+            timer.daemon = True
+            self.subscriber_output_timer = timer
+            timer.start()
+        return None, []
+
+    def _take_subscriber_output_locked(
+        self,
+    ) -> tuple[str | None, list[Callable[[str], None]]]:
+        if not self.subscriber_output_chunks:
+            self.subscriber_output_chars = 0
+            return None, []
+        batch = "".join(self.subscriber_output_chunks)
+        self.subscriber_output_chunks = []
+        self.subscriber_output_chars = 0
+        return batch, list(self.output_subscribers)
+
+    def _flush_subscriber_output(self) -> None:
+        with self.lock:
+            self.subscriber_output_timer = None
+            batch, subscribers = self._take_subscriber_output_locked()
+        if batch is not None:
+            self._deliver_subscriber_output(batch, subscribers)
+
+    def _deliver_subscriber_output(
+        self,
+        text: str,
+        subscribers: list[Callable[[str], None]],
+    ) -> None:
+        for subscriber in subscribers:
+            try:
+                subscriber(text)
+            except Exception:
+                continue
+
     def send_input(self, content: str, submit: bool = True) -> None:
         payload = content
         if submit:
-            payload += "\n"
+            payload += "\r" if self.pty_process is not None else "\n"
         self.write_raw(payload)
 
     def write_raw(self, payload: str) -> None:
@@ -315,6 +394,9 @@ class TerminalRuntimeBase:
         normalized_key = _normalize_terminal_key(key)
         if normalized_key in TERMINAL_INTERRUPT_KEYS:
             return self.interrupt()
+        if normalized_key in TERMINAL_ENTER_KEYS:
+            self.send_input("", submit=True)
+            return True
         payload = TERMINAL_KEY_INPUTS.get(normalized_key)
         if payload is None:
             raise ValueError(f"不支持的终端按键: {key}")
@@ -393,9 +475,15 @@ class TerminalRuntimeBase:
         with self.lock:
             self.output_buffer.clear()
             self.recent_output_tail = ""
+            self.subscriber_output_chunks = []
+            self.subscriber_output_chars = 0
+            if self.subscriber_output_timer is not None:
+                self.subscriber_output_timer.cancel()
+                self.subscriber_output_timer = None
             self.revision += 1
 
     def close(self) -> None:
+        self._flush_subscriber_output()
         if self.pty_process is not None:
             try:
                 self.pty_process.write("exit\n")

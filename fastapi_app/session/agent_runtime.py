@@ -14,6 +14,7 @@ from coding_agent import (
 from deploy_agent import DeployConnectionManager, build_deploy_agent, build_deploy_tools
 from fastapi_app.mcp import build_enabled_mcp_tools
 from plan_agent import build_plan_agent, build_plan_tools
+from super_agent import build_super_agent, build_super_tools
 
 from fastapi_app.agent_router import normalize_route_state
 from fastapi_app.app_config import APP_DATA_ROOT, BACKEND_BASE_URL, ROOT, normalize_reasoning_effort
@@ -80,6 +81,14 @@ def reset_phase_for_new_turn(session: Any) -> None:
 
 
 def extract_command_exit_code(output: object) -> int | None:
+    if isinstance(output, dict):
+        raw_code = output.get("return_code")
+        if raw_code is None:
+            raw_code = output.get("exit_code")
+        try:
+            return int(raw_code) if raw_code is not None else None
+        except (TypeError, ValueError):
+            return None
     if not isinstance(output, str):
         return None
     for line in output.splitlines():
@@ -175,6 +184,16 @@ def build_chat_session(
             if load_mcp_tools:
                 tools = tools + build_enabled_mcp_tools(APP_DATA_ROOT)
             agent = build_plan_agent(
+                client,
+                workspace=resolved_workspace,
+                tools=tools,
+                metadata=metadata,
+            )
+        elif agent_type == "super":
+            tools = build_super_tools()
+            if load_mcp_tools:
+                tools = tools + build_enabled_mcp_tools(APP_DATA_ROOT)
+            agent = build_super_agent(
                 client,
                 workspace=resolved_workspace,
                 tools=tools,

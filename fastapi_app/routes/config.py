@@ -12,6 +12,7 @@ from chat_agent import build_chat_agent
 from coding_agent import build_coding_agent, build_coding_tools, build_project_docs_tools
 from deploy_agent import build_deploy_agent, build_deploy_tools
 from plan_agent import build_plan_agent, build_plan_tools
+from super_agent import build_super_agent, build_super_tools
 from fastapi_app.api_models import (
     EmbeddingSettingsPayload,
     ModelConfigPayload,
@@ -19,6 +20,7 @@ from fastapi_app.api_models import (
     SwitchModelRequest,
     UIModelProviderPayload,
 )
+from fastapi_app.app_config import ROOT
 from fastapi_app.model_config_store import (
     build_agent_config,
     config_store_path,
@@ -168,6 +170,8 @@ def register_config_routes(
         resolved_workspace = resolve_workspace_path(session.workspace)
         metadata = {
             "include_thoughts_in_context": config.include_thoughts_in_context,
+            "project_root": str(ROOT),
+            "app_data_root": str(deps.app_data_root),
             "llm_client": client,
         }
         if session.agent_type == "deploy":
@@ -190,6 +194,13 @@ def register_config_routes(
             agent = build_chat_agent(
                 client,
                 workspace=resolved_workspace,
+                metadata=metadata,
+            )
+        elif session.agent_type == "super":
+            agent = build_super_agent(
+                client,
+                workspace=resolved_workspace,
+                tools=build_super_tools(),
                 metadata=metadata,
             )
         else:

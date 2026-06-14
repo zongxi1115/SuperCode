@@ -13,6 +13,7 @@ import type { KanbanAiState, KanbanCard } from '@/lib/kanban-types';
 import type {
   AgentMode,
   AppSettings,
+  ChatAttachment,
   ChatMessage,
   CodeChangeRecord,
   CompletionActionKey,
@@ -80,6 +81,7 @@ const STREAMABLE_TOOL_NAMES = [
   'apply_patch',
   'save_plan',
   'ask_plan_questions',
+  'ask_user',
 ];
 
 type ViewTransitionDocument = Document & {
@@ -463,7 +465,7 @@ function advanceKanbanPlanSteps(currentSteps: PlanStep[], toolName: string): Pla
 }
 
 function isAgentMode(value: unknown): value is AgentMode {
-  return value === 'chat' || value === 'plan' || value === 'coding' || value === 'deploy';
+  return value === 'chat' || value === 'plan' || value === 'coding' || value === 'deploy' || value === 'super';
 }
 
 function resolveAgentModeForRequest(value: unknown) {
@@ -774,6 +776,7 @@ export default function App() {
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
   const [selectedReasoningEffort, setSelectedReasoningEffort] = useState<string | null>(null);
   const [selectedAgentMode, setSelectedAgentMode] = useState<AgentMode>('auto');
+  const [isSuperAutopilotEnabled, setIsSuperAutopilotEnabled] = useState(false);
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
   const [availablePlugins, setAvailablePlugins] = useState<PluginSummary[]>([]);
   const [availableSkills, setAvailableSkills] = useState<SkillSummary[]>([]);
@@ -809,7 +812,6 @@ export default function App() {
     },
   });
   const [visualModelProviders, setVisualModelProviders] = useState<UIModelProvider[]>([]);
-  const [envModelConfigs, setEnvModelConfigs] = useState<ModelOption[]>([]);
   const [modelConfigPath, setModelConfigPath] = useState<string | null>(null);
   const [mcpServers, setMcpServers] = useState<MCPServerConfig[]>([]);
   const [mcpConfigPath, setMcpConfigPath] = useState<string | null>(null);
@@ -834,6 +836,12 @@ export default function App() {
   useEffect(() => {
     currentSessionIdRef.current = sessionId;
   }, [sessionId]);
+
+  useEffect(() => {
+    if (selectedAgentMode !== 'super') {
+      setIsSuperAutopilotEnabled(false);
+    }
+  }, [selectedAgentMode]);
 
   const applyTheme = useCallback((darkMode: boolean) => {
     document.documentElement.classList.toggle('dark', darkMode);
@@ -1404,7 +1412,6 @@ export default function App() {
     const res = await apiFetch('/api/model-configs');
     const data: ModelConfigPayload = await res.json();
     setVisualModelProviders(data.providers ?? []);
-    setEnvModelConfigs(data.envConfigs ?? []);
     setModelConfigPath(data.configPath ?? null);
     await loadAppSettings();
     await loadMcpServers();
@@ -1441,8 +1448,7 @@ export default function App() {
       .then((res) => res.json())
       .then((data: ModelConfigPayload) => {
         setVisualModelProviders(data.providers ?? []);
-        setEnvModelConfigs(data.envConfigs ?? []);
-        setModelConfigPath(data.configPath ?? null);
+            setModelConfigPath(data.configPath ?? null);
       })
       .catch(console.error);
 
@@ -1955,6 +1961,7 @@ export default function App() {
         await refreshTerminalState({
           targetSessionId: sessionId,
           includeProcesses: true,
+          includeTerminals: true,
         });
       } catch (error) {
         console.error(error);
@@ -2188,8 +2195,7 @@ export default function App() {
         throw new Error(String(data.detail ?? '保存模型配置失败'));
       }
       setVisualModelProviders(data.providers ?? []);
-      setEnvModelConfigs(data.envConfigs ?? []);
-      setModelConfigPath(data.configPath ?? null);
+        setModelConfigPath(data.configPath ?? null);
       await loadModels();
     },
     [loadModels],
@@ -2317,6 +2323,7 @@ export default function App() {
     streamSessionId,
     initialAssistantId,
     userVisibleMessage,
+    userVisibleAttachments,
     clearComposer,
     onSessionStateChange,
     onPlanStepsChange,
@@ -2330,6 +2337,7 @@ export default function App() {
     streamSessionId: string;
     initialAssistantId?: string | null;
     userVisibleMessage?: string | null;
+    userVisibleAttachments?: ChatAttachment[];
     clearComposer?: boolean;
     onSessionStateChange?: (payload: Partial<SessionContextPayload>) => void;
     onPlanStepsChange?: (steps: PlanStep[]) => void;
@@ -2344,8 +2352,16 @@ export default function App() {
       setInput('');
       setElementAttachments([]);
     }
-    if (userVisibleMessage) {
-      setMessages((prev) => [...prev, { id: Math.random().toString(), role: 'user', content: userVisibleMessage }]);
+    if (userVisibleMessage || (userVisibleAttachments?.length ?? 0) > 0) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: Math.random().toString(),
+          role: 'user',
+          content: userVisibleMessage ?? '',
+          attachments: userVisibleAttachments,
+        },
+      ]);
     }
 
     setIsLoading(true);
@@ -3579,11 +3595,20 @@ export default function App() {
     setComposerFocusRevision((current) => current + 1);
   }, []);
 
-  const sendMessage = async (msg: string, elements?: { selector: string; html: string; sourceUrl?: string }[]) => {
-    if ((!msg.trim() && (!elements || elements.length === 0)) || !sessionId || isLoading) return;
+  const sendMessage = async (
+    msg: string,
+    elements?: { selector: string; html: string; sourceUrl?: string }[],
+    attachments?: ChatAttachment[],
+  ) => {
+    const messageAttachments = attachments ?? [];
+    if (
+      (!msg.trim() && (!elements || elements.length === 0) && messageAttachments.length === 0) ||
+      !sessionId ||
+      isLoading
+    ) return;
 
     const selectedSkills = extractSelectedSkillIds(msg);
-    let finalMsg = msg.trim() || '请修改这个元素';
+    let finalMsg = msg.trim() || (elements?.length ? '请修改这个元素' : '请分析这些附件');
     if (elements && elements.length > 0) {
       const elementContext = elements.map((el, i) => {
         const urlPart = el.sourceUrl ? `\n来源页面: ${el.sourceUrl}` : '';
@@ -3602,10 +3627,13 @@ export default function App() {
         message: finalMsg,
         execution_mode: currentSessionExecutionMode === 'worktree' ? 'worktree' : newSessionExecutionMode,
         agent_mode: resolveAgentModeForRequest(selectedAgentMode) ?? 'auto',
+        super_autopilot: selectedAgentMode === 'super' && isSuperAutopilotEnabled,
         skills: selectedSkills,
+        attachments: messageAttachments,
       },
       streamSessionId: sessionId,
       userVisibleMessage: finalMsg,
+      userVisibleAttachments: messageAttachments.length > 0 ? messageAttachments : undefined,
       clearComposer: true,
     });
   };
@@ -4379,7 +4407,13 @@ export default function App() {
           void sendMessage(content, elementAttachments.length > 0 ? elementAttachments : undefined);
         }}
         onKeyDown={handleKeyDown}
-        onSendMessage={() => void sendMessage(input, elementAttachments.length > 0 ? elementAttachments : undefined)}
+        onSendMessage={(attachments) =>
+          void sendMessage(
+            input,
+            elementAttachments.length > 0 ? elementAttachments : undefined,
+            attachments,
+          )
+        }
         availableSkills={availableSkills}
         onStopMessage={stopMessage}
         onResolveDeleteConfirmation={resolveDeleteConfirmation}
@@ -4389,6 +4423,8 @@ export default function App() {
         onViewPlan={openPlanDraftPanel}
         onClosePlanSteps={handleClosePlanSteps}
         agentMode={selectedAgentMode}
+        superAutopilotEnabled={selectedAgentMode === 'super' && isSuperAutopilotEnabled}
+        onSuperAutopilotChange={setIsSuperAutopilotEnabled}
         onAgentModeChange={setSelectedAgentMode}
         elementAttachments={elementAttachments}
         onRemoveElementAttachment={(id) => setElementAttachments((prev) => prev.filter((e) => e.id !== id))}
@@ -4562,7 +4598,6 @@ export default function App() {
         open={isModelConfigOpen}
         onOpenChange={setIsModelConfigOpen}
         providers={visualModelProviders}
-        envConfigs={envModelConfigs}
         configPath={modelConfigPath}
         mcpServers={mcpServers}
         mcpConfigPath={mcpConfigPath}

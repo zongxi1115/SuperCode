@@ -95,6 +95,21 @@ export type ContentBlock =
   | { type: 'text'; text: string }
   | { type: 'data'; dataType: string; data: unknown };
 
+export type ChatAttachment = {
+  id: string;
+  type: 'image' | 'file';
+  filename: string;
+  mediaType: string;
+  dataUrl?: string;
+  storedPath?: string;
+  absolutePath?: string;
+};
+
+export type ChatImageAttachment = ChatAttachment & {
+  type: 'image';
+  dataUrl: string;
+};
+
 export type ChatMessage = {
   id: string;
   role: 'user' | 'assistant';
@@ -108,6 +123,7 @@ export type ChatMessage = {
   thoughts?: string;
   toolCalls?: ToolCallRecord[];
   parts?: ContentBlock[];
+  attachments?: ChatAttachment[];
   thinkingTime?: number; // 思考时间（秒）
   startTime?: number; // 当前流式回复开始时间戳（毫秒）
 };
@@ -298,7 +314,7 @@ export type SessionPayload = {
   taskState?: TaskState;
 };
 
-export type AgentMode = 'auto' | 'chat' | 'plan' | 'coding' | 'deploy';
+export type AgentMode = 'auto' | 'chat' | 'plan' | 'coding' | 'deploy' | 'super';
 
 export interface LastSession {
   workspace: string;

@@ -13,11 +13,10 @@ from fastapi.responses import JSONResponse
 from fastapi_app.api_models import CreateTerminalRequest, TerminalControlRequest, TerminalInputRequest
 from fastapi_app.runtime.terminal import TerminalRuntime
 
-TERMINAL_WS_INITIAL_REPLAY_MAX_CHARS = 64_000
-TERMINAL_WS_OUTPUT_CHUNK_CHARS = 8_192
-TERMINAL_WS_LIVE_BATCH_CHARS = 16_384
+TERMINAL_WS_INITIAL_REPLAY_MAX_CHARS = 48_000
+TERMINAL_WS_OUTPUT_CHUNK_CHARS = 32_768
+TERMINAL_WS_LIVE_BATCH_CHARS = 65_536
 MANAGED_PROCESS_OUTPUT_TAIL_CHARS = 64_000
-MANAGED_PROCESS_TERMINAL_HISTORY_LIMIT = 20
 
 
 @dataclass(frozen=True)
@@ -116,8 +115,8 @@ def register_terminal_routes(
             })
         if session.interactive_command_session is not None:
             for proc in session.interactive_command_session.list_managed_processes(
-                only_active=False
-            )[:MANAGED_PROCESS_TERMINAL_HISTORY_LIMIT]:
+                only_active=True
+            ):
                 terminals.append({
                     "terminalId": proc["terminalId"],
                     "name": proc["terminalId"],

@@ -18,21 +18,84 @@ def is_subagent_record(record: dict[str, Any]) -> bool:
     return str(record.get("agentScope", record.get("agent_scope")) or "").strip() == SUBAGENT_SCOPE
 
 
-def ensure_user_message_recorded(session: Any, user_message: str) -> None:
+def ensure_user_message_recorded(
+    session: Any,
+    user_message: str,
+    attachments: list[dict[str, Any]] | None = None,
+) -> None:
     cleaned_message = user_message.strip()
-    if not cleaned_message:
+    normalized_attachments = _normalize_history_attachments(attachments)
+    if not cleaned_message and not normalized_attachments:
         return
     last_message = session.history_messages[-1] if session.history_messages else None
     if (
         isinstance(last_message, dict)
         and last_message.get("role") == "user"
         and str(last_message.get("content", "")).strip() == cleaned_message
+        and _normalize_history_attachments(last_message.get("attachments")) == normalized_attachments
     ):
         return
-    session.history_messages.append(
-        {"id": uuid.uuid4().hex, "role": "user", "content": cleaned_message}
-    )
+    message = {"id": uuid.uuid4().hex, "role": "user", "content": cleaned_message}
+    if normalized_attachments:
+        message["attachments"] = normalized_attachments
+    session.history_messages.append(message)
     session.touch()
+
+
+def _normalize_history_attachments(raw_attachments: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_attachments, list):
+        return []
+    attachments: list[dict[str, Any]] = []
+    for item in raw_attachments:
+        if not isinstance(item, dict):
+            continue
+        data_url = str(item.get("dataUrl") or item.get("data_url") or item.get("url") or "").strip()
+        stored_path = str(item.get("storedPath") or item.get("stored_path") or "").strip()
+        media_type = str(item.get("mediaType") or item.get("media_type") or "").strip()
+        if not data_url and not stored_path:
+            continue
+        if not media_type and data_url.startswith("data:image/"):
+            media_type = data_url.split(";", 1)[0].removeprefix("data:")
+        attachment_type = str(item.get("type") or "").strip()
+        if attachment_type not in {"image", "file"}:
+            attachment_type = "image" if media_type.startswith("image/") else "file"
+        normalized = {
+            "id": str(item.get("id") or ""),
+            "type": attachment_type,
+            "filename": str(item.get("filename") or item.get("name") or ""),
+            "mediaType": media_type or "application/octet-stream",
+        }
+        if data_url:
+            normalized["dataUrl"] = data_url
+        if stored_path:
+            normalized["storedPath"] = stored_path
+        absolute_path = str(item.get("absolutePath") or item.get("absolute_path") or "").strip()
+        if absolute_path:
+            normalized["absolutePath"] = absolute_path
+        size = item.get("size")
+        if isinstance(size, int):
+            normalized["size"] = size
+        attachments.append(normalized)
+    return attachments
+
+
+def _uploaded_files_prompt_from_history(raw_attachments: Any) -> str:
+    attachments = [
+        attachment
+        for attachment in _normalize_history_attachments(raw_attachments)
+        if str(attachment.get("storedPath") or "").strip()
+    ]
+    if not attachments:
+        return ""
+    lines = ["用户上传了文件，已保存到工作区以下路径："]
+    for index, attachment in enumerate(attachments, start=1):
+        filename = str(attachment.get("filename") or "attachment").strip()
+        media_type = str(attachment.get("mediaType") or "application/octet-stream").strip()
+        stored_path = str(attachment.get("storedPath") or "").strip()
+        size = attachment.get("size")
+        size_text = f", {size} bytes" if isinstance(size, int) else ""
+        lines.append(f"{index}. {filename} ({media_type}{size_text}): {stored_path}")
+    return "\n".join(lines)
 
 
 def update_assistant_history_message(
@@ -347,6 +410,11 @@ def build_assistant_tool_trace_summary(message: dict[str, Any]) -> str:
 def model_content_from_history_message(message: dict[str, Any]) -> str:
     role = str(message.get("role", ""))
     content = str(message.get("content", "") or "").strip()
+    if role == "user" and not is_subagent_record(message):
+        uploaded_files_prompt = _uploaded_files_prompt_from_history(message.get("attachments"))
+        if uploaded_files_prompt and "用户上传了文件，已保存到工作区以下路径：" not in content:
+            return "\n\n".join(part for part in [content, uploaded_files_prompt] if part)
+        return content
     if role != "assistant" or is_subagent_record(message):
         return content
 
@@ -371,7 +439,8 @@ def seed_chat_session_history(
         if role not in {"user", "assistant"} or is_subagent_record(message):
             continue
         content = model_content_from_history_message(message)
-        if not content.strip():
+        attachments = _normalize_history_attachments(message.get("attachments")) if role == "user" else []
+        if not content.strip() and not attachments:
             continue
         conversation_messages.append(
             ConversationMessage(
@@ -382,6 +451,7 @@ def seed_chat_session_history(
                     if role == "assistant"
                     else None
                 ) or None,
+                attachments=attachments,
             )
         )
     chat_session.state.conversation_messages = conversation_messages
@@ -707,7 +777,7 @@ def update_plan_steps_for_tool(session: Any, step_index: int | None, tool_name: 
             session.plan_steps[0]["description"] = "已发起部署连接，等待用户填写部署目标信息。"
         elif tool_name in {"list_files", "read_file"} and steps_len > 1:
             session.plan_steps[1]["description"] = "正在读取部署目录、配置文件和发布脚本。"
-        elif tool_name in {"transfer_files", "execute"} and steps_len > 2:
+        elif tool_name in {"transfer_files", "execute", "excecute", "run_command"} and steps_len > 2:
             session.plan_steps[2]["description"] = "正在同步文件或执行部署命令，并收集结果。"
         return
 
@@ -715,7 +785,17 @@ def update_plan_steps_for_tool(session: Any, step_index: int | None, tool_name: 
         session.plan_steps[1]["description"] = "已进入代码探索，正在读取结构、文件和引用关系。"
     elif tool_name in {"write_file", "replace_file"} and steps_len > 2:
         session.plan_steps[2]["description"] = "已开始落地修改，准备把变更写回工作区。"
-    elif tool_name in {"execute", "excecute", "terminal_input", "terminal_wait"} and steps_len > 3:
+    elif tool_name in {
+        "execute",
+        "excecute",
+        "run_command",
+        "start_task",
+        "terminal_input",
+        "terminal_wait",
+        "task_input",
+        "task_wait",
+        "task_stop",
+    } and steps_len > 3:
         session.plan_steps[3]["description"] = "正在执行命令并收集终端输出。"
 
 
@@ -734,6 +814,9 @@ def extract_terminal_output(output: object) -> str | None:
     if isinstance(output, str):
         return output
     if isinstance(output, dict):
+        terminal_output = output.get("terminal_output")
+        if isinstance(terminal_output, str):
+            return terminal_output
         full_output = output.get("full_output")
         if isinstance(full_output, str):
             return full_output

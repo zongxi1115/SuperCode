@@ -718,6 +718,7 @@ class InteractiveCommandSession:
         )
         return {
             "terminal_id": active_command.terminal_id,
+            "task_id": active_command.terminal_id,
             "status": status,
             "exit_reason": resolved_exit_reason,
             "command": active_command.command,
@@ -1012,7 +1013,28 @@ def _get_interactive_command_session(ctx: ToolContext) -> InteractiveCommandSess
     return None
 
 
-def _run_one_shot_command(command: str, timeout: int, workspace: Path) -> str:
+def _format_one_shot_output(
+    *,
+    exit_code: int | None,
+    stdout: str,
+    stderr: str,
+) -> str:
+    return "\n".join(
+        [
+            f"exit_code: {exit_code}",
+            "stdout:",
+            stdout or "(empty)",
+            "stderr:",
+            stderr or "(empty)",
+        ]
+    )
+
+
+def _run_one_shot_command(
+    command: str,
+    timeout: int,
+    workspace: Path,
+) -> dict[str, object]:
     process = subprocess.Popen(
         _build_powershell_utf8_command(command),
         cwd=workspace,
@@ -1026,24 +1048,65 @@ def _run_one_shot_command(command: str, timeout: int, workspace: Path) -> str:
 
     try:
         stdout, stderr = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
+    except subprocess.TimeoutExpired:
         _kill_process_tree(process)
         try:
-            process.communicate(timeout=5)
+            stdout, stderr = process.communicate(timeout=5)
         except subprocess.TimeoutExpired:
+            stdout, stderr = "", ""
             pass
-        raise TimeoutError(f"命令执行超时（>{timeout} 秒）: {command}") from exc
+        stdout = stdout.strip()
+        stderr = stderr.strip()
+        full_output = _format_one_shot_output(
+            exit_code=process.returncode,
+            stdout=stdout,
+            stderr=stderr,
+        )
+        return {
+            "status": "timed_out",
+            "exit_reason": "timeout",
+            "command": command,
+            "timeout": timeout,
+            "return_code": process.returncode,
+            "stdout": stdout,
+            "stderr": stderr,
+            "full_output": full_output,
+            "terminal_output": full_output,
+            "terminated": True,
+        }
 
     stdout = stdout.strip()
     stderr = stderr.strip()
-    lines = [
-        f"exit_code: {process.returncode}",
-        "stdout:",
-        stdout or "(empty)",
-        "stderr:",
-        stderr or "(empty)",
-    ]
-    return "\n".join(lines)
+    full_output = _format_one_shot_output(
+        exit_code=process.returncode,
+        stdout=stdout,
+        stderr=stderr,
+    )
+    return {
+        "status": "completed" if process.returncode == 0 else "failed",
+        "exit_reason": "completed" if process.returncode == 0 else "failed",
+        "command": command,
+        "return_code": process.returncode,
+        "stdout": stdout,
+        "stderr": stderr,
+        "full_output": full_output,
+        "terminal_output": full_output,
+    }
+
+
+def run_command(
+    ctx: ToolContext,
+    content: str,
+    timeout: int,
+) -> dict[str, object]:
+    """执行短命令。timeout 是硬边界；超时会终止整棵进程树。"""
+
+    command = content.strip()
+    parsed_timeout = _parse_timeout(timeout)
+    if not command:
+        raise ValueError("命令内容不能为空。")
+    _validate_command(command)
+    return _run_one_shot_command(command, parsed_timeout, Path(ctx.workspace or "."))
 
 
 def execute(
@@ -1051,25 +1114,42 @@ def execute(
     content: str,
     timeout: int,
     terminal_id: str = "",
-) -> str | dict[str, object]:
-    """在工作区内执行命令；持续运行时返回 terminal_id，可继续输入或等待。"""
+) -> dict[str, object]:
+    """兼容旧工具名：执行短命令。timeout 是硬边界；长任务请用 start_task。"""
+
+    parsed_terminal_id = _parse_terminal_id(terminal_id)
+    if parsed_terminal_id is not None:
+        raise ValueError("execute 不再接续活动任务；请改用 task_input 或 task_wait。")
+    return run_command(ctx, content=content, timeout=timeout)
+
+
+def start_task(
+    ctx: ToolContext,
+    content: str,
+    timeout: int,
+    task_id: str = "",
+) -> dict[str, object]:
+    """启动长任务或可交互命令；返回 task_id/terminal_id，用户可在终端面板介入。"""
 
     command = content.strip()
     parsed_timeout = _parse_timeout(timeout)
-    parsed_terminal_id = _parse_terminal_id(terminal_id)
+    parsed_task_id = _parse_terminal_id(task_id)
     if not command:
         raise ValueError("命令内容不能为空。")
     _validate_command(command)
 
     interactive_session = _get_interactive_command_session(ctx)
-    if interactive_session is not None:
-        return interactive_session.start_command(
-            command,
-            parsed_timeout,
-            terminal_id=parsed_terminal_id,
-        )
+    if interactive_session is None:
+        raise RuntimeError("当前会话没有可管理长任务的终端运行时。")
 
-    return _run_one_shot_command(command, parsed_timeout, Path(ctx.workspace or "."))
+    result = interactive_session.start_command(
+        command,
+        parsed_timeout,
+        terminal_id=parsed_task_id,
+    )
+    if isinstance(result, dict) and "terminal_id" in result:
+        result["task_id"] = result["terminal_id"]
+    return result
 
 
 def _resolve_terminal_input(
@@ -1154,13 +1234,73 @@ def terminal_wait(
     )
 
 
+def task_input(
+    ctx: ToolContext,
+    timeout: int,
+    content: str = "",
+    key: str = "",
+    task_id: str = "",
+    submit: bool = True,
+) -> dict[str, object]:
+    """向 start_task 创建的长任务发送输入或按键。"""
+
+    return terminal_input(
+        ctx,
+        timeout=timeout,
+        content=content,
+        key=key,
+        terminal_id=task_id,
+        submit=submit,
+    )
+
+
+def task_wait(
+    ctx: ToolContext,
+    timeout: int,
+    task_id: str = "",
+) -> dict[str, object]:
+    """等待 start_task 创建的长任务，并返回新增输出或最终结果。"""
+
+    return terminal_wait(ctx, timeout=timeout, terminal_id=task_id)
+
+
+def task_stop(
+    ctx: ToolContext,
+    task_id: str = "",
+) -> dict[str, Any]:
+    """终止 start_task 创建的长任务。"""
+
+    parsed_task_id = _parse_terminal_id(task_id)
+    interactive_session = _get_interactive_command_session(ctx)
+    if interactive_session is None:
+        raise RuntimeError("当前会话没有可终止的长任务。")
+
+    if parsed_task_id is None:
+        active_processes = interactive_session.list_managed_processes(only_active=True)
+        if len(active_processes) != 1:
+            available = ", ".join(
+                str(process.get("terminalId") or "")
+                for process in active_processes
+                if str(process.get("terminalId") or "").strip()
+            )
+            raise RuntimeError(
+                "请显式传入 task_id。"
+                + (f"可用 task_id: {available}" if available else "当前没有活动长任务。")
+            )
+        parsed_task_id = str(active_processes[0].get("terminalId") or "").strip()
+
+    result = interactive_session.terminate_command(parsed_task_id)
+    result["task_id"] = result.get("terminalId") or parsed_task_id
+    return result
+
+
 def excecute(
     ctx: ToolContext,
     content: str,
     timeout: int,
     terminal_id: str = "",
-) -> str | dict[str, object]:
-    """在工作区内执行命令；兼容旧拼写，与 execute 同义。"""
+) -> dict[str, object]:
+    """兼容旧拼写，与 execute 同义。"""
 
     return execute(ctx, content=content, timeout=timeout, terminal_id=terminal_id)
 

@@ -34,6 +34,7 @@ def build_plan_agent(
         "plan",
         role="SuperCode planning agent",
         model=model,
+        recover_tool_input_errors=True,
     )
     agent.prompt(model._build_base_prompt())
     agent.prompt(model._build_system_info())

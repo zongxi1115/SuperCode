@@ -45,6 +45,7 @@ from fastapi_app.routes.file import FileRouteDeps, register_file_routes
 from fastapi_app.routes.git import GitRouteDeps, register_git_routes
 from fastapi_app.kanban_store import KanbanStore
 from fastapi_app.routes.plugin import PluginRouteDeps, register_plugin_routes
+from fastapi_app.routes.preview_proxy import register_preview_proxy_routes
 from fastapi_app.routes.misc import MiscRouteDeps, register_misc_routes
 from fastapi_app.routes.mcp import MCPRouteDeps, register_mcp_routes
 from fastapi_app.session_history import (
@@ -206,6 +207,8 @@ register_file_routes(
         require_session=require_session,
     ),
 )
+
+register_preview_proxy_routes(app)
 
 register_git_routes(
     app,

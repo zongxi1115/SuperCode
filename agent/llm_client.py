@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import socket
 import ssl
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -105,6 +107,12 @@ class OpenAICompatibleClient:
         tools: list[dict[str, object]] | None = None,
         tool_choice: str | dict[str, object] | None = None,
     ) -> CompletionResponse:
+        if self._uses_anthropic_api():
+            return self._anthropic_chat_completion_messages(
+                messages,
+                tools=tools,
+                tool_choice=tool_choice,
+            )
         if self._uses_responses_api():
             return self._responses_chat_completion_messages(
                 messages,
@@ -126,6 +134,29 @@ class OpenAICompatibleClient:
         on_reasoning_delta: Callable[[str], None] | None = None,
         on_tool_call_delta: Callable[[CompletionToolCallDelta], None] | None = None,
     ) -> CompletionResponse:
+        if self._uses_anthropic_api():
+            completion = self._anthropic_chat_completion_messages(
+                messages,
+                tools=tools,
+                tool_choice=tool_choice,
+            )
+            if completion.reasoning_text and on_reasoning_delta is not None:
+                on_reasoning_delta(completion.reasoning_text)
+            if completion.text and on_text_delta is not None:
+                on_text_delta(completion.text)
+            for index, tool_call in enumerate(completion.tool_calls):
+                if on_tool_call_delta is not None:
+                    on_tool_call_delta(
+                        CompletionToolCallDelta(
+                            index=index,
+                            id=tool_call.id,
+                            name=tool_call.name,
+                            arguments_delta=tool_call.arguments,
+                            arguments=tool_call.arguments,
+                        )
+                    )
+            return completion
+
         if self._uses_responses_api():
             return self._responses_chat_stream_completion_messages(
                 messages,
@@ -349,6 +380,150 @@ class OpenAICompatibleClient:
                 tool_calls=self._finalize_stream_tool_calls(tool_call_buffers),
                 finish_reason=finish_reason,
             )
+
+    def _anthropic_chat_completion_messages(
+        self,
+        messages: list[dict[str, object]],
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: str | dict[str, object] | None = None,
+    ) -> CompletionResponse:
+        del tool_choice
+
+        def run_request() -> Any:
+            from zonix.models import Anthropic
+            from zonix.models.base import ModelRequest
+
+            return Anthropic(
+                model=self.config.model,
+                api_key=self.config.api_key,
+                base_url=self._anthropic_base_url(),
+            ).complete(
+                ModelRequest(
+                    messages=self._zonix_messages_from_provider_messages(messages),
+                    tools=tools or [],
+                )
+            )
+
+        response = self._run_provider_coroutine(run_request)
+        usage = getattr(response, "usage", None)
+        self._log_usage(usage.model_dump() if hasattr(usage, "model_dump") else None)
+
+        return CompletionResponse(
+            text=str(getattr(response, "text", "") or "").strip(),
+            reasoning_text=self._reasoning_text_from_zonix_response(response),
+            tool_calls=[
+                CompletionToolCall(
+                    id=str(getattr(call, "call_id", "") or ""),
+                    name=str(getattr(call, "tool", "") or ""),
+                    arguments=json.dumps(getattr(call, "input", {}) or {}, ensure_ascii=False),
+                )
+                for call in getattr(response, "tool_calls", []) or []
+                if str(getattr(call, "tool", "") or "").strip()
+            ],
+            finish_reason=getattr(response, "finish_reason", None)
+            if isinstance(getattr(response, "finish_reason", None), str)
+            else None,
+            response_items=self._anthropic_response_items_from_zonix_response(response),
+        )
+
+    def _run_provider_coroutine(self, factory: Callable[[], Any]) -> Any:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(factory())
+
+        result: dict[str, Any] = {}
+
+        def run() -> None:
+            try:
+                result["value"] = asyncio.run(factory())
+            except BaseException as exc:  # noqa: BLE001 - re-raised in caller thread
+                result["error"] = exc
+
+        thread = threading.Thread(target=run, name="anthropic-provider-request", daemon=True)
+        thread.start()
+        thread.join()
+        if "error" in result:
+            raise result["error"]
+        return result.get("value")
+
+    def _zonix_messages_from_provider_messages(self, messages: list[dict[str, object]]) -> list[Any]:
+        from zonix.types import Message as ZonixMessage
+
+        converted: list[Any] = []
+        for message in messages:
+            role = str(message.get("role", "")).strip().lower()
+            if role == "developer":
+                role = "system"
+            if role not in {"system", "user", "assistant", "tool"}:
+                continue
+            converted.append(
+                ZonixMessage(
+                    role=role,
+                    content=message.get("content"),  # type: ignore[arg-type]
+                    name=str(message.get("name") or "").strip() or None,
+                    tool_call_id=str(message.get("tool_call_id") or message.get("id") or "").strip() or None,
+                    data=self._zonix_message_data_from_provider_message(message),
+                )
+            )
+        return converted
+
+    def _zonix_message_data_from_provider_message(self, message: dict[str, object]) -> dict[str, Any]:
+        data: dict[str, Any] = {}
+        raw_tool_calls = message.get("tool_calls")
+        if isinstance(raw_tool_calls, list):
+            tool_calls: list[dict[str, Any]] = []
+            for item in raw_tool_calls:
+                if not isinstance(item, dict):
+                    continue
+                function = item.get("function")
+                if not isinstance(function, dict):
+                    continue
+                name = str(function.get("name") or "").strip()
+                if not name:
+                    continue
+                raw_arguments = function.get("arguments")
+                parsed_arguments: Any = raw_arguments
+                if isinstance(raw_arguments, str):
+                    try:
+                        parsed_arguments = json.loads(raw_arguments)
+                    except json.JSONDecodeError:
+                        parsed_arguments = raw_arguments
+                tool_calls.append(
+                    {
+                        "call_id": str(item.get("id") or f"tool-call-{len(tool_calls)}"),
+                        "tool": name,
+                        "input": parsed_arguments if isinstance(parsed_arguments, dict) else {"value": parsed_arguments},
+                    }
+                )
+            if tool_calls:
+                data["tool_calls"] = tool_calls
+        return data
+
+    def _reasoning_text_from_zonix_response(self, response: Any) -> str:
+        message_data = getattr(response, "message_data", None)
+        if not isinstance(message_data, dict):
+            return ""
+        reasoning = message_data.get("reasoning")
+        if not isinstance(reasoning, list):
+            return ""
+        parts: list[str] = []
+        for item in reasoning:
+            if not isinstance(item, dict):
+                continue
+            text = item.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+        return "".join(parts).strip()
+
+    def _anthropic_response_items_from_zonix_response(self, response: Any) -> list[dict[str, object]]:
+        message_data = getattr(response, "message_data", None)
+        if not isinstance(message_data, dict):
+            return []
+        content = message_data.get("anthropic_content")
+        if not isinstance(content, list):
+            return []
+        return [item for item in content if isinstance(item, dict)]
 
     def _responses_chat_completion_messages(
         self,
@@ -692,13 +867,13 @@ class OpenAICompatibleClient:
                         input_items.append(self._deep_clone_dict(item))
                 continue
 
-            content = self._flatten_content(message.get("content")).strip()
-            if content:
+            content_payload = self._responses_message_content(message.get("content"))
+            if content_payload:
                 input_items.append(
                     {
                         "type": "message",
                         "role": role,
-                        "content": content,
+                        "content": content_payload,
                     }
                 )
 
@@ -1272,6 +1447,54 @@ class OpenAICompatibleClient:
                 parts.append(text)
         return "".join(parts)
 
+    def _responses_message_content(self, value: object) -> str | list[dict[str, object]]:
+        if isinstance(value, str):
+            return value.strip()
+        if not isinstance(value, list):
+            return ""
+
+        parts: list[dict[str, object]] = []
+        for item in value:
+            if isinstance(item, str):
+                if item:
+                    parts.append({"type": "input_text", "text": item})
+                continue
+            if not isinstance(item, dict):
+                continue
+            block_type = str(item.get("type") or "").strip()
+            if block_type in {"text", "input_text"}:
+                text = item.get("text", item.get("content"))
+                if isinstance(text, str) and text:
+                    parts.append({"type": "input_text", "text": text})
+                continue
+            if block_type in {"image", "image_url", "input_image"}:
+                image_url = self._image_url_from_content_block(item)
+                if not image_url:
+                    continue
+                part: dict[str, object] = {"type": "input_image", "image_url": image_url}
+                detail = item.get("detail")
+                nested_image_url = item.get("image_url")
+                if not isinstance(detail, str) and isinstance(nested_image_url, dict):
+                    detail = nested_image_url.get("detail")
+                if isinstance(detail, str) and detail:
+                    part["detail"] = detail
+                parts.append(part)
+        return parts or self._flatten_content(value).strip()
+
+    def _image_url_from_content_block(self, item: dict[str, object]) -> str:
+        for key in ("image", "url", "data_url", "dataUrl"):
+            value = item.get(key)
+            if isinstance(value, str) and value:
+                return value
+        image_url = item.get("image_url")
+        if isinstance(image_url, str):
+            return image_url
+        if isinstance(image_url, dict):
+            url = image_url.get("url")
+            if isinstance(url, str):
+                return url
+        return ""
+
     def _flatten_response_output_text(self, output_items: list[dict[str, object]]) -> str:
         parts: list[str] = []
         for item in output_items:
@@ -1412,6 +1635,15 @@ class OpenAICompatibleClient:
         model_lower = self.config.model.lower()
         base_url_lower = self.config.base_url.lower()
         return "deepseek" in model_lower or "deepseek" in base_url_lower
+
+    def _uses_anthropic_api(self) -> bool:
+        return str(getattr(self.config, "provider", "") or "").strip().lower() == "anthropic"
+
+    def _anthropic_base_url(self) -> str:
+        normalized = self.config.base_url.rstrip("/")
+        if normalized.endswith("/v1"):
+            return normalized[:-3].rstrip("/")
+        return normalized
 
     def _uses_responses_api(self, api_url: str | None = None) -> bool:
         if api_url is not None:

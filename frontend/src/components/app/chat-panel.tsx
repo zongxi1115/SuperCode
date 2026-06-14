@@ -103,11 +103,6 @@ import {
   TaskTrigger,
 } from "@/components/ai-elements/task";
 import {
-  Attachments,
-  Attachment,
-  AttachmentPreview,
-  AttachmentInfo,
-  AttachmentRemove,
   type AttachmentData,
 } from "@/components/ai-elements/attachments";
 import {
@@ -122,7 +117,7 @@ import {
   ModelSelectorName,
   ModelSelectorLogo,
 } from "@/components/ai-elements/model-selector";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import {
   Tooltip,
   TooltipContent,
@@ -136,6 +131,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { getShikiLanguage } from "@/lib/app-utils";
 import {
   buildPlanDraftMarkdown,
@@ -146,6 +142,7 @@ import {
 import { getFileIcon } from "@/lib/file-icons";
 import type {
   AgentMode,
+  ChatAttachment,
   ChatMessage,
   CodeChangeRecord,
   CompletionActionKey,
@@ -166,7 +163,7 @@ import {
   DatabaseIcon,
   FileCodeIcon,
   FileSearchIcon,
-  FileText,
+  FileText as FileTextIcon,
   FolderOpenIcon,
   GitBranch,
   GitCommitHorizontal,
@@ -194,6 +191,7 @@ import {
   BotIcon,
   MessageSquareIcon,
   MemoryStick,
+  SparklesIcon,
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import type React from "react";
@@ -207,12 +205,22 @@ import {
   useId,
   useLayoutEffect,
 } from "react";
+import { createPortal } from "react-dom";
 
 type ElementAttachment = {
   id: string;
   selector: string;
   html: string;
   sourceUrl?: string;
+};
+
+type ComposerAttachment = AttachmentData & {
+  type: "file";
+  filename: string;
+  mediaType: string;
+  url: string;
+  dataUrl: string;
+  attachmentType: ChatAttachment["type"];
 };
 
 type ChatPanelProps = {
@@ -234,7 +242,7 @@ type ChatPanelProps = {
   onContextOpenChange: (open: boolean) => void;
   onInputChange: (value: string) => void;
   onKeyDown: (e: React.KeyboardEvent<HTMLElement>) => void;
-  onSendMessage: () => void;
+  onSendMessage: (attachments?: ChatAttachment[]) => void;
   onStopMessage: () => void;
   onResolveDeleteConfirmation: (toolCallId: string, approved: boolean) => void;
   onResolveGitConfirmation: (
@@ -253,6 +261,8 @@ type ChatPanelProps = {
   onViewPlan?: (title: string, markdown: string) => void;
   onClosePlanSteps?: () => void | Promise<void>;
   agentMode: AgentMode;
+  superAutopilotEnabled: boolean;
+  onSuperAutopilotChange: (enabled: boolean) => void;
   onAgentModeChange: (mode: AgentMode) => void;
   onModelChange: (modelId: string) => void;
   onReasoningEffortChange: (reasoningEffort: string) => void;
@@ -306,6 +316,11 @@ const TOOL_ICONS: Record<string, React.ReactNode> = {
   apply_patch: <PencilIcon className="size-4" />,
   replace_file: <PencilIcon className="size-4" />,
   delete_file: <Trash2Icon className="size-4" />,
+  run_command: <TerminalIcon className="size-4" />,
+  start_task: <TerminalIcon className="size-4" />,
+  task_input: <TerminalIcon className="size-4" />,
+  task_wait: <TerminalIcon className="size-4" />,
+  task_stop: <TerminalIcon className="size-4" />,
   execute: <TerminalIcon className="size-4" />,
   excecute: <TerminalIcon className="size-4" />,
   terminal_input: <TerminalIcon className="size-4" />,
@@ -313,8 +328,9 @@ const TOOL_ICONS: Record<string, React.ReactNode> = {
   git_commit: <GitCommitHorizontal className="size-4" />,
   git_log: <GitBranch className="size-4" />,
   git_tag: <Tag className="size-4" />,
-  ask_plan_questions: <FileText className="size-4" />,
-  save_plan: <FileText className="size-4" />,
+  ask_plan_questions: <FileTextIcon className="size-4" />,
+  ask_user: <FileTextIcon className="size-4" />,
+  save_plan: <FileTextIcon className="size-4" />,
   create_task: <ListChecks className="size-4" />,
   get_task_status: <ListChecks className="size-4" />,
   finish_task: <ListChecks className="size-4" />,
@@ -450,6 +466,11 @@ const TOOL_TITLES: Record<string, (args: Record<string, unknown>) => string> = {
       .pop();
     return f ? `正在删除 ${f}` : "正在删除文件";
   },
+  run_command: () => "正在执行命令",
+  start_task: () => "正在启动长任务",
+  task_input: () => "正在输入长任务",
+  task_wait: () => "等待长任务",
+  task_stop: () => "正在终止长任务",
   execute: () => "正在执行命令",
   excecute: () => "正在执行命令",
   terminal_input: () => "正在执行命令",
@@ -458,6 +479,7 @@ const TOOL_TITLES: Record<string, (args: Record<string, unknown>) => string> = {
   git_log: () => "正在查看日志",
   git_tag: () => "正在创建标签",
   ask_plan_questions: () => "正在生成澄清问题",
+  ask_user: () => "正在生成澄清问题",
   save_plan: () => "正在设计计划",
   create_task: () => "正在创建任务",
   get_task_status: () => "正在读取任务状态",
@@ -2140,8 +2162,12 @@ function ToolBody({
   const terminalId =
     typeof terminalPayload?.terminal_id === "string"
       ? terminalPayload.terminal_id
+      : typeof terminalPayload?.task_id === "string"
+        ? terminalPayload.task_id
       : typeof args.terminal_id === "string"
         ? args.terminal_id
+        : typeof args.task_id === "string"
+          ? args.task_id
         : undefined;
   const terminalFullOutput =
     typeof terminalPayload?.full_output === "string"
@@ -2275,6 +2301,7 @@ function ToolBody({
   const isPlanQuestionsTool =
     toolCall.inputRequest?.kind === "plan_questions" ||
     toolCall.name === "ask_plan_questions" ||
+    toolCall.name === "ask_user" ||
     Array.isArray(args.questions) ||
     Boolean(
       streamingPlanPreview?.title ||
@@ -2965,15 +2992,22 @@ function ToolBody({
   if (
     (toolCall.name === "execute" ||
       toolCall.name === "excecute" ||
+      toolCall.name === "run_command" ||
+      toolCall.name === "start_task" ||
       toolCall.name === "terminal_input" ||
-      toolCall.name === "terminal_wait") &&
-    (command || content || terminalStatus || terminalFullOutput)
+      toolCall.name === "terminal_wait" ||
+      toolCall.name === "task_input" ||
+      toolCall.name === "task_wait" ||
+      toolCall.name === "task_stop") &&
+    (command || content || terminalId || terminalStatus || terminalFullOutput)
   ) {
     const cmdText =
-      toolCall.name === "terminal_input"
+      toolCall.name === "terminal_input" || toolCall.name === "task_input"
         ? content
-        : toolCall.name === "terminal_wait"
+        : toolCall.name === "terminal_wait" || toolCall.name === "task_wait"
           ? `wait ${String(args.timeout ?? "")}s`
+          : toolCall.name === "task_stop"
+            ? "stop"
           : (command ?? content);
     const termOutput = [
       terminalId && `# ${terminalId}`,
@@ -3103,7 +3137,7 @@ function PlanDraftCard({
       <PlanHeader>
         <div>
           <div className="mb-4 flex items-center gap-2">
-            <FileText className="size-4" />
+            <FileTextIcon className="size-4" />
             <PlanTitle>{title || "计划草案"}</PlanTitle>
           </div>
           {summary && <PlanDescription>{summary}</PlanDescription>}
@@ -3266,6 +3300,11 @@ function DataPartView({
         label: "部署",
         icon: <RocketIcon className="size-3.5" />,
         color: "text-emerald-600",
+      },
+      super: {
+        label: "超能模式",
+        icon: <SparklesIcon className="size-3.5" />,
+        color: "text-fuchsia-600",
       },
     };
 
@@ -3997,12 +4036,8 @@ const UserMessageActions = memo(function UserMessageActions({
 }) {
   if (!msg.content) return null;
   return (
-    <motion.div
-      className="flex items-center gap-0.5 mt-1 self-end"
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      transition={{ duration: 0.15 }}
+    <div
+      className="flex items-center gap-0.5 mt-1 self-end opacity-0 transition-opacity duration-150 group-hover/msg:opacity-100"
     >
       <TooltipProvider>
         <Tooltip>
@@ -4034,7 +4069,7 @@ const UserMessageActions = memo(function UserMessageActions({
           </Tooltip>
         </TooltipProvider>
       )}
-    </motion.div>
+    </div>
   );
 });
 
@@ -4097,7 +4132,6 @@ const MessageList = memo(function MessageList({
     {},
   );
   const latestRunningToolIdRef = useRef<string | null>(null);
-  const [hoveredMsgId, setHoveredMsgId] = useState<string | null>(null);
   const [editingMsgId, setEditingMsgId] = useState<string | null>(null);
   const [editContent, setEditContent] = useState("");
   const editTextareaRef = useRef<HTMLTextAreaElement>(null);
@@ -4255,6 +4289,7 @@ const MessageList = memo(function MessageList({
       tc.name.startsWith("git_") ||
       tc.name === "connect" ||
       tc.name === "ask_plan_questions" ||
+      tc.name === "ask_user" ||
       tc.name === "delegate_code_exploration" ||
       tc.inputRequest?.kind === "plan_questions";
     const toolTitle = `${getToolTitle(tc.name, tc.arguments ?? {})} · ${statusLabel}`;
@@ -4901,7 +4936,8 @@ const MessageList = memo(function MessageList({
                               (rf.block.toolCall.inputRequest?.kind ===
                                 "plan_questions" ||
                                 rf.block.toolCall.name ===
-                                  "ask_plan_questions"),
+                                  "ask_plan_questions" ||
+                                rf.block.toolCall.name === "ask_user"),
                           },
                         )}
                       </div>,
@@ -4966,7 +5002,8 @@ const MessageList = memo(function MessageList({
                           isDraftingPlan &&
                           (block.toolCall.inputRequest?.kind ===
                             "plan_questions" ||
-                            block.toolCall.name === "ask_plan_questions"),
+                            block.toolCall.name === "ask_plan_questions" ||
+                            block.toolCall.name === "ask_user"),
                       })}
                     </div>,
                   );
@@ -5035,13 +5072,14 @@ const MessageList = memo(function MessageList({
         );
         const isEditingThisMsg = editingMsgId === msg.id;
         const isUser = msg.role === "user";
+        const userAttachments =
+          isUser && Array.isArray(msg.attachments) ? msg.attachments : [];
         return (
           <Message
             key={msg.id || idx}
             from={msg.role}
+            className="group/msg"
             data-message-id={msg.id}
-            onMouseEnter={() => msg.id && setHoveredMsgId(msg.id)}
-            onMouseLeave={() => setHoveredMsgId(null)}
           >
             {isUser && isEditingThisMsg ? (
               <motion.div
@@ -5098,6 +5136,49 @@ const MessageList = memo(function MessageList({
                         isActive={isActiveAssistant}
                       />
                     )}
+                    {userAttachments.length > 0 && (
+                      <div className={cn("flex flex-wrap gap-2", msg.content && "mb-2")}>
+                        {userAttachments.map((attachment) => {
+                          const isImage = attachment.type === "image" || attachment.mediaType?.startsWith("image/");
+                          const fileIcon = getFileIcon(attachment.filename);
+                          const ext = attachment.filename.includes(".")
+                            ? attachment.filename.split(".").pop()?.toUpperCase()
+                            : "";
+                          return (
+                            <div
+                              key={attachment.id}
+                              className="group flex items-center gap-2.5 rounded-lg border border-border/50 bg-muted/30 px-2.5 py-1.5 transition-colors hover:bg-muted/50"
+                            >
+                              {isImage && (attachment.dataUrl || attachment.storedPath) ? (
+                                <div className="size-8 shrink-0 overflow-hidden rounded-md bg-muted">
+                                  <img
+                                    src={attachment.dataUrl ?? attachment.storedPath}
+                                    alt={attachment.filename}
+                                    className="size-full object-cover"
+                                  />
+                                </div>
+                              ) : (
+                                <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-background border border-border/40">
+                                  {fileIcon ? (
+                                    <span style={{ color: fileIcon.color }} className="text-base leading-none">{fileIcon.icon}</span>
+                                  ) : (
+                                    <FileTextIcon className="size-4 text-muted-foreground" />
+                                  )}
+                                </div>
+                              )}
+                              <div className="flex min-w-0 flex-col gap-px">
+                                <span className="truncate text-[13px] font-medium leading-tight text-foreground">
+                                  {attachment.filename}
+                                </span>
+                                <span className="text-[10px] leading-tight text-muted-foreground/60">
+                                  {ext && `${ext} · `}{attachment.mediaType?.replace(/^(image|application|text)\//, "") ?? "文件"}
+                                </span>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
                     {msg.role === "assistant" &&
                       (displayMessage.parts?.length
                         ? renderPartsAssistant(displayMessage, isLast)
@@ -5118,11 +5199,7 @@ const MessageList = memo(function MessageList({
                   </MessageContent>
                 )}
                 {isUser && (
-                  <AnimatePresence>
-                    {hoveredMsgId === msg.id && (
-                      <UserMessageActions key="actions" msg={msg} onStartEdit={onEditMessage ? handleStartEdit : undefined} />
-                    )}
-                  </AnimatePresence>
+                  <UserMessageActions msg={msg} onStartEdit={onEditMessage ? handleStartEdit : undefined} />
                 )}
               </>
             )}
@@ -5920,6 +5997,15 @@ function normalizeMentionCaret(value: string, caret: number) {
   return caret - token.start < token.end - caret ? token.start : token.end;
 }
 
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error ?? new Error("读取图片失败"));
+    reader.readAsDataURL(file);
+  });
+}
+
 export function ChatPanel({
   sessionId,
   contextData,
@@ -5948,6 +6034,8 @@ export function ChatPanel({
   onViewPlan,
   onClosePlanSteps,
   agentMode,
+  superAutopilotEnabled,
+  onSuperAutopilotChange,
   onAgentModeChange,
   onModelChange,
   onReasoningEffortChange,
@@ -5971,7 +6059,8 @@ export function ChatPanel({
   );
   const composerRef = useRef<HTMLDivElement>(null);
   const [isFocused, setIsFocused] = useState(false);
-  const [attachmentFiles, setAttachmentFiles] = useState<AttachmentData[]>([]);
+  const [attachmentFiles, setAttachmentFiles] = useState<ComposerAttachment[]>([]);
+  const [isGlobalDragOver, setIsGlobalDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const composerInputRef = useRef<HTMLDivElement>(null);
   const composerInputId = useId();
@@ -5982,11 +6071,51 @@ export function ChatPanel({
     useState<string | null>(null);
   const [autoCloseSubagentDrawer, setAutoCloseSubagentDrawer] = useState(false);
 
+  const getAttachments = useCallback(
+    (): ChatAttachment[] =>
+      attachmentFiles.map((file) => ({
+        id: file.id,
+        type: file.attachmentType,
+        filename: file.filename,
+        mediaType: file.mediaType,
+        dataUrl: file.dataUrl,
+      })),
+    [attachmentFiles],
+  );
+
+  const clearAttachmentFiles = useCallback(() => {
+    setAttachmentFiles((prev) => {
+      prev.forEach((file) => URL.revokeObjectURL(file.url));
+      return [];
+    });
+  }, []);
+
+  const submitMessage = useCallback(() => {
+    const attachments = getAttachments();
+    if (
+      !sessionId ||
+      isLoading ||
+      (!input.trim() && elementAttachments.length === 0 && attachments.length === 0)
+    ) {
+      return;
+    }
+    onSendMessage(attachments.length > 0 ? attachments : undefined);
+    clearAttachmentFiles();
+  }, [
+    clearAttachmentFiles,
+    elementAttachments.length,
+    getAttachments,
+    input,
+    isLoading,
+    onSendMessage,
+    sessionId,
+  ]);
+
   const handleEmptySend = useCallback(() => {
     if (isHandling) return;
     setIsHandling(true);
-    onSendMessage();
-  }, [isHandling, onSendMessage]);
+    submitMessage();
+  }, [isHandling, submitMessage]);
 
   const handleEditMessage = useCallback(
     (content: string) => {
@@ -6110,16 +6239,26 @@ export function ChatPanel({
     isSubagentDrawerOpen,
   ]);
 
-  const handleAddFiles = useCallback((fileList: FileList | File[]) => {
+  const handleAddFiles = useCallback(async (fileList: FileList | File[]) => {
     const incoming = Array.from(fileList);
-    const newFiles: AttachmentData[] = incoming.map((file) => ({
-      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-      type: "file" as const,
-      filename: file.name,
-      mediaType: file.type,
-      url: URL.createObjectURL(file),
-    }));
-    setAttachmentFiles((prev) => [...prev, ...newFiles]);
+    const newFiles = await Promise.all(
+      incoming.map(async (file): Promise<ComposerAttachment> => {
+        const dataUrl = await readFileAsDataUrl(file);
+        const mediaType = file.type || "application/octet-stream";
+        return {
+          id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          type: "file" as const,
+          filename: file.name,
+          mediaType,
+          url: URL.createObjectURL(file),
+          dataUrl,
+          attachmentType: mediaType.startsWith("image/") ? "image" : "file",
+        };
+      }),
+    );
+    if (newFiles.length > 0) {
+      setAttachmentFiles((prev) => [...prev, ...newFiles]);
+    }
   }, []);
 
   const handleRemoveAttachment = useCallback((id: string) => {
@@ -6133,12 +6272,53 @@ export function ChatPanel({
   const handleFileInputChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       if (e.target.files) {
-        handleAddFiles(e.target.files);
+        void handleAddFiles(e.target.files);
         e.target.value = "";
       }
     },
     [handleAddFiles],
   );
+
+  useEffect(() => {
+    let dragCounter = 0;
+    const onDragEnter = (e: DragEvent) => {
+      e.preventDefault();
+      if (e.dataTransfer?.types.includes("Files")) {
+        dragCounter++;
+        setIsGlobalDragOver(true);
+      }
+    };
+    const onDragLeave = (e: DragEvent) => {
+      e.preventDefault();
+      dragCounter--;
+      if (dragCounter <= 0) {
+        dragCounter = 0;
+        setIsGlobalDragOver(false);
+      }
+    };
+    const onDrop = (e: DragEvent) => {
+      e.preventDefault();
+      dragCounter = 0;
+      setIsGlobalDragOver(false);
+      const files = Array.from(e.dataTransfer?.files ?? []);
+      if (files.length > 0) {
+        void handleAddFiles(files);
+      }
+    };
+    const onDragOver = (e: DragEvent) => {
+      e.preventDefault();
+    };
+    document.addEventListener("dragenter", onDragEnter);
+    document.addEventListener("dragleave", onDragLeave);
+    document.addEventListener("dragover", onDragOver);
+    document.addEventListener("drop", onDrop);
+    return () => {
+      document.removeEventListener("dragenter", onDragEnter);
+      document.removeEventListener("dragleave", onDragLeave);
+      document.removeEventListener("dragover", onDragOver);
+      document.removeEventListener("drop", onDrop);
+    };
+  }, [handleAddFiles]);
 
   const selectedModel =
     modelOptions.find((m) => m.id === model) ?? modelOptions[0];
@@ -6578,29 +6758,46 @@ export function ChatPanel({
         />
         <div className="p-3 pt-2">
           <div className="flex flex-col rounded-lg border bg-muted/30 p-2 shadow-sm focus-within:ring-1 focus-within:ring-ring">
-            <input
-              ref={fileInputRef}
-              type="file"
-              className="hidden"
-              multiple
-              onChange={handleFileInputChange}
-            />
-
             {attachmentFiles.length > 0 && (
-              <div className="pb-2">
-                <Attachments variant="inline">
-                  {attachmentFiles.map((file) => (
-                    <Attachment
+              <div className="flex flex-wrap gap-1.5 pb-2">
+                {attachmentFiles.map((file) => {
+                  const isImage = file.mediaType?.startsWith("image/");
+                  const fileIcon = getFileIcon(file.filename);
+                  return (
+                    <div
                       key={file.id}
-                      data={file}
-                      onRemove={() => handleRemoveAttachment(file.id)}
+                      className="group relative flex items-center gap-2 rounded-md border border-border/50 bg-background/50 px-2 py-1 transition-colors hover:bg-accent/30"
                     >
-                      <AttachmentPreview />
-                      <AttachmentInfo />
-                      <AttachmentRemove />
-                    </Attachment>
-                  ))}
-                </Attachments>
+                      {isImage ? (
+                        <div className="size-6 shrink-0 overflow-hidden rounded-sm bg-muted">
+                          <img
+                            src={file.url}
+                            alt={file.filename}
+                            className="size-full object-cover"
+                          />
+                        </div>
+                      ) : (
+                        <div className="flex size-6 shrink-0 items-center justify-center rounded-sm bg-muted">
+                          {fileIcon ? (
+                            <span style={{ color: fileIcon.color }} className="text-sm leading-none">{fileIcon.icon}</span>
+                          ) : (
+                            <FileTextIcon className="size-3 text-muted-foreground" />
+                          )}
+                        </div>
+                      )}
+                      <span className="truncate text-xs font-medium text-foreground max-w-[140px]">
+                        {file.filename}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveAttachment(file.id)}
+                        className="flex size-4 shrink-0 items-center justify-center rounded-full opacity-0 transition-opacity group-hover:opacity-100 hover:bg-destructive/10"
+                      >
+                        <XIcon className="size-2.5 text-muted-foreground hover:text-destructive" />
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             )}
 
@@ -6661,22 +6858,31 @@ export function ChatPanel({
                 suggestions={mentionSuggestions}
                 focusRevision={composerFocusRevision}
                 onChange={onInputChange}
-                onSubmit={
-                  mainMessages.length === 0 ? handleEmptySend : onSendMessage
-                }
+                onSubmit={mainMessages.length === 0 ? handleEmptySend : submitMessage}
+                onFiles={handleAddFiles}
               />
             </div>
             <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2 border-t border-border/50 pt-2">
               <div className="flex min-w-0 flex-wrap items-center gap-1">
-                <Button
-                  size="icon-sm"
-                  variant="ghost"
-                  onClick={() => fileInputRef.current?.click()}
+                <label
+                  className={cn(
+                    buttonVariants({ size: "icon-sm", variant: "ghost" }),
+                    "relative cursor-pointer overflow-hidden focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/50",
+                  )}
                   aria-label="添加附件"
                   title="添加附件"
                 >
                   <PaperclipIcon className="w-4 h-4" />
-                </Button>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+                    multiple
+                    onChange={handleFileInputChange}
+                    aria-label="添加附件"
+                    title="添加附件"
+                  />
+                </label>
 
                 <ModelSelector
                   open={isModelSelectorOpen}
@@ -6744,7 +6950,11 @@ export function ChatPanel({
                     className="h-7 min-w-[96px] max-w-full gap-1.5 border-0 px-2 text-xs text-muted-foreground shadow-none"
                     aria-label="选择智能体模式"
                   >
-                    <Code2Icon className="size-3.5" />
+                    {agentMode === "super" ? (
+                      <SparklesIcon className="size-3.5" />
+                    ) : (
+                      <Code2Icon className="size-3.5" />
+                    )}
                     <SelectValue placeholder="模式" />
                   </SelectTrigger>
                   <SelectContent align="start">
@@ -6752,9 +6962,23 @@ export function ChatPanel({
                     <SelectItem value="chat">聊天</SelectItem>
                     <SelectItem value="plan">计划</SelectItem>
                     <SelectItem value="coding">编码</SelectItem>
+                    <SelectItem value="super">超能模式</SelectItem>
                     <SelectItem value="deploy">部署</SelectItem>
                   </SelectContent>
                 </Select>
+
+                {agentMode === "super" && (
+                  <label className="flex h-7 items-center gap-1.5 rounded-md px-1.5 text-xs text-muted-foreground">
+                    <BotIcon className="size-3.5" />
+                    <span className="whitespace-nowrap">一键托管</span>
+                    <Switch
+                      size="sm"
+                      checked={superAutopilotEnabled}
+                      onCheckedChange={onSuperAutopilotChange}
+                      aria-label="一键托管"
+                    />
+                  </label>
+                )}
 
                 <Select
                   value={executionMode}
@@ -6825,9 +7049,14 @@ export function ChatPanel({
                 <Button
                   size="icon"
                   onClick={
-                    mainMessages.length === 0 ? handleEmptySend : onSendMessage
+                    mainMessages.length === 0 ? handleEmptySend : submitMessage
                   }
-                  disabled={!input.trim() && elementAttachments.length === 0}
+                  disabled={
+                    !sessionId ||
+                    (!input.trim() &&
+                      elementAttachments.length === 0 &&
+                      attachmentFiles.length === 0)
+                  }
                   aria-label="发送消息"
                   title="发送消息"
                 >
@@ -6927,6 +7156,25 @@ export function ChatPanel({
           </motion.div>
         )}
       </AnimatePresence>
+
+      {isGlobalDragOver && createPortal(
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-background/60 backdrop-blur-sm">
+          <div className="flex flex-col items-center gap-4 rounded-2xl border-2 border-dashed border-primary/40 bg-background/90 px-10 py-8 shadow-2xl backdrop-blur-md">
+            <div className="relative flex size-16 items-center justify-center">
+              <div className="absolute inset-0 rounded-full bg-primary/10 animate-pulse" />
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="text-primary relative z-10">
+                <path d="M12 16V4m0 0L8 8m4-4l4 4" />
+                <path d="M20 16v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-2" />
+              </svg>
+            </div>
+            <div className="flex flex-col items-center gap-1">
+              <span className="text-base font-semibold text-foreground">释放以添加文件</span>
+              <span className="text-xs text-muted-foreground">文件将作为附件发送给 AI</span>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
     </>
   );
 }

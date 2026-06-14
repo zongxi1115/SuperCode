@@ -19,8 +19,24 @@ from .git_tools import git_commit, git_log, git_tag
 from .planning_tools import create_task, finish_task, get_task_status, read_current_plan
 from .project_docs_tools import read_project_docs, write_project_docs
 from .subagent_tools import delegate_code_exploration
-from .terminal_tools import excecute, execute, terminal_input, terminal_wait
-from .utility_tools import generate_image, get_docs, open_browser, remember_preference
+from .terminal_tools import (
+    excecute,
+    execute,
+    run_command,
+    start_task,
+    task_input,
+    task_stop,
+    task_wait,
+    terminal_input,
+    terminal_wait,
+)
+from .utility_tools import (
+    generate_image,
+    get_docs,
+    load_image_to_conversation,
+    open_browser,
+    remember_preference,
+)
 
 
 def _tool(func: Callable[..., Any]) -> ToolDefinition:
@@ -38,6 +54,7 @@ def build_coding_tools() -> list[ToolDefinition]:
         _tool(list_file),
         _tool(remember_preference),
         _tool(generate_image),
+        _tool(load_image_to_conversation),
         _tool(get_docs),
         _tool(glob_file),
         _tool(read_file),
@@ -50,6 +67,11 @@ def build_coding_tools() -> list[ToolDefinition]:
         _tool(write_file),
         _tool(replace_file),
         _tool(delete_file),
+        _tool(run_command),
+        _tool(start_task),
+        _tool(task_input),
+        _tool(task_wait),
+        _tool(task_stop),
         _tool(terminal_input),
         _tool(terminal_wait),
         _tool(open_browser),

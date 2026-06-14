@@ -621,6 +621,8 @@ def register_tool_interaction_routes(
         if session.agent_type == "plan":
             deps.set_session_phase(session, "clarifying")
             deps.update_plan_state(session, status="clarifying")
+        elif session.agent_type == "super":
+            deps.set_session_phase(session, "idle")
         session.touch()
         return JSONResponse(
             {

@@ -17,6 +17,7 @@ class AgentLLMConfig:
     api_key: str
     base_url: str
     model: str
+    provider: str = "openrouter"
     api_mode: Literal["chat_completions", "responses"] = "chat_completions"
     reasoning_effort: str | None = None
     timeout: int = 60
@@ -37,6 +38,7 @@ class AgentLLMConfig:
         api_key = env_values.get("SC_AGENT_API_KEY", os.getenv("SC_AGENT_API_KEY", "")).strip()
         base_url = env_values.get("SC_AGENT_BASE_URL", os.getenv("SC_AGENT_BASE_URL", "")).strip()
         model = env_values.get("SC_AGENT_MODEL", os.getenv("SC_AGENT_MODEL", "")).strip()
+        provider = env_values.get("SC_AGENT_PROVIDER", os.getenv("SC_AGENT_PROVIDER", "")).strip()
         api_mode = _normalize_api_mode(
             env_values.get("SC_AGENT_API_MODE", os.getenv("SC_AGENT_API_MODE", "")).strip()
         )
@@ -79,6 +81,7 @@ class AgentLLMConfig:
             api_key=api_key,
             base_url=base_url.rstrip("/"),
             model=model,
+            provider=provider.lower() or _infer_provider_from_url(base_url),
             api_mode=api_mode,
             reasoning_effort=reasoning_effort or None,
             timeout=timeout,
@@ -149,3 +152,16 @@ def _normalize_api_mode(value: str) -> Literal["chat_completions", "responses"]:
     if normalized in {"responses", "response"}:
         return "responses"
     return "chat_completions"
+
+
+def _infer_provider_from_url(base_url: str) -> str:
+    url_lower = base_url.lower()
+    if "anthropic" in url_lower:
+        return "anthropic"
+    if "openai" in url_lower:
+        return "openai"
+    if "deepseek" in url_lower:
+        return "deepseek"
+    if "openrouter" in url_lower:
+        return "openrouter"
+    return "openrouter"

@@ -20,6 +20,7 @@ from zonix import (
     ToolInputStart,
     ToolOutputAvailable,
 )
+from zonix.content import content_text, image_part, text_part
 from zonix.runtime import run_node
 from zonix.types import Message as ZonixMessage
 from zonix.types import Usage as ZonixUsage
@@ -66,17 +67,27 @@ class ZonixChatSession:
         self,
         user_message: str,
         on_event: Callable[[AgentEvent], None] | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> AgentResponse:
         cleaned_message = user_message.strip()
-        if not cleaned_message:
+        image_attachments = _normalize_image_attachments(attachments)
+        if not cleaned_message and not image_attachments:
             raise ValueError("用户消息不能为空。")
 
         self.state.current_input = cleaned_message
+        self.state.data["current_input_attachments"] = image_attachments
         self.state.conversation_messages.append(
-            ConversationMessage(role="user", content=cleaned_message)
+            ConversationMessage(
+                role="user",
+                content=cleaned_message,
+                attachments=image_attachments,
+            )
         )
 
-        response = ZonixAgentRunner(self.agent).run_turn(self.state, on_event=on_event)
+        try:
+            response = ZonixAgentRunner(self.agent).run_turn(self.state, on_event=on_event)
+        finally:
+            self.state.data.pop("current_input_attachments", None)
         self._record_response(cleaned_message, response)
         return response
 
@@ -247,9 +258,13 @@ class ZonixAgentRunner:
             on_event=on_event,
         )
         recorder.emit(events.turn_started(state.current_input))
+        task_content = _zonix_content_from_text_and_attachments(
+            state.current_input,
+            state.data.get("current_input_attachments"),
+        )
         await run_node(
             self.agent,
-            state.current_input,
+            task_content,
             ctx=SuperCodeRunContext(workspace=workspace, metadata=metadata, state=state),
             message_history=_zonix_message_history_from_state(state),
             emit=recorder.publish,
@@ -505,24 +520,81 @@ def _usage_payload(usage: ZonixUsage) -> dict[str, int]:
     }
 
 
+def _normalize_image_attachments(raw_attachments: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_attachments, list):
+        return []
+
+    attachments: list[dict[str, Any]] = []
+    for item in raw_attachments:
+        if not isinstance(item, dict):
+            continue
+        data_url = str(item.get("dataUrl") or item.get("data_url") or item.get("url") or "").strip()
+        media_type = str(item.get("mediaType") or item.get("media_type") or "").strip()
+        if not data_url:
+            continue
+        if media_type and not media_type.startswith("image/"):
+            continue
+        if not media_type and data_url.startswith("data:image/"):
+            media_type = data_url.split(";", 1)[0].removeprefix("data:")
+        attachments.append(
+            {
+                "id": str(item.get("id") or ""),
+                "type": "image",
+                "filename": str(item.get("filename") or item.get("name") or ""),
+                "mediaType": media_type or "image/png",
+                "dataUrl": data_url,
+            }
+        )
+    return attachments
+
+
+def _zonix_content_from_text_and_attachments(
+    text: str,
+    attachments: Any,
+) -> str | list[dict[str, Any]]:
+    image_attachments = _normalize_image_attachments(attachments)
+    if not image_attachments:
+        return text
+
+    parts: list[dict[str, Any]] = []
+    if text:
+        parts.append(text_part(text))
+    for attachment in image_attachments:
+        parts.append(
+            image_part(
+                str(attachment.get("dataUrl") or ""),
+                media_type=str(attachment.get("mediaType") or "image/png"),
+                filename=str(attachment.get("filename") or ""),
+            )
+        )
+    return parts
+
+
 def _zonix_message_history_from_state(state: AgentState) -> list[ZonixMessage]:
     current_input = state.current_input.strip()
     messages: list[ZonixMessage] = []
     for message in state.conversation_messages:
         role = str(getattr(message, "role", "")).strip()
         content = str(getattr(message, "content", "") or "").strip()
-        if role not in {"user", "assistant"} or not content:
+        attachments = _normalize_image_attachments(getattr(message, "attachments", None))
+        if role not in {"user", "assistant"} or (not content and not attachments):
             continue
         data: dict[str, Any] = {}
         reasoning_content = str(getattr(message, "reasoning_content", "") or "").strip()
         if role == "assistant" and reasoning_content:
             data["reasoning_content"] = reasoning_content
-        messages.append(ZonixMessage(role=role, content=content, data=data))
+        messages.append(
+            ZonixMessage(
+                role=role,
+                content=_zonix_content_from_text_and_attachments(content, attachments),
+                data=data,
+            )
+        )
     if (
         messages
         and messages[-1].role == "user"
         and current_input
-        and str(messages[-1].content or "").strip() == current_input
+        and content_text(messages[-1].content).strip() == current_input
     ):
         return messages[:-1]
     return messages

@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import mimetypes
+import re
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import unquote_to_bytes
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -65,6 +69,122 @@ UI_MESSAGE_STREAM_HEADERS = {
     "x-vercel-ai-ui-message-stream": "v1",
 }
 
+MAX_CHAT_ATTACHMENTS = 8
+
+
+def _data_url_media_type(data_url: str) -> str:
+    if not data_url.startswith("data:"):
+        return ""
+    header = data_url.split(",", 1)[0]
+    return header.removeprefix("data:").split(";", 1)[0].strip()
+
+
+def _decode_attachment_data(data_url: str) -> bytes:
+    if data_url.startswith("data:"):
+        header, separator, payload = data_url.partition(",")
+        if not separator:
+            return b""
+        if ";base64" in header:
+            return base64.b64decode(payload)
+        return unquote_to_bytes(payload)
+    return base64.b64decode(data_url)
+
+
+def _safe_upload_filename(filename: str, media_type: str) -> str:
+    leaf = Path(filename or "attachment").name.strip() or "attachment"
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", leaf).strip("._")
+    if not safe:
+        safe = "attachment"
+    if "." not in safe:
+        extension = mimetypes.guess_extension(media_type) or ""
+        safe = f"{safe}{extension}"
+    return safe
+
+
+def _store_chat_attachments(
+    workspace: str | Path,
+    session_id: str,
+    attachments: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    workspace_root = Path(workspace).resolve()
+    upload_root = (workspace_root / ".supercode" / "uploads" / session_id).resolve()
+    if workspace_root != upload_root and workspace_root not in upload_root.parents:
+        raise ValueError("附件保存路径越界。")
+    upload_root.mkdir(parents=True, exist_ok=True)
+
+    stored: list[dict[str, Any]] = []
+    for attachment in attachments:
+        data_url = str(attachment.get("dataUrl") or "").strip()
+        if not data_url:
+            continue
+        try:
+            file_bytes = _decode_attachment_data(data_url)
+        except Exception:
+            continue
+        if not file_bytes:
+            continue
+
+        media_type = str(attachment.get("mediaType") or "").strip()
+        filename = _safe_upload_filename(str(attachment.get("filename") or ""), media_type)
+        target = (upload_root / f"{uuid.uuid4().hex[:10]}-{filename}").resolve()
+        if upload_root != target.parent and upload_root not in target.parents:
+            continue
+        target.write_bytes(file_bytes)
+        relative_path = str(target.relative_to(workspace_root)).replace("\\", "/")
+        item = {
+            **attachment,
+            "storedPath": relative_path,
+            "absolutePath": str(target),
+            "size": len(file_bytes),
+        }
+        if item.get("type") != "image":
+            item.pop("dataUrl", None)
+        stored.append(item)
+    return stored
+
+
+def _uploaded_files_prompt(attachments: list[dict[str, Any]]) -> str:
+    if not attachments:
+        return ""
+    lines = ["用户上传了文件，已保存到工作区以下路径："]
+    for index, attachment in enumerate(attachments, start=1):
+        filename = str(attachment.get("filename") or "attachment").strip()
+        media_type = str(attachment.get("mediaType") or "application/octet-stream").strip()
+        stored_path = str(attachment.get("storedPath") or "").strip()
+        size = attachment.get("size")
+        size_text = f", {size} bytes" if isinstance(size, int) else ""
+        lines.append(f"{index}. {filename} ({media_type}{size_text}): {stored_path}")
+    return "\n".join(lines)
+
+
+def _message_with_uploaded_files(message: str, attachments: list[dict[str, Any]]) -> str:
+    prompt = _uploaded_files_prompt(attachments)
+    if not prompt:
+        return message
+    return "\n\n".join(part for part in [message.strip(), prompt] if part)
+
+
+def _normalize_chat_attachments(request: ChatStreamRequest) -> list[dict[str, Any]]:
+    attachments: list[dict[str, Any]] = []
+    for item in request.attachments[:MAX_CHAT_ATTACHMENTS]:
+        data_url = item.dataUrl.strip()
+        media_type = item.mediaType.strip()
+        if not data_url:
+            continue
+        if not media_type:
+            media_type = _data_url_media_type(data_url)
+        attachment_type = "image" if item.type == "image" or media_type.startswith("image/") else "file"
+        attachments.append(
+            {
+                "id": item.id or "",
+                "type": attachment_type,
+                "filename": item.filename,
+                "mediaType": media_type or "application/octet-stream",
+                "dataUrl": data_url,
+            }
+        )
+    return attachments
+
 
 @dataclass(frozen=True)
 class ChatRuntimeDeps:
@@ -97,6 +217,8 @@ async def run_agent_stream(
     assistant_id: str | None = None,
     resume_existing_turn: bool = False,
     history_user_message: str | None = None,
+    attachments: list[dict[str, Any]] | None = None,
+    super_autopilot: bool = False,
 ) -> None:
     loop = asyncio.get_running_loop()
     assistant_id = assistant_id or uuid.uuid4().hex
@@ -106,8 +228,24 @@ async def run_agent_stream(
     tool_before_snapshots: dict[str, dict[str, str]] = {}
     deps.reset_phase_for_new_turn(session)
     deps.sync_session_runtime_state_for_agent(session)
+    super_autopilot_enabled = bool(super_autopilot and getattr(session, "agent_type", "") == "super")
+    if session.chat_session is not None:
+        state = getattr(session.chat_session, "state", None)
+        state_data = getattr(state, "data", None)
+        if isinstance(state_data, dict):
+            runtime_state = state_data.get("runtime_state")
+            if not isinstance(runtime_state, dict):
+                runtime_state = {}
+                state_data["runtime_state"] = runtime_state
+            runtime_state["super_autopilot"] = super_autopilot_enabled
+            state_data["super_autopilot"] = super_autopilot_enabled
     if user_message is not None:
-        ensure_user_message_recorded(session, history_user_message or user_message)
+        visible_user_message = history_user_message if history_user_message is not None else user_message
+        ensure_user_message_recorded(
+            session,
+            visible_user_message,
+            attachments=attachments,
+        )
     deps.set_session_generating(session, True)
 
     await queue.put(
@@ -686,17 +824,23 @@ async def run_agent_stream(
                         last_command=str(event.tool_call.arguments.get("command") or ""),
                         last_command_cwd=str(event.tool_call.arguments.get("cwd") or "."),
                     )
-            elif session.agent_type == "plan":
+            elif session.agent_type in {"plan", "super"}:
                 tool_name = event.tool_call.name
-                if tool_name == "ask_plan_questions":
-                    deps.set_session_phase(session, "awaiting_user_input")
-                    deps.update_plan_state(session, status="awaiting_user_input")
+                if tool_name in {"ask_plan_questions", "ask_user"}:
+                    deps.set_session_phase(
+                        session,
+                        "researching" if session.agent_type == "super" and super_autopilot_enabled else "awaiting_user_input",
+                    )
+                    if session.agent_type == "plan":
+                        deps.update_plan_state(session, status="awaiting_user_input")
                 elif tool_name == "save_plan":
                     deps.set_session_phase(session, "planning")
-                    deps.update_plan_state(session, status="planning")
+                    if session.agent_type == "plan":
+                        deps.update_plan_state(session, status="planning")
                 else:
                     deps.set_session_phase(session, "researching")
-                    deps.update_plan_state(session, status="researching")
+                    if session.agent_type == "plan":
+                        deps.update_plan_state(session, status="researching")
             append_assistant_tool_call(
                 session,
                 assistant_id,
@@ -841,7 +985,17 @@ async def run_agent_stream(
                 isinstance(output, dict)
                 and output.get("requires_user_input") is True
             )
-            if event.tool_result.name in {"execute", "excecute", "terminal_input", "terminal_wait"} and terminal_output is not None:
+            if event.tool_result.name in {
+                "execute",
+                "excecute",
+                "run_command",
+                "start_task",
+                "terminal_input",
+                "terminal_wait",
+                "task_input",
+                "task_wait",
+                "task_stop",
+            } and terminal_output is not None:
                 session.terminal_output = terminal_output
             if event.tool_result.name in {"write_file", "replace_file", "apply_patch", "generate_image"} or (
                 event.tool_result.name == "delete_file" and not requires_confirmation
@@ -897,7 +1051,8 @@ async def run_agent_stream(
                     "tool_name": event.tool_result.name,
                     "request": input_request,
                 }
-                if session.agent_type == "plan":
+                input_kind = str(input_request.get("kind") if input_request else "")
+                if input_kind == "plan_questions":
                     session.pending_user_input_requests[tool_id] = pending_payload
                 else:
                     session.pending_connect_requests[tool_id] = pending_payload
@@ -914,7 +1069,7 @@ async def run_agent_stream(
                     )
                     or None,
                 }
-                if tool_name == "execute":
+                if tool_name in {"execute", "excecute", "run_command"}:
                     deploy_updates["last_exit_code"] = exit_code
                     if exit_code is not None and exit_code != 0:
                         deploy_updates["last_error"] = f"命令退出码为 {exit_code}"
@@ -944,7 +1099,7 @@ async def run_agent_stream(
                         deps.set_session_phase(session, "exploring")
                     elif tool_name == "transfer_files":
                         deps.set_session_phase(session, "connected")
-                    elif tool_name == "execute":
+                    elif tool_name in {"execute", "excecute", "run_command"}:
                         deps.set_session_phase(session, "failed" if exit_code not in (None, 0) else "verifying")
                     elif tool_name == "connect":
                         deps.set_session_phase(session, "connected")
@@ -970,6 +1125,12 @@ async def run_agent_stream(
                 else:
                     deps.set_session_phase(session, "planning")
                     deps.update_plan_state(session, status="clarifying")
+            elif (
+                requires_user_input
+                and isinstance(input_request, dict)
+                and str(input_request.get("kind") or "") == "plan_questions"
+            ):
+                deps.set_session_phase(session, "awaiting_user_input")
             tool_record = _tool_record_with_runtime_metadata(
                 {
                     "id": tool_id,
@@ -1100,6 +1261,7 @@ async def run_agent_stream(
                 session.chat_session.ask,
                 user_message,
                 on_event,
+                attachments,
             )
     except Exception as exc:  # noqa: BLE001 - 流式接口需要兜底，避免 SSE 半路中断
         _mark_latest_tool_failed(str(exc))
@@ -1430,11 +1592,26 @@ def register_chat_routes(
             await asyncio.to_thread(deps.move_session_to_worktree, session)
             session.cancel_event.clear()
         original_user_message = request.message.strip()
-        if not original_user_message:
+        raw_attachments = _normalize_chat_attachments(request)
+        attachments = _store_chat_attachments(
+            session.workspace,
+            request.session_id,
+            raw_attachments,
+        )
+        if not original_user_message and not attachments:
             raise HTTPException(status_code=400, detail="message 不能为空")
+        base_user_message = (
+            original_user_message
+            or (
+                "用户上传了图片，请结合图片内容回答。"
+                if any(item.get("type") == "image" for item in attachments)
+                else "用户上传了文件，请结合这些文件路径继续处理。"
+            )
+        )
+        routing_message = _message_with_uploaded_files(base_user_message, attachments)
         user_message, active_skills = resolve_message_skills(
             session.workspace,
-            original_user_message,
+            routing_message,
             request.skills,
         )
         if not user_message:
@@ -1444,9 +1621,10 @@ def register_chat_routes(
         if requested_agent_mode and requested_agent_mode != "auto":
             forced_agent_type = deps.normalize_agent_type(requested_agent_mode)
         deps.route_session_for_user_message(session, user_message, forced_agent_type=forced_agent_type)
+        super_autopilot_enabled = bool(request.super_autopilot and session.agent_type == "super")
         if session.chat_session is not None:
             session.chat_session.state.data["active_skills"] = active_skills
-        if session.agent_type == "coding" and session.plan_state.get("pending_coding_input"):
+        if session.agent_type in {"coding", "super"} and session.plan_state.get("pending_coding_input"):
             deps.update_plan_state(session, pending_coding_input=None)
 
         async def event_generator():
@@ -1460,12 +1638,18 @@ def register_chat_routes(
                     "payload": {
                         "id": user_message_id,
                         "content": original_user_message,
+                        "attachments": attachments,
                     },
                 }
             )
-            session.history_messages.append(
-                {"id": user_message_id, "role": "user", "content": original_user_message}
-            )
+            history_user_record = {
+                "id": user_message_id,
+                "role": "user",
+                "content": original_user_message,
+            }
+            if attachments:
+                history_user_record["attachments"] = attachments
+            session.history_messages.append(history_user_record)
             session.touch()
 
             producer = asyncio.create_task(
@@ -1477,6 +1661,8 @@ def register_chat_routes(
                     queue,
                     deps,
                     history_user_message=original_user_message,
+                    attachments=attachments,
+                    super_autopilot=super_autopilot_enabled,
                 )
             )
 

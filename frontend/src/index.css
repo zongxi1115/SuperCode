@@ -57,8 +57,8 @@
   html {
     min-height: 100%;
     background:
-      radial-gradient(circle at top, rgba(158, 71, 255, 0.3), transparent 40%),
-      linear-gradient(180deg, #220038 0%, #170023 45%, #12001b 100%);
+      radial-gradient(circle at top, oklch(0.93 0.025 265 / 0.36), transparent 42%),
+      linear-gradient(180deg, oklch(0.995 0.003 260) 0%, oklch(0.982 0.006 260) 100%);
   }
   html.dark {
     background: var(--background);

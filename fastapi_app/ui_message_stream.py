@@ -385,7 +385,7 @@ class UIMessageStreamAdapter:
                 return "\n\n".join(edit_contents)
             return ""
 
-        if tool_name in {"save_plan", "ask_plan_questions"}:
+        if tool_name in {"save_plan", "ask_plan_questions", "ask_user"}:
             return json.dumps(arguments, ensure_ascii=False) if arguments else ""
 
         return ""

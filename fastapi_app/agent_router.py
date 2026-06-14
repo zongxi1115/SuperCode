@@ -7,7 +7,7 @@ from typing import Any
 from agent.llm_client import OpenAICompatibleClient
 
 
-ALLOWED_AGENT_TYPES = {"chat", "coding", "deploy", "plan"}
+ALLOWED_AGENT_TYPES = {"chat", "coding", "deploy", "plan", "super"}
 
 
 def build_default_route_state() -> dict[str, Any]:
@@ -107,9 +107,9 @@ def _build_route_messages(user_message: str, context: dict[str, Any]) -> list[di
         "recentUser": context.get("recentUserMessages"),
     }
     system_prompt = (
-        "你是 SuperCode 的轻量路由器。只输出一个词：chat、coding、plan 或 deploy。\n"
-        "chat=普通闲聊/常识问答/不需要项目上下文或工具的直接回答；plan=澄清需求/调研/实施计划；coding=改代码/调试/测试/解释代码；deploy=部署/上传/服务器/环境变量/发布/回滚/远程连接。\n"
-        "若用户在回答计划问题选 plan；在提供部署连接信息选 deploy；已提交计划进入执行选 coding；泛化追问保持 current。\n"
+        "你是 SuperCode 的轻量路由器。只输出一个词：chat、coding、plan、deploy 或 super。\n"
+        "chat=普通闲聊/常识问答/不需要项目上下文或工具的直接回答；plan=澄清需求/调研/实施计划；coding=改代码/调试/测试/解释代码；deploy=部署/上传/服务器/环境变量/发布/回滚/远程连接；super=用户明确选择超能模式，或 current 已是 super 且用户只是泛化追问/继续。\n"
+        "不要主动把普通请求升级到 super。若用户在回答计划问题选 plan；在提供部署连接信息选 deploy；已提交计划进入执行选 coding；泛化追问保持 current。\n"
         "禁止 JSON、Markdown、解释和标点。"
     )
     return [

@@ -21,6 +21,7 @@ MESSAGE_METADATA_KEYS = (
     "parentAssistantId",
     "subagentTitle",
     "subagentTask",
+    "attachments",
 )
 TOOL_METADATA_KEYS = (
     "agentScope",

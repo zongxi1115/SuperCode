@@ -12,9 +12,12 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
+from agent.schema import ConversationMessage
 from fastapi_app.memory_store import remember_preference as save_memory_preference
 from fastapi_app.settings_store import load_settings
+from zonix.content import image_part, text_part
 from zonix.tools import ToolContext
+from zonix.types import Message as ZonixMessage
 
 from .tool_common import (
     IMAGE_GENERATION_ALLOWED_QUALITIES,
@@ -30,6 +33,91 @@ def _resolve_workspace_path(raw_path: str, ctx: ToolContext) -> Path:
     if workspace != candidate and workspace not in candidate.parents:
         raise ValueError(f"路径越界，不允许访问工作区外部: {raw_path}")
     return candidate
+
+
+def _image_mime_type(image_bytes: bytes, filename: str) -> str:
+    if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if image_bytes.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if image_bytes.startswith(b"RIFF") and image_bytes[8:12] == b"WEBP":
+        return "image/webp"
+    if image_bytes.startswith(b"GIF87a") or image_bytes.startswith(b"GIF89a"):
+        return "image/gif"
+    guessed = mimetypes.guess_type(filename)[0] or ""
+    return guessed if guessed.startswith("image/") else ""
+
+
+def load_image_to_conversation(
+    ctx: ToolContext,
+    filename: str,
+    detail: str = "auto",
+) -> dict[str, object]:
+    """读取工作区内图片，并把它作为视觉输入追加到后续模型上下文。"""
+
+    target = _resolve_workspace_path(filename.strip(), ctx)
+    if not target.exists():
+        raise FileNotFoundError(f"图片不存在: {filename}")
+    if not target.is_file():
+        raise IsADirectoryError(f"目标不是图片文件: {filename}")
+
+    image_bytes = target.read_bytes()
+    mime_type = _image_mime_type(image_bytes, target.name)
+    if not mime_type:
+        raise ValueError("只支持 png、jpg、webp、gif 等图片文件。")
+
+    normalized_detail = detail.strip().lower()
+    if normalized_detail not in {"auto", "low", "high"}:
+        normalized_detail = "auto"
+
+    workspace = Path(ctx.workspace or ".").resolve()
+    relative_path = _relative_posix_path(target, workspace)
+    data_url = f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode('ascii')}"
+    note = f"模型已读入图片：{relative_path}"
+    attachment = {
+        "id": f"loaded-image-{hashlib.sha256(relative_path.encode('utf-8')).hexdigest()[:10]}",
+        "type": "image",
+        "filename": target.name,
+        "mediaType": mime_type,
+        "dataUrl": data_url,
+        "storedPath": relative_path,
+        "absolutePath": str(target),
+        "size": len(image_bytes),
+    }
+    content = [
+        text_part(note),
+        image_part(
+            data_url,
+            media_type=mime_type,
+            filename=target.name,
+            detail=normalized_detail,
+        ),
+    ]
+    pending_messages = ctx.state.scratch.setdefault("_pending_conversation_messages", [])
+    if isinstance(pending_messages, list):
+        pending_messages.append(
+            ZonixMessage(role="user", content=content).model_dump(mode="python")
+        )
+
+    agent_state = getattr(ctx.deps, "state", None)
+    conversation_messages = getattr(agent_state, "conversation_messages", None)
+    if isinstance(conversation_messages, list):
+        conversation_messages.append(
+            ConversationMessage(
+                role="user",
+                content=note,
+                attachments=[attachment],
+            )
+        )
+
+    return {
+        "summary": f"已将图片加入后续模型上下文: {relative_path}",
+        "file": relative_path,
+        "absolute_path": str(target),
+        "mime_type": mime_type,
+        "bytes": len(image_bytes),
+        "conversation_history_updated": True,
+    }
 
 
 def remember_preference(ctx: ToolContext, content: str, scope: str = "global") -> dict[str, object]:

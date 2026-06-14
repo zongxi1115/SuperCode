@@ -74,11 +74,11 @@ type ManagedProcessOutputPayload = {
   truncated: boolean;
 };
 
-const XTERM_WRITE_CHUNK_CHARS = 16_384;
-const XTERM_MAX_QUEUED_WRITE_CHARS = 512_000;
+const XTERM_WRITE_CHUNK_CHARS = 65_536;
+const XTERM_MAX_QUEUED_WRITE_CHARS = 384_000;
 const MANAGED_PROCESS_OUTPUT_TAIL_CHARS = 64_000;
 
-const XTERM_THEME = {
+const XTERM_DARK_THEME = {
   background: "#111314",
   foreground: "#d9ded8",
   cursor: "#f4c95d",
@@ -102,6 +102,34 @@ const XTERM_THEME = {
   brightWhite: "#f2f5f1",
 };
 
+const XTERM_LIGHT_THEME = {
+  background: "#eef2f7",
+  foreground: "#0f172a",
+  cursor: "#2563eb",
+  cursorAccent: "#eef2f7",
+  selectionBackground: "#c7d2fe",
+  black: "#0f172a",
+  red: "#b91c1c",
+  green: "#166534",
+  yellow: "#713f12",
+  blue: "#1d4ed8",
+  magenta: "#6d28d9",
+  cyan: "#0e7490",
+  white: "#334155",
+  brightBlack: "#475569",
+  brightRed: "#dc2626",
+  brightGreen: "#15803d",
+  brightYellow: "#854d0e",
+  brightBlue: "#2563eb",
+  brightMagenta: "#7c3aed",
+  brightCyan: "#0891b2",
+  brightWhite: "#0f172a",
+};
+
+function getXtermTheme(isDarkTheme: boolean) {
+  return isDarkTheme ? XTERM_DARK_THEME : XTERM_LIGHT_THEME;
+}
+
 function buildTerminalWebSocketUrl(sessionId: string, terminalId?: string | null) {
   const base = apiWebSocketUrl(`/api/sessions/${sessionId}/terminal/ws`);
   if (terminalId) {
@@ -121,16 +149,16 @@ function safeParseTerminalMessage(data: MessageEvent["data"]): TerminalSocketSer
   }
 }
 
-function createXtermInstance(): { terminal: Terminal; fitAddon: FitAddon } {
+function createXtermInstance(isDarkTheme: boolean): { terminal: Terminal; fitAddon: FitAddon } {
   const terminal = new Terminal({
     cursorBlink: true,
     cursorStyle: "block",
     fontFamily: '"Cascadia Mono", "JetBrains Mono", Consolas, "Courier New", monospace',
     fontSize: 12,
     lineHeight: 1.25,
-    scrollback: 8000,
+    scrollback: 3000,
     allowTransparency: true,
-    theme: XTERM_THEME,
+    theme: getXtermTheme(isDarkTheme),
   });
   const fitAddon = new FitAddon();
   const webLinksAddon = new WebLinksAddon((event, uri) => {
@@ -167,6 +195,9 @@ export function TerminalPanel({
   const pendingFocusTerminalIdRef = useRef<string | null>(null);
   const pendingFocusActiveTerminalRef = useRef(false);
 
+  const [isDarkTheme, setIsDarkTheme] = useState(() => {
+    return document.documentElement.classList.contains("dark");
+  });
   const [, forceUpdate] = useState(0);
   const triggerRender = useCallback(() => forceUpdate((n) => n + 1), []);
 
@@ -410,7 +441,7 @@ export function TerminalPanel({
       return existing;
     }
 
-    const { terminal, fitAddon } = createXtermInstance();
+    const { terminal, fitAddon } = createXtermInstance(isDarkTheme);
     const inst: TerminalInstance = {
       terminalId: info.terminalId,
       kind: info.kind,
@@ -449,7 +480,25 @@ export function TerminalPanel({
     keyDisposablesRef.current.set(info.terminalId, keyDisposable);
 
     return inst;
-  }, [getInstance, sendSocketMessage]);
+  }, [getInstance, isDarkTheme, sendSocketMessage]);
+
+  useEffect(() => {
+    const root = document.documentElement;
+    const updateTheme = () => {
+      setIsDarkTheme(root.classList.contains("dark"));
+    };
+    updateTheme();
+    const observer = new MutationObserver(updateTheme);
+    observer.observe(root, { attributes: true, attributeFilter: ["class"] });
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const theme = getXtermTheme(isDarkTheme);
+    for (const [, inst] of instancesRef.current) {
+      inst.xterm.options.theme = theme;
+    }
+  }, [isDarkTheme]);
 
   const disposeInstance = useCallback((terminalId: string) => {
     const inst = instancesRef.current.get(terminalId);
@@ -840,7 +889,7 @@ export function TerminalPanel({
             </div>
 
             {/* Terminal containers */}
-            <div ref={panelContainerRef} className="relative flex-1 overflow-hidden bg-[#111314]">
+            <div ref={panelContainerRef} className="relative flex-1 overflow-hidden bg-[#eef2f7] dark:bg-[#111314]">
               {terminalInfos.map((info) => {
                 const isActive = info.terminalId === activeTerminalId;
                 const inst = getInstance(info.terminalId);
@@ -853,6 +902,8 @@ export function TerminalPanel({
                     className={`
                       absolute inset-0 overflow-hidden px-3 py-2
                       [&_.xterm]:h-full [&_.xterm-viewport]:!overflow-y-auto
+                      [&_.xterm-screen]:bg-[#eef2f7] dark:[&_.xterm-screen]:bg-[#111314]
+                      [&_.xterm-viewport]:bg-[#eef2f7] dark:[&_.xterm-viewport]:bg-[#111314]
                       ${isActive ? "z-10" : "z-0 invisible pointer-events-none"}
                     `}
                     onMouseDown={() => {

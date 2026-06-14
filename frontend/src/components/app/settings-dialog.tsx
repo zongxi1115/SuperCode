@@ -20,7 +20,6 @@ import type {
   AppSettings,
   MCPServerConfig,
   MCPServerTestResult,
-  ModelOption,
   UIModelProvider,
 } from '@/lib/app-types';
 import {
@@ -34,7 +33,6 @@ import {
   ImageIcon,
   Key,
   List,
-  Lock,
   MemoryStick,
   Plus,
   RefreshCcw,
@@ -79,12 +77,21 @@ const BODY_TEXT_SIZE_OPTIONS = [
 ] as const;
 
 const IMAGE_QUALITY_OPTIONS = ['auto', 'low', 'medium', 'high'] as const;
+const MODEL_PROVIDER_OPTIONS = [
+  { value: 'openrouter', label: 'OpenAI 兼容' },
+  { value: 'openai', label: 'OpenAI' },
+  { value: 'anthropic', label: 'Anthropic' },
+  { value: 'deepseek', label: 'DeepSeek' },
+  { value: 'alibaba-cn', label: '通义千问' },
+  { value: 'groq', label: 'Groq' },
+  { value: 'mistral', label: 'Mistral' },
+  { value: 'xai', label: 'xAI' },
+] as const;
 
 type SettingsDialogProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   providers: UIModelProvider[];
-  envConfigs: ModelOption[];
   configPath: string | null;
   mcpServers: MCPServerConfig[];
   mcpConfigPath: string | null;
@@ -148,6 +155,14 @@ function toEditableProvider(provider?: UIModelProvider): EditableProvider {
     provider: provider?.provider ?? null,
     apiMode: provider?.apiMode ?? 'chat_completions',
   };
+}
+
+function modelProviderOptions(value?: string | null) {
+  const normalized = value?.trim();
+  if (!normalized || MODEL_PROVIDER_OPTIONS.some((option) => option.value === normalized)) {
+    return MODEL_PROVIDER_OPTIONS;
+  }
+  return [...MODEL_PROVIDER_OPTIONS, { value: normalized, label: normalized }];
 }
 
 function createMcpServerId() {
@@ -234,7 +249,6 @@ export function SettingsDialog({
   open,
   onOpenChange,
   providers,
-  envConfigs,
   configPath,
   mcpServers,
   mcpConfigPath,
@@ -752,10 +766,6 @@ export function SettingsDialog({
                 <Server className="size-3.5" />
                 供应商
               </TabsTrigger>
-              <TabsTrigger value="env" className="flex-1 gap-1.5">
-                <Lock className="size-3.5" />
-                .env 来源
-              </TabsTrigger>
               <TabsTrigger value="mcp" className="flex-1 gap-1.5">
                 <Server className="size-3.5" />
                 MCP
@@ -825,6 +835,8 @@ export function SettingsDialog({
                     const isRefreshing = refreshingId === key;
                     const isKeyVisible = visibleKeys.has(key);
                     const isConfirmingDelete = deleteConfirmId === key;
+                    const providerType = provider.provider?.trim() || 'openrouter';
+                    const isAnthropicProvider = providerType === 'anthropic';
 
                     return (
                       <div className="space-y-3">
@@ -876,7 +888,35 @@ export function SettingsDialog({
                           </div>
                         </div>
 
-                        <div className="grid grid-cols-2 gap-3">
+                        <div className="grid grid-cols-3 gap-3">
+                          <div className="space-y-1">
+                            <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+                              <Server className="size-2.5" />
+                              接口类型
+                            </label>
+                            <Select
+                              value={providerType}
+                              onValueChange={(value) =>
+                                updateProvider(index, {
+                                  provider: value,
+                                  apiMode: value === 'anthropic'
+                                    ? 'chat_completions'
+                                    : provider.apiMode ?? 'chat_completions',
+                                })
+                              }
+                            >
+                              <SelectTrigger className="h-7 w-full text-xs">
+                                <SelectValue placeholder="选择接口类型" />
+                              </SelectTrigger>
+                              <SelectContent align="start">
+                                {modelProviderOptions(providerType).map((option) => (
+                                  <SelectItem key={option.value} value={option.value}>
+                                    {option.label}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
                           <div className="space-y-1">
                             <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
                               <Server className="size-2.5" />
@@ -897,34 +937,36 @@ export function SettingsDialog({
                             <Input
                               value={provider.baseUrl}
                               onChange={(e) => updateProvider(index, { baseUrl: e.target.value })}
-                              placeholder="https://api.openai.com/v1"
+                              placeholder={isAnthropicProvider ? 'https://api.anthropic.com' : 'https://api.openai.com/v1'}
                               className="h-7 text-xs"
                             />
                           </div>
                         </div>
 
-                        <div className="space-y-1">
-                          <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
-                            <Server className="size-2.5" />
-                            接口模式
-                          </label>
-                          <Select
-                            value={provider.apiMode ?? 'chat_completions'}
-                            onValueChange={(value) =>
-                              updateProvider(index, {
-                                apiMode: value as 'chat_completions' | 'responses',
-                              })
-                            }
-                          >
-                            <SelectTrigger className="h-7 w-full text-xs">
-                              <SelectValue placeholder="选择接口模式" />
-                            </SelectTrigger>
-                            <SelectContent align="start">
-                              <SelectItem value="chat_completions">OpenAI 兼容 /chat/completions</SelectItem>
-                              <SelectItem value="responses">OpenAI /responses</SelectItem>
-                            </SelectContent>
-                          </Select>
-                        </div>
+                        {!isAnthropicProvider ? (
+                          <div className="space-y-1">
+                            <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+                              <Server className="size-2.5" />
+                              接口模式
+                            </label>
+                            <Select
+                              value={provider.apiMode ?? 'chat_completions'}
+                              onValueChange={(value) =>
+                                updateProvider(index, {
+                                  apiMode: value as 'chat_completions' | 'responses',
+                                })
+                              }
+                            >
+                              <SelectTrigger className="h-7 w-full text-xs">
+                                <SelectValue placeholder="选择接口模式" />
+                              </SelectTrigger>
+                              <SelectContent align="start">
+                                <SelectItem value="chat_completions">OpenAI 兼容 /chat/completions</SelectItem>
+                                <SelectItem value="responses">OpenAI /responses</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        ) : null}
 
                         <div className="space-y-1">
                           <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
@@ -966,7 +1008,7 @@ export function SettingsDialog({
                               添加
                             </Button>
                           </div>
-                          <div className="overflow-hidden rounded-md border bg-background">
+                          <div className="overflow-y-auto max-h-60 rounded-md border bg-background">
                             {provider.models.length === 0 ? (
                               <div className="flex h-20 items-center justify-center text-xs text-muted-foreground">
                                 暂无模型，点击添加或拉取模型
@@ -975,7 +1017,7 @@ export function SettingsDialog({
                               <div className="divide-y">
                                 {provider.models.map((model, modelIndex) => (
                                   <div
-                                    key={`${model.id || 'draft'}-${modelIndex}`}
+                                    key={modelIndex}
                                     className="grid grid-cols-[minmax(0,1fr)_120px_32px] items-center gap-2 px-2 py-2"
                                   >
                                     <div className="flex min-w-0 items-center gap-2">
@@ -1027,42 +1069,6 @@ export function SettingsDialog({
                   })()
                 )}
               </div>
-            </div>
-          </TabsContent>
-
-          <TabsContent value="env" className="mt-0 min-h-0 flex-1 overflow-y-auto px-6 py-4">
-            <div className="space-y-3">
-              <div className="flex items-start gap-3 rounded-lg border border-dashed bg-muted/30 p-4">
-                <Lock className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-                <div className="text-sm text-muted-foreground">
-                  .env* 模型检测已禁用，当前仅使用这里配置的供应商模型
-                </div>
-              </div>
-
-              {envConfigs.length === 0 ? (
-                <div className="py-8 text-center text-sm text-muted-foreground">
-                  当前未启用 .env 模型来源
-                </div>
-              ) : (
-                <div className="grid grid-cols-2 gap-3">
-                  {envConfigs.map((item) => (
-                    <div key={item.id} className="rounded-lg border bg-card p-4">
-                      <div className="flex items-center gap-2">
-                        <Globe className="size-3.5 text-muted-foreground" />
-                        <span className="text-sm font-medium">{item.name}</span>
-                      </div>
-                      <div className="mt-2 flex flex-wrap gap-1.5">
-                        <Badge variant="secondary" className="text-xs">
-                          {item.provider}
-                        </Badge>
-                        <Badge variant="outline" className="text-xs">
-                          {item.sourceLabel ?? item.envFile}
-                        </Badge>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
             </div>
           </TabsContent>
 
@@ -1383,20 +1389,9 @@ export function SettingsDialog({
           </TabsContent>
 
           <TabsContent value="memory" className="mt-0 min-h-0 flex-1 overflow-y-auto px-6 py-4">
-            <div className="space-y-5">
-              <div className="grid grid-cols-2 gap-3">
-                <div className="flex items-start justify-between gap-3 rounded-lg border bg-card p-4">
-                  <div className="flex items-start gap-3">
-                    <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-cyan-500/10">
-                      <MemoryStick className="size-4 text-cyan-600 dark:text-cyan-400" />
-                    </div>
-                    <div className="space-y-1">
-                      <div className="text-sm font-medium">启用长期记忆</div>
-                      <div className="text-xs text-muted-foreground">
-                        开启后，智能体会在后续对话中参考启用的记忆
-                      </div>
-                    </div>
-                  </div>
+            <div className="space-y-4">
+              <div className="flex items-center gap-6">
+                <label className="flex items-center gap-2 text-sm">
                   <Switch
                     checked={draftSettings.memory?.enabled ?? true}
                     onCheckedChange={(enabled) =>
@@ -1411,20 +1406,9 @@ export function SettingsDialog({
                       }))
                     }
                   />
-                </div>
-
-                <div className="flex items-start justify-between gap-3 rounded-lg border bg-card p-4">
-                  <div className="flex items-start gap-3">
-                    <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-lime-500/10">
-                      <Brain className="size-4 text-lime-700 dark:text-lime-400" />
-                    </div>
-                    <div className="space-y-1">
-                      <div className="text-sm font-medium">自动学习偏好</div>
-                      <div className="text-xs text-muted-foreground">
-                        从“以后、记住、不要、尽量”等表达中提取偏好
-                      </div>
-                    </div>
-                  </div>
+                  <span className="font-medium">启用记忆</span>
+                </label>
+                <label className="flex items-center gap-2 text-sm">
                   <Switch
                     checked={draftSettings.memory?.autoLearn ?? true}
                     onCheckedChange={(autoLearn) =>
@@ -1439,69 +1423,70 @@ export function SettingsDialog({
                       }))
                     }
                   />
-                </div>
+                  <span className="font-medium">自动学习</span>
+                </label>
               </div>
 
-              <Separator />
-
-              <div className="space-y-3">
+              <div className="space-y-2">
                 <div className="flex items-center justify-between">
-                  <div>
-                    <h3 className="text-sm font-semibold">全局记忆</h3>
-                    <p className="mt-0.5 text-xs text-muted-foreground">
-                      跨工作区生效的交互偏好和工作方式
-                    </p>
-                  </div>
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">全局</h3>
                   <Button
-                    variant="outline"
+                    variant="ghost"
                     size="sm"
-                    className="h-7 gap-1.5 text-xs"
+                    className="h-6 gap-1 px-2 text-xs text-muted-foreground"
                     onClick={() => addMemoryItem('global')}
                   >
                     <Plus className="size-3" />
                     添加
                   </Button>
                 </div>
-
                 {(draftSettings.memory?.global ?? []).length === 0 ? (
-                  <div className="rounded-lg border border-dashed bg-muted/20 px-4 py-5 text-center text-sm text-muted-foreground">
+                  <div className="rounded-md border border-dashed px-3 py-4 text-center text-xs text-muted-foreground">
                     暂无全局记忆
                   </div>
                 ) : (
-                  <div className="space-y-2">
+                  <div className="space-y-1.5">
                     {(draftSettings.memory?.global ?? []).map((item) => (
-                      <div key={item.id} className="rounded-lg border bg-card p-3">
-                        <div className="flex items-start gap-3">
-                          <Switch
-                            checked={item.enabled}
-                            onCheckedChange={(enabled) => updateMemoryItem('global', item.id, { enabled })}
-                            className="mt-1"
+                      <div
+                        key={item.id}
+                        className={`group relative rounded-md border px-3 py-2 transition-colors ${
+                          item.enabled ? 'bg-card' : 'bg-muted/30 opacity-60'
+                        }`}
+                      >
+                        <div className="flex items-start gap-2">
+                          <Textarea
+                            value={item.content}
+                            onChange={(e) => updateMemoryItem('global', item.id, { content: e.target.value })}
+                            placeholder="例如：除非明确允许，不要主动运行 pnpm build。"
+                            className="min-h-[20px] flex-1 resize-none overflow-hidden border-0 bg-transparent p-0 text-xs leading-relaxed shadow-none focus-visible:ring-0"
+                            rows={1}
+                            onInput={(e) => {
+                              const el = e.currentTarget;
+                              el.style.height = 'auto';
+                              el.style.height = el.scrollHeight + 'px';
+                            }}
                           />
-                          <div className="min-w-0 flex-1 space-y-2">
-                            <Textarea
-                              value={item.content}
-                              onChange={(e) => updateMemoryItem('global', item.id, { content: e.target.value })}
-                              placeholder="例如：除非明确允许，不要主动运行 pnpm build。"
-                              className="min-h-[62px] resize-y text-xs leading-relaxed"
+                        </div>
+                        <div className="mt-1 flex items-center justify-between">
+                          <span className="text-[10px] text-muted-foreground/60">
+                            {item.sourcePreview || '手动添加'}
+                          </span>
+                          <div className="flex items-center gap-1.5 opacity-0 transition-opacity group-hover:opacity-100">
+                            <Switch
+                              checked={item.enabled}
+                              onCheckedChange={(enabled) => updateMemoryItem('global', item.id, { enabled })}
+                              className="scale-75"
                             />
-                            <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
-                              <span className="truncate">
-                                {item.sourcePreview || '手动添加'}
-                              </span>
-                              <span className="shrink-0">
-                                {new Date(item.updatedAt).toLocaleString()}
-                              </span>
-                            </div>
+                            <Button
+                              variant="ghost"
+                              size="icon-xs"
+                              className="size-5 text-muted-foreground"
+                              onClick={() => deleteMemoryItem('global', item.id)}
+                              title="删除"
+                            >
+                              <Trash2 className="size-2.5" />
+                            </Button>
                           </div>
-                          <Button
-                            variant="ghost"
-                            size="icon-xs"
-                            className="mt-0.5 size-7 text-muted-foreground"
-                            onClick={() => deleteMemoryItem('global', item.id)}
-                            title="删除记忆"
-                          >
-                            <Trash2 className="size-3.5" />
-                          </Button>
                         </div>
                       </div>
                     ))}
@@ -1511,18 +1496,18 @@ export function SettingsDialog({
 
               <Separator />
 
-              <div className="space-y-3">
+              <div className="space-y-2">
                 <div className="flex items-center justify-between gap-3">
-                  <div className="min-w-0">
-                    <h3 className="text-sm font-semibold">当前工作区记忆</h3>
-                    <p className="mt-0.5 truncate text-xs text-muted-foreground" title={currentWorkspaceKey}>
-                      {currentWorkspaceKey || '尚未选择工作区'}
-                    </p>
+                  <div className="min-w-0 flex items-center gap-2">
+                    <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">工作区</h3>
+                    <span className="truncate text-[10px] text-muted-foreground/60" title={currentWorkspaceKey}>
+                      {currentWorkspaceKey || '未选择'}
+                    </span>
                   </div>
                   <Button
-                    variant="outline"
+                    variant="ghost"
                     size="sm"
-                    className="h-7 gap-1.5 text-xs"
+                    className="h-6 gap-1 px-2 text-xs text-muted-foreground"
                     onClick={() => addMemoryItem('workspace')}
                     disabled={!currentWorkspaceKey}
                   >
@@ -1530,46 +1515,53 @@ export function SettingsDialog({
                     添加
                   </Button>
                 </div>
-
                 {workspaceMemoryItems.length === 0 ? (
-                  <div className="rounded-lg border border-dashed bg-muted/20 px-4 py-5 text-center text-sm text-muted-foreground">
-                    暂无当前工作区记忆
+                  <div className="rounded-md border border-dashed px-3 py-4 text-center text-xs text-muted-foreground">
+                    暂无工作区记忆
                   </div>
                 ) : (
-                  <div className="space-y-2">
+                  <div className="space-y-1.5">
                     {workspaceMemoryItems.map((item) => (
-                      <div key={item.id} className="rounded-lg border bg-card p-3">
-                        <div className="flex items-start gap-3">
-                          <Switch
-                            checked={item.enabled}
-                            onCheckedChange={(enabled) => updateMemoryItem('workspace', item.id, { enabled })}
-                            className="mt-1"
+                      <div
+                        key={item.id}
+                        className={`group relative rounded-md border px-3 py-2 transition-colors ${
+                          item.enabled ? 'bg-card' : 'bg-muted/30 opacity-60'
+                        }`}
+                      >
+                        <div className="flex items-start gap-2">
+                          <Textarea
+                            value={item.content}
+                            onChange={(e) => updateMemoryItem('workspace', item.id, { content: e.target.value })}
+                            placeholder="例如：这个项目里优先沿用现有 shadcn 风格。"
+                            className="min-h-[20px] flex-1 resize-none overflow-hidden border-0 bg-transparent p-0 text-xs leading-relaxed shadow-none focus-visible:ring-0"
+                            rows={1}
+                            onInput={(e) => {
+                              const el = e.currentTarget;
+                              el.style.height = 'auto';
+                              el.style.height = el.scrollHeight + 'px';
+                            }}
                           />
-                          <div className="min-w-0 flex-1 space-y-2">
-                            <Textarea
-                              value={item.content}
-                              onChange={(e) => updateMemoryItem('workspace', item.id, { content: e.target.value })}
-                              placeholder="例如：这个项目里优先沿用现有 shadcn 风格。"
-                              className="min-h-[62px] resize-y text-xs leading-relaxed"
+                        </div>
+                        <div className="mt-1 flex items-center justify-between">
+                          <span className="text-[10px] text-muted-foreground/60">
+                            {item.sourcePreview || '手动添加'}
+                          </span>
+                          <div className="flex items-center gap-1.5 opacity-0 transition-opacity group-hover:opacity-100">
+                            <Switch
+                              checked={item.enabled}
+                              onCheckedChange={(enabled) => updateMemoryItem('workspace', item.id, { enabled })}
+                              className="scale-75"
                             />
-                            <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
-                              <span className="truncate">
-                                {item.sourcePreview || '手动添加'}
-                              </span>
-                              <span className="shrink-0">
-                                {new Date(item.updatedAt).toLocaleString()}
-                              </span>
-                            </div>
+                            <Button
+                              variant="ghost"
+                              size="icon-xs"
+                              className="size-5 text-muted-foreground"
+                              onClick={() => deleteMemoryItem('workspace', item.id)}
+                              title="删除"
+                            >
+                              <Trash2 className="size-2.5" />
+                            </Button>
                           </div>
-                          <Button
-                            variant="ghost"
-                            size="icon-xs"
-                            className="mt-0.5 size-7 text-muted-foreground"
-                            onClick={() => deleteMemoryItem('workspace', item.id)}
-                            title="删除记忆"
-                          >
-                            <Trash2 className="size-3.5" />
-                          </Button>
                         </div>
                       </div>
                     ))}

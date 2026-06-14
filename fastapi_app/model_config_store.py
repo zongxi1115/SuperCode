@@ -120,13 +120,14 @@ def _normalize_provider_payload(raw: dict[str, Any]) -> dict[str, Any]:
     base_url = str(raw.get("baseUrl", "")).strip().rstrip("/")
     provider_name = str(raw.get("name", "")).strip() or "未命名供应商"
     provider_id = str(raw.get("id", "")).strip() or uuid.uuid4().hex
+    provider = str(raw.get("provider", "")).strip().lower()
     return {
         "id": provider_id,
         "name": provider_name,
         "baseUrl": base_url,
         "apiKey": str(raw.get("apiKey", "")).strip(),
         "models": _normalize_model_records(raw.get("models")),
-        "provider": str(raw.get("provider", "")).strip() or infer_provider_from_url(base_url),
+        "provider": provider or infer_provider_from_url(base_url),
         "apiMode": normalize_api_mode(raw.get("apiMode")),
     }
 
@@ -264,6 +265,7 @@ def build_agent_config(root: Path, model_ref: str | None = None) -> tuple[AgentL
                     "SC_AGENT_API_KEY": provider["apiKey"],
                     "SC_AGENT_BASE_URL": provider["baseUrl"],
                     "SC_AGENT_MODEL": model_name,
+                    "SC_AGENT_PROVIDER": provider["provider"],
                     "SC_AGENT_API_MODE": provider["apiMode"],
                 }
             ),
@@ -279,6 +281,9 @@ def _fetch_provider_model_records(provider_payload: dict[str, Any]) -> list[dict
         raise ValueError("请先填写 Base URL")
     if not provider["apiKey"]:
         raise ValueError("请先填写 API Key")
+
+    if provider["provider"] == "anthropic":
+        return _fetch_anthropic_model_records(provider)
 
     request = Request(
         f"{provider['baseUrl'].rstrip('/')}/models",
@@ -304,6 +309,42 @@ def _fetch_provider_model_records(provider_payload: dict[str, Any]) -> list[dict
     data = payload.get("data", [])
     if not isinstance(data, list):
         raise ValueError("模型接口返回格式不正确")
+    return [item for item in data if isinstance(item, dict)]
+
+
+def _anthropic_models_endpoint(base_url: str) -> str:
+    normalized = base_url.rstrip("/")
+    if normalized.endswith("/v1"):
+        return f"{normalized}/models"
+    return f"{normalized}/v1/models"
+
+
+def _fetch_anthropic_model_records(provider: dict[str, Any]) -> list[dict[str, Any]]:
+    request = Request(
+        _anthropic_models_endpoint(provider["baseUrl"]),
+        headers={
+            "x-api-key": provider["apiKey"],
+            "anthropic-version": "2023-06-01",
+            "Accept": "application/json",
+            "User-Agent": "SuperCode/1.0",
+        },
+        method="GET",
+    )
+
+    try:
+        with urlopen(request, timeout=15) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="ignore").strip()
+        raise ValueError(detail or f"拉取 Anthropic 模型列表失败: HTTP {exc.code}") from exc
+    except URLError as exc:
+        raise ValueError(f"拉取 Anthropic 模型列表失败: {exc.reason}") from exc
+    except TimeoutError as exc:
+        raise ValueError("拉取 Anthropic 模型列表超时") from exc
+
+    data = payload.get("data", [])
+    if not isinstance(data, list):
+        raise ValueError("Anthropic 模型接口返回格式不正确")
     return [item for item in data if isinstance(item, dict)]
 
 

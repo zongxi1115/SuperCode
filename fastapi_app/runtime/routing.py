@@ -117,6 +117,14 @@ CHAT_ROUTE_KEYWORDS = (
     "普通对话",
 )
 
+SUPER_ROUTE_KEYWORDS = (
+    "super mode",
+    "超能模式",
+    "超能智能体",
+    "超能agent",
+    "超能 agent",
+)
+
 PLAIN_CHAT_QUESTION_KEYWORDS = (
     "是什么",
     "为什么",
@@ -298,10 +306,14 @@ def route_agent_type_for_message(session: RoutingSession, user_message: str) -> 
 
     if text in CHAT_EXACT_MESSAGES:
         return "chat"
+    if _contains_any_keyword(text, SUPER_ROUTE_KEYWORDS):
+        return "super"
     if _contains_any_keyword(text, CODING_ROUTE_KEYWORDS):
         return "coding"
     if session.agent_type == "chat" and text in ROUTER_GENERIC_FOLLOWUPS:
         return "chat"
+    if session.agent_type == "super" and text in ROUTER_GENERIC_FOLLOWUPS:
+        return "super"
     if active_deploy_session and text in ROUTER_GENERIC_FOLLOWUPS:
         return "deploy"
     if active_deploy_session and session.agent_type == "deploy":

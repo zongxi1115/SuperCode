@@ -38,9 +38,12 @@
   - 兼容旧参数 apply_patch(filename, start_line, end_line, new_content)，但只应在单处修改时使用
 - replace_file(filename, old_content, new_content)：仅在 patch 不方便时使用
 - delete_file(filename)：删除文件，必须等待用户确认
-- execute(content, timeout, terminal_id?)：执行命令，timeout 必填
-- terminal_input(content?, key?, timeout, terminal_id?, submit?)：给交互式命令输入；文本用 content，按键用 key（enter/tab/ctrl+c 等）
-- terminal_wait(timeout, terminal_id?)：等待运行中的命令
+- run_command(content, timeout)：执行短命令，timeout 是硬边界，超时会终止进程树
+- start_task(content, timeout, task_id?)：启动长任务或可交互命令，返回 task_id，用户可在终端面板介入
+- task_input(content?, key?, timeout, task_id?, submit?)：给长任务输入；文本用 content，按键用 key（enter/tab/ctrl+c 等）
+- task_wait(timeout, task_id?)：等待长任务
+- task_stop(task_id?)：终止长任务
+- execute / excecute / terminal_input / terminal_wait：旧兼容入口，优先使用上面的新工具
 - get_docs(type)：按枚举值读取内置教程/流程文档。当前可选 type：environment_setup，用于用户缺少环境、命令、SDK、系统包、PATH 未配置，或需要用 winget 搜索安装包的场景。
 - read_current_plan()：读取当前会话里最新的计划草案/计划正文
 - create_task(title, summary, steps)：创建一个结构化 task，steps 中每项都要有 title 和 summary

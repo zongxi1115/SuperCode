@@ -279,12 +279,22 @@ class SessionHistoryItem(BaseModel):
     updatedAt: int
 
 
+class ChatAttachmentPayload(BaseModel):
+    id: str | None = None
+    type: Literal["image", "file"] = "file"
+    filename: str = ""
+    mediaType: str = ""
+    dataUrl: str
+
+
 class ChatStreamRequest(BaseModel):
     session_id: str = Field(alias="session_id")
     message: str
     execution_mode: Literal["local", "worktree"] = "local"
     agent_mode: str | None = None
+    super_autopilot: bool = False
     skills: list[str] = Field(default_factory=list)
+    attachments: list[ChatAttachmentPayload] = Field(default_factory=list)
 
 
 class ContinueChatStreamRequest(BaseModel):

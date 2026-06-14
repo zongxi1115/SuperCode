@@ -59,6 +59,7 @@ def build_coding_agent(
         "coding",
         role="SuperCode coding agent",
         model=model,
+        recover_tool_input_errors=True,
     )
     _attach_prompt_chain(agent, model)
     agent.use(*resolved_tools)
@@ -77,6 +78,7 @@ def build_code_exploration_agent(
         "code_exploration",
         role="SuperCode read-only code exploration agent",
         model=model,
+        recover_tool_input_errors=True,
     )
     _attach_prompt_chain(agent, model)
     agent.use(*resolved_tools)

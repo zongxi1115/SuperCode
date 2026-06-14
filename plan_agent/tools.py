@@ -4,13 +4,16 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any, Literal
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from agent.config import read_dotenv_values
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
+from zonix.models.base import ModelRequest
 from zonix.tools import ToolContext
+from zonix.types import Message
 
 DEFAULT_TINYFISH_SEARCH_URL = "https://api.search.tinyfish.ai"
 DEFAULT_TINYFISH_FETCH_URL = "https://api.fetch.tinyfish.ai"
@@ -36,6 +39,319 @@ def _normalize_string_list(raw_values: object) -> list[str]:
         if normalized:
             values.append(normalized)
     return values
+
+
+def _unwrap_tool_list(value: object) -> object:
+    current = value
+    for _ in range(3):
+        if isinstance(current, dict):
+            for key in ("items", "item", "values", "options", "questions"):
+                nested = current.get(key)
+                if nested is not None:
+                    current = nested
+                    break
+            else:
+                return current
+            continue
+        return current
+    return current
+
+
+def _normalize_object_list(raw_values: object, *, field_name: str) -> list[dict[str, Any]]:
+    unwrapped = _unwrap_tool_list(raw_values)
+    if not isinstance(unwrapped, list):
+        raise ValueError(f"{field_name} 必须是对象数组。")
+
+    values: list[dict[str, Any]] = []
+    for item in unwrapped:
+        if not isinstance(item, dict):
+            raise ValueError(f"{field_name} 里的每一项都必须是对象。")
+        values.append(item)
+    return values
+
+
+def _is_super_autopilot_enabled(ctx: ToolContext) -> bool:
+    data = getattr(getattr(ctx, "state", None), "data", None)
+    if not isinstance(data, dict):
+        return False
+    runtime_state = data.get("runtime_state")
+    if not isinstance(runtime_state, dict):
+        runtime_state = {}
+    return bool(
+        data.get("super_autopilot")
+        or (
+            runtime_state.get("agent_type") == "super"
+            and runtime_state.get("super_autopilot")
+        )
+    )
+
+
+def _fallback_question_answer(question: dict[str, Any]) -> dict[str, Any]:
+    question_id = str(question.get("id") or "").strip()
+    question_type = str(question.get("type") or "").strip()
+    prompt = str(question.get("prompt") or question_id).strip()
+    if question_type == "short_text":
+        text = str(question.get("placeholder") or "").strip() or "由 AI 自主选择默认值"
+        return {
+            "questionId": question_id,
+            "type": question_type,
+            "prompt": prompt,
+            "text": text,
+            "otherText": None,
+            "autopilot": True,
+            "fallback": True,
+        }
+
+    options = question.get("options") if isinstance(question.get("options"), list) else []
+    selected_options = options[:1]
+    return {
+        "questionId": question_id,
+        "type": question_type,
+        "prompt": prompt,
+        "selectedOptionIds": [
+            str(option.get("id") or "").strip()
+            for option in selected_options
+            if isinstance(option, dict) and str(option.get("id") or "").strip()
+        ],
+        "selectedOptions": [
+            {
+                "id": str(option.get("id") or "").strip(),
+                "label": str(option.get("label") or "").strip(),
+                "description": str(option.get("description") or "").strip(),
+            }
+            for option in selected_options
+            if isinstance(option, dict)
+        ],
+        "otherText": None,
+        "text": None,
+        "autopilot": True,
+        "fallback": True,
+    }
+
+
+def _build_fallback_question_answers(questions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [_fallback_question_answer(question) for question in questions]
+
+
+def _extract_json_object(text: str) -> dict[str, Any]:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError:
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start < 0 or end <= start:
+            raise
+        parsed = json.loads(cleaned[start : end + 1])
+    if not isinstance(parsed, dict):
+        raise ValueError("托管答题模型返回的 JSON 必须是对象。")
+    return parsed
+
+
+def _normalize_autopilot_answers(
+    questions: list[dict[str, Any]],
+    raw_answers: object,
+) -> list[dict[str, Any]]:
+    answer_items = raw_answers if isinstance(raw_answers, list) else []
+    answers_by_id = {
+        str(item.get("questionId") or item.get("question_id") or item.get("id") or "").strip(): item
+        for item in answer_items
+        if isinstance(item, dict)
+    }
+    normalized_answers: list[dict[str, Any]] = []
+
+    for question in questions:
+        question_id = str(question.get("id") or "").strip()
+        question_type = str(question.get("type") or "").strip()
+        prompt = str(question.get("prompt") or question_id).strip()
+        raw_answer = answers_by_id.get(question_id)
+        if not isinstance(raw_answer, dict):
+            normalized_answers.append(_fallback_question_answer(question))
+            continue
+
+        if question_type == "short_text":
+            text = str(raw_answer.get("text") or raw_answer.get("value") or "").strip()
+            if not text:
+                normalized_answers.append(_fallback_question_answer(question))
+                continue
+            normalized_answers.append(
+                {
+                    "questionId": question_id,
+                    "type": question_type,
+                    "prompt": prompt,
+                    "text": text,
+                    "otherText": str(raw_answer.get("otherText") or raw_answer.get("other_text") or "").strip() or None,
+                    "autopilot": True,
+                }
+            )
+            continue
+
+        options = question.get("options") if isinstance(question.get("options"), list) else []
+        options_by_id = {
+            str(option.get("id") or "").strip(): option
+            for option in options
+            if isinstance(option, dict) and str(option.get("id") or "").strip()
+        }
+        raw_selected = (
+            raw_answer.get("selectedOptionIds")
+            or raw_answer.get("selected_option_ids")
+            or raw_answer.get("value")
+            or raw_answer.get("selected")
+        )
+        if isinstance(raw_selected, str):
+            selected_ids = [raw_selected.strip()] if raw_selected.strip() else []
+        elif isinstance(raw_selected, list):
+            selected_ids = [
+                str(option_id).strip()
+                for option_id in raw_selected
+                if str(option_id).strip()
+            ]
+        else:
+            selected_ids = []
+        selected_ids = [option_id for option_id in selected_ids if option_id in options_by_id]
+        if question_type == "single_choice":
+            selected_ids = selected_ids[:1]
+        if not selected_ids:
+            normalized_answers.append(_fallback_question_answer(question))
+            continue
+
+        normalized_answers.append(
+            {
+                "questionId": question_id,
+                "type": question_type,
+                "prompt": prompt,
+                "selectedOptionIds": selected_ids,
+                "selectedOptions": [
+                    {
+                        "id": option_id,
+                        "label": str(options_by_id[option_id].get("label") or "").strip(),
+                        "description": str(options_by_id[option_id].get("description") or "").strip(),
+                    }
+                    for option_id in selected_ids
+                ],
+                "otherText": str(raw_answer.get("otherText") or raw_answer.get("other_text") or "").strip() or None,
+                "text": str(raw_answer.get("text") or "").strip() or None,
+                "autopilot": True,
+            }
+        )
+    return normalized_answers
+
+
+async def _build_model_autopilot_question_answers(
+    ctx: ToolContext,
+    questions: list[dict[str, Any]],
+    *,
+    title: str,
+    message: str,
+) -> tuple[list[dict[str, Any]], str]:
+    state = getattr(getattr(ctx, "deps", None), "state", None)
+    current_input = str(getattr(state, "current_input", "") or "").strip()
+    runtime_state = {}
+    data = getattr(state, "data", None)
+    if isinstance(data, dict) and isinstance(data.get("runtime_state"), dict):
+        runtime_state = data["runtime_state"]
+    prompt_payload = {
+        "task": current_input,
+        "title": title,
+        "message": message,
+        "questions": questions,
+        "runtime_state": runtime_state,
+    }
+    system_prompt = (
+        "你正在为 SuperCode 的一键托管模式自动回答澄清问题。"
+        "请站在用户任务目标和交付质量的角度选择最有利于继续推进的答案。"
+        "必须只输出 JSON 对象，不要 Markdown。格式："
+        '{"answers":[{"questionId":"问题 ID","selectedOptionIds":["选项 ID"],"text":"短文本答案","otherText":""}],"reason":"一句话说明"}。'
+        "single_choice 只能选一个选项；multi_choice 可以选一个或多个；short_text 填写简短、可执行的默认答案。"
+        "如果无法判断，选择题选第一个可用选项。"
+    )
+    request = ModelRequest(
+        messages=[
+            Message(role="system", content=system_prompt),
+            Message(role="user", content=json.dumps(prompt_payload, ensure_ascii=False)),
+        ],
+        tools=[],
+        ctx=ctx.deps,
+        state=ctx.state,
+        task="自动回答澄清问题",
+    )
+    response = await ctx.agent.model.complete(request)
+    ctx.usage.add(response.usage)
+    payload = _extract_json_object(response.text or "")
+    return _normalize_autopilot_answers(questions, payload.get("answers")), str(payload.get("reason") or "").strip()
+
+
+async def _build_autopilot_question_answers(
+    ctx: ToolContext,
+    questions: list[dict[str, Any]],
+    *,
+    title: str,
+    message: str,
+) -> tuple[list[dict[str, Any]], str]:
+    try:
+        answers, reason = await _build_model_autopilot_question_answers(
+            ctx,
+            questions,
+            title=title,
+            message=message,
+        )
+        return answers, reason or "已由当前模型根据上下文自动回答。"
+    except Exception as exc:  # noqa: BLE001 - 托管兜底不能中断主任务
+        return _build_fallback_question_answers(questions), f"模型自动回答失败，已使用首选项兜底：{exc}"
+
+
+def _build_autopilot_summary(answers: list[dict[str, Any]]) -> str:
+    lines = ["一键托管已自动回答澄清问题："]
+    for answer in answers:
+        prompt = str(answer.get("prompt") or answer.get("questionId") or "未命名问题").strip()
+        if answer.get("type") == "short_text":
+            value = str(answer.get("text") or answer.get("otherText") or "").strip() or "(未填写)"
+        else:
+            labels = [
+                str(option.get("label") or "").strip()
+                for option in answer.get("selectedOptions", [])
+                if isinstance(option, dict) and str(option.get("label") or "").strip()
+            ]
+            value = "；".join(labels) if labels else "(未选择)"
+        lines.append(f"- {prompt}: {value}")
+    return "\n".join(lines)
+
+
+class QuestionOption(BaseModel):
+    """用户澄清选择题的单个选项。"""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: str | None = Field(default=None, description="选项稳定 ID，可省略。")
+    label: str = Field(description="展示给用户的选项标题。")
+    description: str | None = Field(default=None, description="选项补充说明。")
+
+
+QuestionOptions = Annotated[list[QuestionOption], BeforeValidator(_unwrap_tool_list)]
+
+
+class PlanQuestion(BaseModel):
+    """向用户发起的单个澄清问题。"""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: str | None = Field(default=None, description="问题稳定 ID，可省略。")
+    type: Literal["single_choice", "multi_choice", "short_text"] = Field(
+        description="问题类型，只支持 single_choice、multi_choice、short_text。"
+    )
+    prompt: str = Field(description="展示给用户的问题文案。")
+    required: bool = Field(default=True, description="用户是否必须回答。")
+    placeholder: str | None = Field(default=None, description="短文本输入占位提示。")
+    options: QuestionOptions | None = Field(
+        default=None,
+        description="选择题选项数组；single_choice/multi_choice 至少需要 2 项。",
+    )
+
+
+PlanQuestions = Annotated[list[PlanQuestion], BeforeValidator(_unwrap_tool_list)]
 
 
 def _slugify(value: str, fallback: str) -> str:
@@ -245,9 +561,9 @@ def fetch_url_content(ctx: ToolContext, urls: list[str]) -> dict[str, Any]:
     }
 
 
-def ask_plan_questions(
+async def ask_plan_questions(
     ctx: ToolContext,
-    questions: list[dict[str, Any]],
+    questions: PlanQuestions,
     title: str = "需要确认一些需求细节",
     message: str = "请先回答下面几个关键问题，我会据此完善计划。",
 ) -> dict[str, Any]:
@@ -257,7 +573,13 @@ def ask_plan_questions(
         raise ValueError("questions 不能为空。")
 
     normalized_questions: list[dict[str, Any]] = []
-    for index, raw_question in enumerate(questions, start=1):
+    raw_questions = _unwrap_tool_list(questions)
+    if not isinstance(raw_questions, list):
+        raise ValueError("questions 必须是对象数组。")
+
+    for index, raw_question in enumerate(raw_questions, start=1):
+        if isinstance(raw_question, BaseModel):
+            raw_question = raw_question.model_dump(mode="python", exclude_none=True)
         if not isinstance(raw_question, dict):
             raise ValueError("questions 里的每一项都必须是对象。")
         question_type = str(raw_question.get("type") or "").strip()
@@ -280,12 +602,11 @@ def ask_plan_questions(
 
         if question_type in {"single_choice", "multi_choice"}:
             raw_options = raw_question.get("options")
-            if not isinstance(raw_options, list) or len(raw_options) < 2:
+            normalized_raw_options = _normalize_object_list(raw_options, field_name="options")
+            if len(normalized_raw_options) < 2:
                 raise ValueError("选择题至少需要提供 2 个 options。")
             normalized_options: list[dict[str, Any]] = []
-            for option_index, raw_option in enumerate(raw_options, start=1):
-                if not isinstance(raw_option, dict):
-                    raise ValueError("options 里的每一项都必须是对象。")
+            for option_index, raw_option in enumerate(normalized_raw_options, start=1):
                 label = str(raw_option.get("label") or "").strip()
                 if not label:
                     raise ValueError("每个 option 都必须提供 label。")
@@ -301,6 +622,25 @@ def ask_plan_questions(
             normalized_question["options"] = normalized_options[:5]
 
         normalized_questions.append(normalized_question)
+
+    if _is_super_autopilot_enabled(ctx):
+        answers, autopilot_reason = await _build_autopilot_question_answers(
+            ctx,
+            normalized_questions,
+            title=title.strip(),
+            message=message.strip(),
+        )
+        return {
+            "requires_user_input": False,
+            "input_kind": "plan_questions",
+            "kind": "plan_questions",
+            "title": title.strip(),
+            "message": _build_autopilot_summary(answers),
+            "questions": normalized_questions,
+            "answers": answers,
+            "autopilot": True,
+            "autopilot_reason": autopilot_reason,
+        }
 
     payload = {
         "requires_user_input": True,
