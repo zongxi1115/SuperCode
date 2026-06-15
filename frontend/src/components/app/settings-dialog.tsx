@@ -13,35 +13,57 @@ import {
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Separator } from '@/components/ui/separator';
+import { message as appMessage } from '@/components/ui/message';
 import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
+import { apiFetch } from '@/lib/api-client';
 import type {
   AppSettings,
   MCPServerConfig,
   MCPServerTestResult,
+  ModelConnectionTestResult,
+  SessionCleanupRequest,
+  SessionCleanupResponse,
+  SessionStorageDataKind,
+  SessionStorageOverview,
   UIModelProvider,
 } from '@/lib/app-types';
 import {
   AlertTriangle,
   Brain,
+  Braces,
+  CalendarClock,
+  CheckCircle2,
+  CircleDollarSign,
   CodeXml,
+  Cpu,
+  Database,
+  Eraser,
   Eye,
   EyeOff,
+  FileText,
   Globe,
   GripVertical,
+  HardDrive,
   ImageIcon,
   Key,
   List,
   MemoryStick,
+  PieChart,
   Plus,
   RefreshCcw,
+  Search,
   Server,
   Settings2,
   Shield,
   ShieldCheck,
   Trash2,
   Type,
+  Video,
+  Volume2,
+  Wrench,
+  XCircle,
 } from 'lucide-react';
 
 type EditableProvider = UIModelProvider;
@@ -51,6 +73,10 @@ type EditableMCPServer = MCPServerConfig & {
   envText: string;
   headersText: string;
 };
+
+function getErrorMessage(error: unknown, fallback: string) {
+  return error instanceof Error && error.message ? error.message : fallback;
+}
 
 const BODY_FONT_OPTIONS = [
   {
@@ -77,16 +103,6 @@ const BODY_TEXT_SIZE_OPTIONS = [
 ] as const;
 
 const IMAGE_QUALITY_OPTIONS = ['auto', 'low', 'medium', 'high'] as const;
-const MODEL_PROVIDER_OPTIONS = [
-  { value: 'openrouter', label: 'OpenAI 兼容' },
-  { value: 'openai', label: 'OpenAI' },
-  { value: 'anthropic', label: 'Anthropic' },
-  { value: 'deepseek', label: 'DeepSeek' },
-  { value: 'alibaba-cn', label: '通义千问' },
-  { value: 'groq', label: 'Groq' },
-  { value: 'mistral', label: 'Mistral' },
-  { value: 'xai', label: 'xAI' },
-] as const;
 
 type SettingsDialogProps = {
   open: boolean;
@@ -101,17 +117,129 @@ type SettingsDialogProps = {
   onDiscoverModels: (provider: UIModelProvider) => Promise<{
     models: UIModelProvider['models'];
   }>;
+  onTestModelConnection: (
+    provider: UIModelProvider,
+    model: string | null,
+  ) => Promise<ModelConnectionTestResult>;
   onSaveMcpServers: (servers: MCPServerConfig[]) => Promise<void>;
   onTestMcpServer: (server: MCPServerConfig) => Promise<MCPServerTestResult>;
   onTestEmbedding: (embedding: AppSettings['embedding']) => Promise<string>;
   onSaveSettings: (settings: AppSettings) => Promise<void>;
+  onSessionsChanged?: () => void | Promise<void>;
 };
 
 function createModelRecord() {
   return {
     id: '',
+    name: null,
     contextWindow: 32_000,
+    maxOutputTokens: null,
+    inputModalities: ['text'],
+    outputModalities: ['text'],
+    supportedParameters: [],
+    capabilities: [],
+    pricing: {},
+    ownedBy: null,
+    created: null,
+    description: null,
   };
+}
+
+function compactStringList(values: unknown) {
+  return Array.isArray(values)
+    ? values.map((item) => String(item).trim()).filter(Boolean)
+    : [];
+}
+
+function serializeModelRecord(model: UIModelProvider['models'][number]) {
+  const pricing =
+    model.pricing && typeof model.pricing === 'object' && !Array.isArray(model.pricing)
+      ? model.pricing
+      : {};
+  return {
+    id: model.id.trim(),
+    name: model.name?.trim() || null,
+    contextWindow: model.contextWindow ?? null,
+    maxOutputTokens: model.maxOutputTokens ?? null,
+    inputModalities: compactStringList(model.inputModalities),
+    outputModalities: compactStringList(model.outputModalities),
+    supportedParameters: compactStringList(model.supportedParameters),
+    capabilities: compactStringList(model.capabilities),
+    pricing,
+    ownedBy: model.ownedBy?.trim() || null,
+    created: model.created ?? null,
+    description: model.description?.trim() || null,
+  };
+}
+
+function serializeProvider(provider: EditableProvider): UIModelProvider {
+  return {
+    id: provider.id ?? null,
+    name: provider.name.trim() || '未命名供应商',
+    baseUrl: provider.baseUrl.trim(),
+    apiKey: provider.apiKey.trim(),
+    models: provider.models.map(serializeModelRecord).filter((model) => model.id),
+    provider: provider.provider ?? null,
+    apiMode: provider.apiMode ?? 'chat_completions',
+  };
+}
+
+function formatTokenCount(value: number | null | undefined) {
+  if (!value || value <= 0) return '未知';
+  return value.toLocaleString();
+}
+
+function formatPricePerMillion(value: unknown) {
+  const numeric = typeof value === 'number' ? value : Number(String(value ?? '').trim());
+  if (!Number.isFinite(numeric) || numeric < 0) return '$--';
+  return `$${(numeric * 1_000_000).toFixed(3)}`;
+}
+
+function modalityLabel(value: string) {
+  const normalized = value.toLowerCase();
+  if (normalized === 'image') return '图片';
+  if (normalized === 'audio') return '音频';
+  if (normalized === 'video') return '视频';
+  if (normalized === 'file') return '文件';
+  if (normalized === 'embedding') return '向量';
+  return '文本';
+}
+
+function capabilityLabel(value: string) {
+  const normalized = value.toLowerCase();
+  if (normalized === 'vision') return '视觉';
+  if (normalized === 'tools') return '工具';
+  if (normalized === 'json') return 'JSON';
+  if (normalized === 'reasoning') return '推理';
+  if (normalized === 'image_generation') return '生图';
+  if (normalized === 'audio_input') return '音频输入';
+  if (normalized === 'audio_output') return '音频输出';
+  if (normalized === 'video_generation') return '视频';
+  if (normalized === 'embedding') return '向量';
+  if (normalized === 'rerank') return '重排';
+  return value;
+}
+
+function ModalityIcon({ value }: { value: string }) {
+  const normalized = value.toLowerCase();
+  if (normalized === 'image') return <ImageIcon className="size-3" />;
+  if (normalized === 'audio') return <Volume2 className="size-3" />;
+  if (normalized === 'video') return <Video className="size-3" />;
+  if (normalized === 'file') return <FileText className="size-3" />;
+  if (normalized === 'embedding') return <Cpu className="size-3" />;
+  return <Type className="size-3" />;
+}
+
+function CapabilityIcon({ value }: { value: string }) {
+  const normalized = value.toLowerCase();
+  if (normalized === 'tools') return <Wrench className="size-3" />;
+  if (normalized === 'json') return <Braces className="size-3" />;
+  if (normalized === 'reasoning') return <Brain className="size-3" />;
+  if (normalized.includes('image')) return <ImageIcon className="size-3" />;
+  if (normalized.includes('audio')) return <Volume2 className="size-3" />;
+  if (normalized.includes('video')) return <Video className="size-3" />;
+  if (normalized === 'vision') return <Eye className="size-3" />;
+  return <Cpu className="size-3" />;
 }
 
 function normalizeLines(text: string) {
@@ -155,14 +283,6 @@ function toEditableProvider(provider?: UIModelProvider): EditableProvider {
     provider: provider?.provider ?? null,
     apiMode: provider?.apiMode ?? 'chat_completions',
   };
-}
-
-function modelProviderOptions(value?: string | null) {
-  const normalized = value?.trim();
-  if (!normalized || MODEL_PROVIDER_OPTIONS.some((option) => option.value === normalized)) {
-    return MODEL_PROVIDER_OPTIONS;
-  }
-  return [...MODEL_PROVIDER_OPTIONS, { value: normalized, label: normalized }];
 }
 
 function createMcpServerId() {
@@ -222,6 +342,13 @@ function withSettingsDefaults(settings: AppSettings): AppSettings {
       size: settings.imageGeneration?.size ?? '1024x1024',
       quality: settings.imageGeneration?.quality ?? 'auto',
     },
+    tinyfish: {
+      enabled: settings.tinyfish?.enabled ?? false,
+      apiKey: settings.tinyfish?.apiKey ?? '',
+      searchUrl: settings.tinyfish?.searchUrl ?? 'https://api.search.tinyfish.ai',
+      fetchUrl: settings.tinyfish?.fetchUrl ?? 'https://api.fetch.tinyfish.ai',
+      timeout: settings.tinyfish?.timeout ?? 30,
+    },
     memory: {
       enabled: settings.memory?.enabled ?? true,
       autoLearn: settings.memory?.autoLearn ?? true,
@@ -245,6 +372,51 @@ function createMemoryItem(scope: 'global' | 'workspace'): AppSettings['memory'][
   };
 }
 
+const SESSION_CHART_COLORS = [
+  '#2563eb',
+  '#16a34a',
+  '#f59e0b',
+  '#e11d48',
+  '#7c3aed',
+  '#0891b2',
+  '#dc2626',
+  '#475569',
+];
+
+function formatStorageBytes(value: number | null | undefined) {
+  const bytes = Math.max(0, Number(value ?? 0));
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+function formatStorageTime(value: number | null | undefined) {
+  if (!value) return '未知';
+  return new Date(value).toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+function buildSessionPieGradient(items: SessionStorageDataKind[]) {
+  const visibleItems = items.filter((item) => item.weight > 0);
+  const total = visibleItems.reduce((sum, item) => sum + item.weight, 0);
+  if (!total) return 'conic-gradient(hsl(var(--muted)) 0deg 360deg)';
+  let cursor = 0;
+  return `conic-gradient(${visibleItems
+    .map((item) => {
+      const start = cursor;
+      cursor += (item.weight / total) * 360;
+      const index = Math.max(0, items.findIndex((candidate) => candidate.key === item.key));
+      const color = SESSION_CHART_COLORS[index % SESSION_CHART_COLORS.length];
+      return `${color} ${start.toFixed(2)}deg ${cursor.toFixed(2)}deg`;
+    })
+    .join(', ')})`;
+}
+
 export function SettingsDialog({
   open,
   onOpenChange,
@@ -256,10 +428,12 @@ export function SettingsDialog({
   currentWorkspace,
   onSaveProviders,
   onDiscoverModels,
+  onTestModelConnection,
   onSaveMcpServers,
   onTestMcpServer,
   onTestEmbedding,
   onSaveSettings,
+  onSessionsChanged,
 }: SettingsDialogProps) {
   const [draftProviders, setDraftProviders] = useState<EditableProvider[]>(
     providers.length > 0 ? providers.map((p) => toEditableProvider(p)) : [toEditableProvider()],
@@ -271,6 +445,7 @@ export function SettingsDialog({
   const [activeTab, setActiveTab] = useState('providers');
   const [isSaving, setIsSaving] = useState(false);
   const [refreshingId, setRefreshingId] = useState<string | null>(null);
+  const [modelTestingId, setModelTestingId] = useState<string | null>(null);
   const [mcpTestingId, setMcpTestingId] = useState<string | null>(null);
   const [isTestingEmbedding, setIsTestingEmbedding] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
@@ -281,7 +456,17 @@ export function SettingsDialog({
   const [selectedProviderIndex, setSelectedProviderIndex] = useState(0);
   const [selectedMcpIndex, setSelectedMcpIndex] = useState(0);
   const [draggingProviderIndex, setDraggingProviderIndex] = useState<number | null>(null);
+  const [modelTestResults, setModelTestResults] = useState<Record<string, ModelConnectionTestResult>>({});
   const [mcpTestResults, setMcpTestResults] = useState<Record<string, MCPServerTestResult>>({});
+  const [sessionStorage, setSessionStorage] = useState<SessionStorageOverview | null>(null);
+  const [sessionCleanupPreview, setSessionCleanupPreview] = useState<SessionCleanupResponse | null>(null);
+  const [sessionCleanupMode, setSessionCleanupMode] = useState<SessionCleanupRequest['mode']>('older_than');
+  const [sessionCleanupDays, setSessionCleanupDays] = useState(30);
+  const [sessionCleanupWorkspace, setSessionCleanupWorkspace] = useState('');
+  const [isLoadingSessionStorage, setIsLoadingSessionStorage] = useState(false);
+  const [isPreviewingSessionCleanup, setIsPreviewingSessionCleanup] = useState(false);
+  const [isCleaningSessions, setIsCleaningSessions] = useState(false);
+  const [isSessionCleanupArmed, setIsSessionCleanupArmed] = useState(false);
   const didInitializeOpenDraftRef = useRef(false);
   const isMountedRef = useRef(false);
   const isOpenRef = useRef(open);
@@ -295,11 +480,17 @@ export function SettingsDialog({
   const isEmbeddingKeyVisible = visibleKeys.has(embeddingKey);
   const imageGenerationKey = 'image-generation-api-key';
   const isImageGenerationKeyVisible = visibleKeys.has(imageGenerationKey);
+  const tinyfishKey = 'tinyfish-api-key';
+  const isTinyfishKeyVisible = visibleKeys.has(tinyfishKey);
   const currentWorkspaceKey = currentWorkspace.trim();
   const workspaceMemoryItems =
     currentWorkspaceKey && draftSettings.memory?.workspaces
       ? draftSettings.memory.workspaces[currentWorkspaceKey] ?? []
       : [];
+  const storageDataKinds = sessionStorage?.dataKinds ?? [];
+  const storageWeightTotal = storageDataKinds.reduce((sum, item) => sum + Math.max(0, item.weight), 0);
+  const topStorageWorkspaces = sessionStorage?.workspaces.slice(0, 5) ?? [];
+  const cleanupSummary = sessionCleanupPreview?.summary;
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -339,7 +530,135 @@ export function SettingsDialog({
     setIsTestingEmbedding(false);
     setFeedback(null);
     setError(null);
-  }, [open, providers, mcpServers, settings]);
+    setModelTestingId(null);
+    setModelTestResults({});
+    setSessionStorage(null);
+    setSessionCleanupPreview(null);
+    setSessionCleanupMode('older_than');
+    setSessionCleanupDays(30);
+    setSessionCleanupWorkspace(currentWorkspace.trim());
+    setIsLoadingSessionStorage(false);
+    setIsPreviewingSessionCleanup(false);
+    setIsCleaningSessions(false);
+    setIsSessionCleanupArmed(false);
+  }, [open, providers, mcpServers, settings, currentWorkspace]);
+
+  const loadSessionStorage = useCallback(async () => {
+    setIsLoadingSessionStorage(true);
+    setError(null);
+    try {
+      const res = await apiFetch('/api/sessions/storage');
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(String(data.detail ?? '读取 Session 数据失败'));
+      }
+      if (!canUpdateAsyncState()) return;
+      const overview = data as SessionStorageOverview;
+      setSessionStorage(overview);
+      setSessionCleanupWorkspace((prev) => {
+        const normalizedPrev = prev.trim();
+        if (normalizedPrev && overview.workspaces.some((item) => item.workspace === normalizedPrev)) {
+          return normalizedPrev;
+        }
+        if (currentWorkspace.trim() && overview.workspaces.some((item) => item.workspace === currentWorkspace.trim())) {
+          return currentWorkspace.trim();
+        }
+        return overview.workspaces[0]?.workspace ?? '';
+      });
+    } catch (e) {
+      if (!canUpdateAsyncState()) return;
+      const message = getErrorMessage(e, '读取 Session 数据失败');
+      setError(message);
+      appMessage.error(message);
+    } finally {
+      if (canUpdateAsyncState()) {
+        setIsLoadingSessionStorage(false);
+      }
+    }
+  }, [currentWorkspace]);
+
+  useEffect(() => {
+    if (!open || activeTab !== 'data') return;
+    void loadSessionStorage();
+  }, [activeTab, loadSessionStorage, open]);
+
+  const buildSessionCleanupRequest = (dryRun: boolean): SessionCleanupRequest => ({
+    mode: sessionCleanupMode,
+    days: sessionCleanupMode === 'older_than' ? sessionCleanupDays : null,
+    workspace: sessionCleanupMode === 'workspace' ? sessionCleanupWorkspace : null,
+    dryRun,
+    includeActive: false,
+  });
+
+  const requestSessionCleanup = async (dryRun: boolean) => {
+    const request = buildSessionCleanupRequest(dryRun);
+    const res = await apiFetch('/api/sessions/cleanup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(String(data.detail ?? 'Session 清理失败'));
+    }
+    return data as SessionCleanupResponse;
+  };
+
+  const handlePreviewSessionCleanup = async () => {
+    setError(null);
+    setFeedback(null);
+    setIsSessionCleanupArmed(false);
+    setIsPreviewingSessionCleanup(true);
+    try {
+      const data = await requestSessionCleanup(true);
+      if (!canUpdateAsyncState()) return;
+      setSessionCleanupPreview(data);
+      setFeedback(`找到 ${data.candidateCount} 个可清理 Session`);
+    } catch (e) {
+      if (!canUpdateAsyncState()) return;
+      const message = getErrorMessage(e, 'Session 清理预览失败');
+      setError(message);
+      appMessage.error(message);
+    } finally {
+      if (canUpdateAsyncState()) {
+        setIsPreviewingSessionCleanup(false);
+      }
+    }
+  };
+
+  const handleRunSessionCleanup = async () => {
+    if (!sessionCleanupPreview || sessionCleanupPreview.candidateCount <= 0) {
+      await handlePreviewSessionCleanup();
+      return;
+    }
+    if (!isSessionCleanupArmed) {
+      setIsSessionCleanupArmed(true);
+      return;
+    }
+    setError(null);
+    setFeedback(null);
+    setIsCleaningSessions(true);
+    try {
+      const data = await requestSessionCleanup(false);
+      if (!canUpdateAsyncState()) return;
+      setSessionCleanupPreview(data);
+      setIsSessionCleanupArmed(false);
+      await loadSessionStorage();
+      await onSessionsChanged?.();
+      const message = `已清理 ${data.deletedCount} 个 Session`;
+      setFeedback(message);
+      appMessage.success(message);
+    } catch (e) {
+      if (!canUpdateAsyncState()) return;
+      const message = getErrorMessage(e, 'Session 清理失败');
+      setError(message);
+      appMessage.error(message);
+    } finally {
+      if (canUpdateAsyncState()) {
+        setIsCleaningSessions(false);
+      }
+    }
+  };
 
   const toggleKeyVisibility = (key: string) => {
     setVisibleKeys((prev) => {
@@ -498,26 +817,64 @@ export function SettingsDialog({
     setRefreshingId(provider.id ?? `draft-${index}`);
     try {
       const catalog = await onDiscoverModels({
-        id: provider.id ?? null,
-        name: provider.name,
-        baseUrl: provider.baseUrl,
-        apiKey: provider.apiKey,
-        models: provider.models,
-        provider: provider.provider ?? null,
-        apiMode: provider.apiMode ?? 'chat_completions',
+        ...serializeProvider(provider),
+        name: provider.name.trim() || '未命名供应商',
       });
       if (!canUpdateAsyncState()) return;
       updateProvider(index, {
         models: catalog.models,
       });
       const contextCount = catalog.models.filter((model) => model.contextWindow).length;
-      setFeedback(`已拉取 ${catalog.models.length} 个模型，缓存 ${contextCount} 个上下文窗口`);
+      const feedback = `已拉取 ${catalog.models.length} 个模型，缓存 ${contextCount} 个上下文窗口`;
+      setFeedback(feedback);
+      appMessage.success(feedback);
     } catch (e) {
       if (!canUpdateAsyncState()) return;
-      setError(e instanceof Error ? e.message : '拉取模型失败');
+      const message = getErrorMessage(e, '拉取模型失败');
+      setError(message);
+      appMessage.error(message);
     } finally {
       if (canUpdateAsyncState()) {
         setRefreshingId(null);
+      }
+    }
+  };
+
+  const handleTestModelConnection = async (
+    provider: EditableProvider,
+    index: number,
+    modelId?: string | null,
+  ) => {
+    const serialized = serializeProvider(provider);
+    const selectedModel = modelId?.trim() || serialized.models[0]?.id || null;
+    const resultKey = `${provider.id ?? `draft-${index}`}::${selectedModel ?? 'list'}`;
+    setError(null);
+    setFeedback(null);
+    setModelTestingId(resultKey);
+    try {
+      const result = await onTestModelConnection(serialized, selectedModel);
+      if (!canUpdateAsyncState()) return;
+      setModelTestResults((prev) => ({ ...prev, [resultKey]: result }));
+      const message = result.message || '模型连接成功';
+      setFeedback(message);
+      appMessage.success(message);
+    } catch (e) {
+      if (!canUpdateAsyncState()) return;
+      const message = getErrorMessage(e, '模型连接测试失败');
+      setModelTestResults((prev) => ({
+        ...prev,
+        [resultKey]: {
+          ok: false,
+          message,
+          modelCount: 0,
+          model: selectedModel,
+        },
+      }));
+      setError(message);
+      appMessage.error(message);
+    } finally {
+      if (canUpdateAsyncState()) {
+        setModelTestingId(null);
       }
     }
   };
@@ -535,9 +892,12 @@ export function SettingsDialog({
       });
       if (!canUpdateAsyncState()) return;
       setFeedback(message);
+      appMessage.success(message);
     } catch (e) {
       if (!canUpdateAsyncState()) return;
-      setError(e instanceof Error ? e.message : 'Embedding 测试失败');
+      const message = getErrorMessage(e, 'Embedding 测试失败');
+      setError(message);
+      appMessage.error(message);
     } finally {
       if (canUpdateAsyncState()) {
         setIsTestingEmbedding(false);
@@ -562,10 +922,12 @@ export function SettingsDialog({
           toolCount: result.toolCount,
         },
       });
-      setFeedback(`MCP 连接成功，发现 ${result.toolCount} 个工具`);
+      const message = `MCP 连接成功，发现 ${result.toolCount} 个工具`;
+      setFeedback(message);
+      appMessage.success(message);
     } catch (e) {
       if (!canUpdateAsyncState()) return;
-      const message = e instanceof Error ? e.message : 'MCP 连接测试失败';
+      const message = getErrorMessage(e, 'MCP 连接测试失败');
       updateMcpServer(index, {
         status: {
           state: 'error',
@@ -591,6 +953,20 @@ export function SettingsDialog({
         model: prev.imageGeneration?.model ?? '',
         size: prev.imageGeneration?.size ?? '1024x1024',
         quality: prev.imageGeneration?.quality ?? 'auto',
+        ...patch,
+      },
+    }));
+  };
+
+  const updateTinyfishSettings = (patch: Partial<AppSettings['tinyfish']>) => {
+    setDraftSettings((prev) => ({
+      ...prev,
+      tinyfish: {
+        enabled: prev.tinyfish?.enabled ?? false,
+        apiKey: prev.tinyfish?.apiKey ?? '',
+        searchUrl: prev.tinyfish?.searchUrl ?? 'https://api.search.tinyfish.ai',
+        fetchUrl: prev.tinyfish?.fetchUrl ?? 'https://api.fetch.tinyfish.ai',
+        timeout: prev.tinyfish?.timeout ?? 30,
         ...patch,
       },
     }));
@@ -703,29 +1079,17 @@ export function SettingsDialog({
     setFeedback(null);
     setIsSaving(true);
     try {
-      await onSaveProviders(
-        draftProviders.map((p) => ({
-          id: p.id ?? null,
-          name: p.name.trim() || '未命名供应商',
-          baseUrl: p.baseUrl.trim(),
-          apiKey: p.apiKey.trim(),
-          models: p.models
-            .map((model) => ({
-              id: model.id.trim(),
-              contextWindow: model.contextWindow ?? null,
-            }))
-            .filter((model) => model.id),
-          provider: p.provider ?? null,
-          apiMode: p.apiMode ?? 'chat_completions',
-        })),
-      );
+      await onSaveProviders(draftProviders.map(serializeProvider));
       await onSaveMcpServers(draftMcpServers.map((server) => serializeMcpServer(server)));
       await onSaveSettings(draftSettings);
       if (!canUpdateAsyncState()) return;
       setFeedback('设置已保存');
+      appMessage.success('设置已保存');
     } catch (e) {
       if (!canUpdateAsyncState()) return;
-      setError(e instanceof Error ? e.message : '保存设置失败');
+      const message = getErrorMessage(e, '保存设置失败');
+      setError(message);
+      appMessage.error(message);
     } finally {
       if (canUpdateAsyncState()) {
         setIsSaving(false);
@@ -737,7 +1101,7 @@ export function SettingsDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         showCloseButton={false}
-        className="flex max-h-[90vh] flex-col gap-0 overflow-hidden p-0 sm:max-w-[720px]"
+        className="flex max-h-[90vh] flex-col gap-0 overflow-hidden p-0 sm:max-w-[860px]"
       >
           <DialogHeader className="shrink-0 px-6 pt-6 pb-4">
           <div className="flex items-center gap-3">
@@ -773,6 +1137,10 @@ export function SettingsDialog({
               <TabsTrigger value="memory" className="flex-1 gap-1.5">
                 <MemoryStick className="size-3.5" />
                 记忆
+              </TabsTrigger>
+              <TabsTrigger value="data" className="flex-1 gap-1.5">
+                <Database className="size-3.5" />
+                数据
               </TabsTrigger>
               <TabsTrigger value="general" className="flex-1 gap-1.5">
                 <Shield className="size-3.5" />
@@ -835,8 +1203,14 @@ export function SettingsDialog({
                     const isRefreshing = refreshingId === key;
                     const isKeyVisible = visibleKeys.has(key);
                     const isConfirmingDelete = deleteConfirmId === key;
-                    const providerType = provider.provider?.trim() || 'openrouter';
-                    const isAnthropicProvider = providerType === 'anthropic';
+                    const providerTestModel = provider.models.find((model) => model.id.trim())?.id ?? null;
+                    const providerTestKey = `${key}::${providerTestModel ?? 'list'}`;
+                    const isTestingProvider = modelTestingId === providerTestKey;
+                    const interfaceMode =
+                      provider.provider?.trim() === 'anthropic'
+                        ? 'anthropic'
+                        : provider.apiMode ?? 'chat_completions';
+                    const isAnthropicProvider = interfaceMode === 'anthropic';
 
                     return (
                       <div className="space-y-3">
@@ -845,6 +1219,16 @@ export function SettingsDialog({
                             <code className="text-[11px]">Base URL</code> 只填公共前缀，后端会按模式自动补路径
                           </p>
                           <div className="flex items-center gap-1.5">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="gap-1.5 h-7 text-xs"
+                              onClick={() => void handleTestModelConnection(provider, index, providerTestModel)}
+                              disabled={isTestingProvider}
+                            >
+                              <CheckCircle2 className={`size-3 ${isTestingProvider ? 'animate-pulse' : ''}`} />
+                              {isTestingProvider ? '测试中...' : '测试连接'}
+                            </Button>
                             <Button
                               variant="outline"
                               size="sm"
@@ -888,35 +1272,7 @@ export function SettingsDialog({
                           </div>
                         </div>
 
-                        <div className="grid grid-cols-3 gap-3">
-                          <div className="space-y-1">
-                            <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
-                              <Server className="size-2.5" />
-                              接口类型
-                            </label>
-                            <Select
-                              value={providerType}
-                              onValueChange={(value) =>
-                                updateProvider(index, {
-                                  provider: value,
-                                  apiMode: value === 'anthropic'
-                                    ? 'chat_completions'
-                                    : provider.apiMode ?? 'chat_completions',
-                                })
-                              }
-                            >
-                              <SelectTrigger className="h-7 w-full text-xs">
-                                <SelectValue placeholder="选择接口类型" />
-                              </SelectTrigger>
-                              <SelectContent align="start">
-                                {modelProviderOptions(providerType).map((option) => (
-                                  <SelectItem key={option.value} value={option.value}>
-                                    {option.label}
-                                  </SelectItem>
-                                ))}
-                              </SelectContent>
-                            </Select>
-                          </div>
+                        <div className="grid grid-cols-2 gap-3">
                           <div className="space-y-1">
                             <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
                               <Server className="size-2.5" />
@@ -943,30 +1299,38 @@ export function SettingsDialog({
                           </div>
                         </div>
 
-                        {!isAnthropicProvider ? (
-                          <div className="space-y-1">
-                            <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
-                              <Server className="size-2.5" />
-                              接口模式
-                            </label>
-                            <Select
-                              value={provider.apiMode ?? 'chat_completions'}
-                              onValueChange={(value) =>
-                                updateProvider(index, {
-                                  apiMode: value as 'chat_completions' | 'responses',
-                                })
-                              }
-                            >
-                              <SelectTrigger className="h-7 w-full text-xs">
-                                <SelectValue placeholder="选择接口模式" />
-                              </SelectTrigger>
-                              <SelectContent align="start">
-                                <SelectItem value="chat_completions">OpenAI 兼容 /chat/completions</SelectItem>
-                                <SelectItem value="responses">OpenAI /responses</SelectItem>
-                              </SelectContent>
-                            </Select>
-                          </div>
-                        ) : null}
+                        <div className="space-y-1">
+                          <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+                            <Server className="size-2.5" />
+                            接口模式
+                          </label>
+                          <Select
+                            value={interfaceMode}
+                            onValueChange={(value) =>
+                              updateProvider(index, {
+                                provider:
+                                  value === 'anthropic'
+                                    ? 'anthropic'
+                                    : provider.provider === 'anthropic'
+                                      ? null
+                                      : provider.provider,
+                                apiMode:
+                                  value === 'responses'
+                                    ? 'responses'
+                                    : 'chat_completions',
+                              })
+                            }
+                          >
+                            <SelectTrigger className="h-7 w-full text-xs">
+                              <SelectValue placeholder="选择接口模式" />
+                            </SelectTrigger>
+                            <SelectContent align="start">
+                              <SelectItem value="chat_completions">OpenAI 兼容 /chat/completions</SelectItem>
+                              <SelectItem value="responses">OpenAI /responses</SelectItem>
+                              <SelectItem value="anthropic">Anthropic /messages</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
 
                         <div className="space-y-1">
                           <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
@@ -1008,58 +1372,197 @@ export function SettingsDialog({
                               添加
                             </Button>
                           </div>
-                          <div className="overflow-y-auto max-h-60 rounded-md border bg-background">
+                          <div className="max-h-[360px] overflow-y-auto rounded-md border bg-background/70 p-2">
                             {provider.models.length === 0 ? (
                               <div className="flex h-20 items-center justify-center text-xs text-muted-foreground">
                                 暂无模型，点击添加或拉取模型
                               </div>
                             ) : (
-                              <div className="divide-y">
-                                {provider.models.map((model, modelIndex) => (
-                                  <div
-                                    key={modelIndex}
-                                    className="grid grid-cols-[minmax(0,1fr)_120px_32px] items-center gap-2 px-2 py-2"
-                                  >
-                                    <div className="flex min-w-0 items-center gap-2">
-                                      <div className="flex size-6 shrink-0 items-center justify-center rounded-full border bg-muted/40">
-                                        <Server className="size-3 text-muted-foreground" />
+                              <div className="space-y-2">
+                                {provider.models.map((model, modelIndex) => {
+                                  const modelId = model.id.trim();
+                                  const modelKey = `${key}::${modelId || `model-${modelIndex}`}`;
+                                  const isTestingModel = modelTestingId === modelKey;
+                                  const testResult = modelTestResults[modelKey];
+                                  const inputModalities = compactStringList(model.inputModalities);
+                                  const outputModalities = compactStringList(model.outputModalities);
+                                  const capabilities = compactStringList(model.capabilities);
+                                  const supportedParameters = compactStringList(model.supportedParameters);
+                                  const promptPrice = model.pricing?.prompt ?? model.pricing?.input;
+                                  const completionPrice = model.pricing?.completion ?? model.pricing?.output;
+                                  const visibleCapabilities = capabilities.slice(0, 6);
+                                  const visibleInputModalities = inputModalities.length ? inputModalities : ['text'];
+                                  const visibleOutputModalities = outputModalities.length ? outputModalities : ['text'];
+
+                                  return (
+                                    <div key={modelIndex} className="rounded-md border bg-card p-3">
+                                      <div className="flex items-start gap-2">
+                                        <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md border bg-emerald-500/10 text-emerald-600 dark:text-emerald-300">
+                                          <Server className="size-3.5" />
+                                        </div>
+                                        <div className="min-w-0 flex-1 space-y-1">
+                                          {model.name ? (
+                                            <div className="truncate text-sm font-semibold">
+                                              {model.name}
+                                            </div>
+                                          ) : null}
+                                          <Input
+                                            value={model.id}
+                                            onChange={(event) =>
+                                              updateProviderModel(index, modelIndex, { id: event.target.value })
+                                            }
+                                            placeholder="model-id"
+                                            className="h-7 min-w-0 border-0 bg-transparent px-0 font-mono text-xs shadow-none focus-visible:ring-0"
+                                          />
+                                          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
+                                            <span>{formatTokenCount(model.contextWindow)} ctx</span>
+                                            <span>{formatTokenCount(model.maxOutputTokens)} out</span>
+                                            <span className="inline-flex items-center gap-1">
+                                              <CircleDollarSign className="size-3" />
+                                              {formatPricePerMillion(promptPrice)} in /{' '}
+                                              {formatPricePerMillion(completionPrice)} out per 1M
+                                            </span>
+                                          </div>
+                                        </div>
+                                        <div className="flex shrink-0 items-center gap-1">
+                                          <Button
+                                            variant="ghost"
+                                            size="icon-xs"
+                                            className="size-7 text-muted-foreground"
+                                            onClick={() => void handleTestModelConnection(provider, index, model.id)}
+                                            disabled={isTestingModel}
+                                            title="测试这个模型"
+                                          >
+                                            <CheckCircle2
+                                              className={`size-3 ${isTestingModel ? 'animate-pulse' : ''}`}
+                                            />
+                                          </Button>
+                                          <Button
+                                            variant="ghost"
+                                            size="icon-xs"
+                                            className="size-7 text-muted-foreground"
+                                            onClick={() => removeProviderModel(index, modelIndex)}
+                                            title="删除模型"
+                                          >
+                                            <Trash2 className="size-3" />
+                                          </Button>
+                                        </div>
                                       </div>
-                                      <Input
-                                        value={model.id}
-                                        onChange={(event) =>
-                                          updateProviderModel(index, modelIndex, { id: event.target.value })
-                                        }
-                                        placeholder="model-id"
-                                        className="h-7 min-w-0 border-0 bg-transparent px-0 font-mono text-xs shadow-none focus-visible:ring-0"
-                                      />
+
+                                      <div className="mt-2 grid grid-cols-2 gap-2">
+                                        <label className="space-y-1">
+                                          <span className="text-[10px] text-muted-foreground">上下文</span>
+                                          <Input
+                                            type="number"
+                                            min={1}
+                                            value={model.contextWindow ?? ''}
+                                            onChange={(event) =>
+                                              updateProviderModel(index, modelIndex, {
+                                                contextWindow: event.target.value
+                                                  ? Number(event.target.value)
+                                                  : null,
+                                              })
+                                            }
+                                            className="h-7 px-2 text-right font-mono text-[11px]"
+                                          />
+                                        </label>
+                                        <label className="space-y-1">
+                                          <span className="text-[10px] text-muted-foreground">最大输出</span>
+                                          <Input
+                                            type="number"
+                                            min={1}
+                                            value={model.maxOutputTokens ?? ''}
+                                            onChange={(event) =>
+                                              updateProviderModel(index, modelIndex, {
+                                                maxOutputTokens: event.target.value
+                                                  ? Number(event.target.value)
+                                                  : null,
+                                              })
+                                            }
+                                            className="h-7 px-2 text-right font-mono text-[11px]"
+                                          />
+                                        </label>
+                                      </div>
+
+                                      <div className="mt-3 grid grid-cols-[42px_minmax(0,1fr)] gap-x-2 gap-y-2 text-xs">
+                                        <span className="text-[11px] font-medium text-muted-foreground">权重</span>
+                                        <div className="flex min-w-0 flex-wrap gap-1.5">
+                                          {visibleCapabilities.length === 0 ? (
+                                            <span className="rounded-md border px-2 py-1 text-[11px] text-muted-foreground">
+                                              基础文本
+                                            </span>
+                                          ) : (
+                                            visibleCapabilities.map((capability) => (
+                                              <span
+                                                key={capability}
+                                                title={capabilityLabel(capability)}
+                                                className="inline-flex size-7 items-center justify-center rounded-md border bg-emerald-500/10 text-emerald-600 dark:text-emerald-300"
+                                              >
+                                                <CapabilityIcon value={capability} />
+                                              </span>
+                                            ))
+                                          )}
+                                          {supportedParameters.includes('tools') && !capabilities.includes('tools') ? (
+                                            <span
+                                              title="工具调用"
+                                              className="inline-flex size-7 items-center justify-center rounded-md border bg-emerald-500/10 text-emerald-600 dark:text-emerald-300"
+                                            >
+                                              <Wrench className="size-3" />
+                                            </span>
+                                          ) : null}
+                                        </div>
+                                        <span className="text-[11px] font-medium text-muted-foreground">输入</span>
+                                        <div className="flex min-w-0 flex-wrap gap-1.5">
+                                          {visibleInputModalities.map((modality) => (
+                                            <span
+                                              key={modality}
+                                              title={modalityLabel(modality)}
+                                              className="inline-flex size-7 items-center justify-center rounded-md border bg-background text-muted-foreground"
+                                            >
+                                              <ModalityIcon value={modality} />
+                                            </span>
+                                          ))}
+                                        </div>
+                                        <span className="text-[11px] font-medium text-muted-foreground">输出</span>
+                                        <div className="flex min-w-0 flex-wrap gap-1.5">
+                                          {visibleOutputModalities.map((modality) => (
+                                            <span
+                                              key={modality}
+                                              title={modalityLabel(modality)}
+                                              className="inline-flex size-7 items-center justify-center rounded-md border bg-background text-muted-foreground"
+                                            >
+                                              <ModalityIcon value={modality} />
+                                            </span>
+                                          ))}
+                                        </div>
+                                      </div>
+
+                                      {testResult ? (
+                                        <div
+                                          className={`mt-3 flex items-start gap-2 rounded-md border px-2.5 py-2 text-[11px] ${
+                                            testResult.ok
+                                              ? 'border-emerald-500/25 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+                                              : 'border-destructive/25 bg-destructive/5 text-destructive'
+                                          }`}
+                                        >
+                                          {testResult.ok ? (
+                                            <CheckCircle2 className="mt-0.5 size-3 shrink-0" />
+                                          ) : (
+                                            <XCircle className="mt-0.5 size-3 shrink-0" />
+                                          )}
+                                          <div className="min-w-0">
+                                            <div className="break-words">{testResult.message}</div>
+                                            {testResult.responsePreview ? (
+                                              <div className="mt-1 truncate font-mono opacity-80">
+                                                {testResult.responsePreview}
+                                              </div>
+                                            ) : null}
+                                          </div>
+                                        </div>
+                                      ) : null}
                                     </div>
-                                    <div className="flex items-center gap-1.5">
-                                      <span className="shrink-0 text-[10px] text-muted-foreground">上下文</span>
-                                      <Input
-                                        type="number"
-                                        min={1}
-                                        value={model.contextWindow ?? ''}
-                                        onChange={(event) =>
-                                          updateProviderModel(index, modelIndex, {
-                                            contextWindow: event.target.value
-                                              ? Number(event.target.value)
-                                              : null,
-                                          })
-                                        }
-                                        className="h-7 px-2 text-right font-mono text-[11px]"
-                                      />
-                                    </div>
-                                    <Button
-                                      variant="ghost"
-                                      size="icon-xs"
-                                      className="size-7 text-muted-foreground"
-                                      onClick={() => removeProviderModel(index, modelIndex)}
-                                      title="删除模型"
-                                    >
-                                      <Trash2 className="size-3" />
-                                    </Button>
-                                  </div>
-                                ))}
+                                  );
+                                })}
                               </div>
                             )}
                           </div>
@@ -1571,6 +2074,325 @@ export function SettingsDialog({
             </div>
           </TabsContent>
 
+          <TabsContent value="data" className="mt-0 min-h-0 flex-1 overflow-y-auto px-6 py-4">
+            <div className="space-y-4">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-semibold">Session 数据</h3>
+                  <p className="text-xs text-muted-foreground">
+                    {sessionStorage
+                      ? `更新于 ${formatStorageTime(sessionStorage.generatedAt)}`
+                      : '统计 Session 历史、消息、工具调用和产物'}
+                  </p>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8 gap-1.5 text-xs"
+                  onClick={() => void loadSessionStorage()}
+                  disabled={isLoadingSessionStorage}
+                >
+                  <RefreshCcw className={`size-3 ${isLoadingSessionStorage ? 'animate-spin' : ''}`} />
+                  刷新
+                </Button>
+              </div>
+
+              <div className="grid grid-cols-4 gap-2">
+                {[
+                  { label: 'Session', value: sessionStorage?.totalSessions ?? 0, icon: Database },
+                  { label: '消息', value: sessionStorage?.totalMessages ?? 0, icon: FileText },
+                  { label: '工具调用', value: sessionStorage?.totalToolCalls ?? 0, icon: Wrench },
+                  { label: '产物', value: sessionStorage?.totalArtifacts ?? 0, icon: HardDrive },
+                ].map((item) => {
+                  const Icon = item.icon;
+                  return (
+                    <div key={item.label} className="rounded-lg border bg-card p-3">
+                      <div className="mb-2 flex items-center justify-between">
+                        <span className="text-[11px] text-muted-foreground">{item.label}</span>
+                        <Icon className="size-3 text-muted-foreground" />
+                      </div>
+                      <div className="text-xl font-semibold tabular-nums">{item.value.toLocaleString()}</div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+                <div className="space-y-4">
+                  <div className="rounded-lg border bg-card p-4">
+                    <div className="mb-4 flex items-center justify-between">
+                      <div>
+                        <div className="flex items-center gap-1.5 text-sm font-medium">
+                          <PieChart className="size-3.5" />
+                          数据占比
+                        </div>
+                        <div className="text-xs text-muted-foreground">
+                          DB {formatStorageBytes(sessionStorage?.databaseBytes)} · Artifacts {formatStorageBytes(sessionStorage?.totalArtifactBytes)}
+                        </div>
+                      </div>
+                      <Badge variant="secondary" className="text-[10px]">
+                        {sessionStorage?.activeSessions ?? 0} 活跃
+                      </Badge>
+                    </div>
+                    <div className="grid gap-4 sm:grid-cols-[180px_minmax(0,1fr)]">
+                      <div className="relative mx-auto size-40 rounded-full border bg-muted">
+                        <div
+                          className="absolute inset-0 rounded-full"
+                          style={{ background: buildSessionPieGradient(storageDataKinds) }}
+                        />
+                        <div className="absolute inset-7 rounded-full border bg-background shadow-sm" />
+                        <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
+                          <span className="text-xl font-semibold tabular-nums">
+                            {(sessionStorage?.totalSessions ?? 0).toLocaleString()}
+                          </span>
+                          <span className="text-[11px] text-muted-foreground">sessions</span>
+                        </div>
+                      </div>
+                      <div className="space-y-2">
+                        {storageDataKinds.map((item, index) => {
+                          const percent = storageWeightTotal
+                            ? Math.round((item.weight / storageWeightTotal) * 100)
+                            : 0;
+                          return (
+                            <div key={item.key} className="flex items-center gap-2 text-xs">
+                              <span
+                                className="size-2.5 rounded-full"
+                                style={{ backgroundColor: SESSION_CHART_COLORS[index % SESSION_CHART_COLORS.length] }}
+                              />
+                              <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                              <span className="text-muted-foreground tabular-nums">{item.records.toLocaleString()}</span>
+                              <span className="w-9 text-right tabular-nums">{percent}%</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <div className="rounded-lg border bg-card p-4">
+                      <div className="mb-3 flex items-center gap-1.5 text-sm font-medium">
+                        <CalendarClock className="size-3.5" />
+                        时间分布
+                      </div>
+                      <div className="space-y-2">
+                        {(sessionStorage?.ageBuckets ?? []).map((bucket) => {
+                          const total = Math.max(1, sessionStorage?.totalSessions ?? 0);
+                          return (
+                            <div key={bucket.key} className="space-y-1">
+                              <div className="flex items-center justify-between text-xs">
+                                <span>{bucket.label}</span>
+                                <span className="text-muted-foreground tabular-nums">{bucket.count}</span>
+                              </div>
+                              <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+                                <div
+                                  className="h-full rounded-full bg-primary"
+                                  style={{ width: `${Math.round((bucket.count / total) * 100)}%` }}
+                                />
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <div className="rounded-lg border bg-card p-4">
+                      <div className="mb-3 flex items-center gap-1.5 text-sm font-medium">
+                        <Globe className="size-3.5" />
+                        工作区
+                      </div>
+                      <div className="space-y-2">
+                        {topStorageWorkspaces.length === 0 ? (
+                          <div className="text-xs text-muted-foreground">暂无 Session 数据</div>
+                        ) : (
+                          topStorageWorkspaces.map((item) => (
+                            <div key={item.workspace} className="rounded-md bg-muted/60 px-2.5 py-2">
+                              <div className="flex items-center justify-between gap-2 text-xs">
+                                <span className="min-w-0 truncate font-medium">{item.workspace}</span>
+                                <span className="shrink-0 tabular-nums">{item.sessionCount}</span>
+                              </div>
+                              <div className="mt-1 text-[10px] text-muted-foreground">
+                                {item.messageCount.toLocaleString()} 消息 · {formatStorageTime(item.latestUpdatedAt)}
+                              </div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  <div className="rounded-lg border bg-card p-4">
+                    <div className="mb-3 flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-1.5 text-sm font-medium">
+                        <Eraser className="size-3.5" />
+                        细分清理
+                      </div>
+                      {sessionStorage?.emptySessions ? (
+                        <Badge variant="outline" className="text-[10px]">
+                          {sessionStorage.emptySessions} 空 Session
+                        </Badge>
+                      ) : null}
+                    </div>
+
+                    <div className="space-y-3">
+                      <div className="space-y-1.5">
+                        <label className="text-[11px] font-medium text-muted-foreground">范围</label>
+                        <Select
+                          value={sessionCleanupMode}
+                          onValueChange={(mode) => {
+                            setSessionCleanupMode(mode as SessionCleanupRequest['mode']);
+                            setSessionCleanupPreview(null);
+                            setIsSessionCleanupArmed(false);
+                          }}
+                        >
+                          <SelectTrigger className="h-8 text-xs">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="older_than">按更新时间</SelectItem>
+                            <SelectItem value="workspace">按工作区</SelectItem>
+                            <SelectItem value="empty">空 Session</SelectItem>
+                            <SelectItem value="all">全部历史 Session</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+
+                      {sessionCleanupMode === 'older_than' ? (
+                        <div className="space-y-1.5">
+                          <label className="text-[11px] font-medium text-muted-foreground">早于天数</label>
+                          <Input
+                            type="number"
+                            min={1}
+                            value={sessionCleanupDays}
+                            onChange={(e) => {
+                              setSessionCleanupDays(Math.max(1, Number(e.target.value) || 1));
+                              setSessionCleanupPreview(null);
+                              setIsSessionCleanupArmed(false);
+                            }}
+                            className="h-8 text-xs"
+                          />
+                        </div>
+                      ) : null}
+
+                      {sessionCleanupMode === 'workspace' ? (
+                        <div className="space-y-1.5">
+                          <label className="text-[11px] font-medium text-muted-foreground">工作区</label>
+                          <Select
+                            value={sessionCleanupWorkspace || undefined}
+                            onValueChange={(workspace) => {
+                              setSessionCleanupWorkspace(workspace);
+                              setSessionCleanupPreview(null);
+                              setIsSessionCleanupArmed(false);
+                            }}
+                          >
+                            <SelectTrigger className="h-8 text-xs">
+                              <SelectValue placeholder="选择工作区" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {(sessionStorage?.workspaces ?? []).map((item) => (
+                                <SelectItem key={item.workspace} value={item.workspace}>
+                                  {item.workspace}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      ) : null}
+
+                      <div className="rounded-md bg-muted/60 p-3">
+                        {cleanupSummary ? (
+                          <div className="grid grid-cols-2 gap-x-3 gap-y-2 text-xs">
+                            <div>
+                              <div className="text-muted-foreground">候选 Session</div>
+                              <div className="font-semibold tabular-nums">{sessionCleanupPreview.candidateCount}</div>
+                            </div>
+                            <div>
+                              <div className="text-muted-foreground">消息</div>
+                              <div className="font-semibold tabular-nums">{cleanupSummary.messageCount.toLocaleString()}</div>
+                            </div>
+                            <div>
+                              <div className="text-muted-foreground">工具调用</div>
+                              <div className="font-semibold tabular-nums">{cleanupSummary.toolCallCount.toLocaleString()}</div>
+                            </div>
+                            <div>
+                              <div className="text-muted-foreground">产物</div>
+                              <div className="font-semibold tabular-nums">
+                                {cleanupSummary.artifactCount.toLocaleString()} · {formatStorageBytes(cleanupSummary.artifactBytes)}
+                              </div>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="text-xs text-muted-foreground">先预览候选，再执行清理</div>
+                        )}
+                      </div>
+
+                      {sessionCleanupPreview?.protectedActiveCount ? (
+                        <Alert className="py-2">
+                          <AlertTriangle className="size-4" />
+                          <AlertDescription className="text-xs">
+                            已跳过 {sessionCleanupPreview.protectedActiveCount} 个活跃 Session
+                          </AlertDescription>
+                        </Alert>
+                      ) : null}
+
+                      <div className="flex gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-8 flex-1 gap-1.5 text-xs"
+                          onClick={() => void handlePreviewSessionCleanup()}
+                          disabled={isPreviewingSessionCleanup || isCleaningSessions}
+                        >
+                          <Search className={`size-3 ${isPreviewingSessionCleanup ? 'animate-pulse' : ''}`} />
+                          预览
+                        </Button>
+                        <Button
+                          variant={isSessionCleanupArmed ? 'destructive' : 'default'}
+                          size="sm"
+                          className="h-8 flex-1 gap-1.5 text-xs"
+                          onClick={() => void handleRunSessionCleanup()}
+                          disabled={
+                            isPreviewingSessionCleanup ||
+                            isCleaningSessions ||
+                            Boolean(sessionCleanupPreview && sessionCleanupPreview.candidateCount <= 0)
+                          }
+                        >
+                          <Trash2 className={`size-3 ${isCleaningSessions ? 'animate-pulse' : ''}`} />
+                          {isCleaningSessions ? '清理中...' : isSessionCleanupArmed ? '确认清理' : '清理'}
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg border bg-card p-4">
+                    <div className="mb-3 text-sm font-medium">候选预览</div>
+                    <div className="max-h-56 space-y-2 overflow-y-auto pr-1">
+                      {(sessionCleanupPreview?.candidates ?? []).length === 0 ? (
+                        <div className="text-xs text-muted-foreground">暂无候选</div>
+                      ) : (
+                        sessionCleanupPreview!.candidates.slice(0, 8).map((item) => (
+                          <div key={item.sessionId} className="rounded-md border bg-background px-2.5 py-2">
+                            <div className="flex items-center gap-2 text-xs">
+                              <span className="min-w-0 flex-1 truncate font-medium">{item.title || item.sessionId}</span>
+                              {item.isActive ? (
+                                <Badge variant="secondary" className="text-[10px]">活跃</Badge>
+                              ) : null}
+                            </div>
+                            <div className="mt-1 truncate text-[10px] text-muted-foreground">
+                              {item.workspace} · {item.messageCount} 消息 · {formatStorageTime(item.updatedAt)}
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </TabsContent>
+
           <TabsContent value="general" className="mt-0 min-h-0 flex-1 overflow-y-auto px-6 py-4">
             <div className="space-y-5">
               <div>
@@ -1902,6 +2724,101 @@ export function SettingsDialog({
                           ))}
                         </SelectContent>
                       </Select>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <Separator />
+
+              <div>
+                <h3 className="mb-3 text-sm font-semibold">Tinyfish 联网工具</h3>
+                <div className="space-y-4 rounded-lg border bg-card p-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="flex items-start gap-3">
+                      <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-cyan-500/10">
+                        <Search className="size-4 text-cyan-600 dark:text-cyan-400" />
+                      </div>
+                      <div className="space-y-1">
+                        <div className="text-sm font-medium">优先使用设置里的 Tinyfish</div>
+                        <div className="text-xs text-muted-foreground">
+                          启用后，plan agent 的 search_web / fetch_url_content 会使用这里的配置
+                        </div>
+                      </div>
+                    </div>
+                    <Switch
+                      checked={draftSettings.tinyfish?.enabled ?? false}
+                      onCheckedChange={(enabled) => updateTinyfishSettings({ enabled })}
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1.5">
+                      <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+                        <Globe className="size-2.5" />
+                        Search URL
+                      </label>
+                      <Input
+                        value={draftSettings.tinyfish?.searchUrl ?? 'https://api.search.tinyfish.ai'}
+                        onChange={(e) => updateTinyfishSettings({ searchUrl: e.target.value })}
+                        placeholder="https://api.search.tinyfish.ai"
+                        className="h-8 text-xs"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+                        <Server className="size-2.5" />
+                        Fetch URL
+                      </label>
+                      <Input
+                        value={draftSettings.tinyfish?.fetchUrl ?? 'https://api.fetch.tinyfish.ai'}
+                        onChange={(e) => updateTinyfishSettings({ fetchUrl: e.target.value })}
+                        placeholder="https://api.fetch.tinyfish.ai"
+                        className="h-8 text-xs"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-[1fr_140px] gap-3">
+                    <div className="space-y-1.5">
+                      <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+                        <Key className="size-2.5" />
+                        Tinyfish API Key
+                      </label>
+                      <div className="relative">
+                        <Input
+                          type={isTinyfishKeyVisible ? 'text' : 'password'}
+                          value={draftSettings.tinyfish?.apiKey ?? ''}
+                          onChange={(e) => updateTinyfishSettings({ apiKey: e.target.value })}
+                          placeholder="sk-tinyfish-..."
+                          className="h-8 pr-8 text-xs"
+                        />
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          className="absolute top-1/2 right-1 size-5 -translate-y-1/2"
+                          onClick={() => toggleKeyVisibility(tinyfishKey)}
+                        >
+                          {isTinyfishKeyVisible ? <EyeOff className="size-3" /> : <Eye className="size-3" />}
+                        </Button>
+                      </div>
+                    </div>
+                    <div className="space-y-1.5">
+                      <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+                        <ShieldCheck className="size-2.5" />
+                        超时秒数
+                      </label>
+                      <Input
+                        type="number"
+                        min={5}
+                        value={draftSettings.tinyfish?.timeout ?? 30}
+                        onChange={(e) =>
+                          updateTinyfishSettings({
+                            timeout: Math.max(5, Number(e.target.value) || 30),
+                          })
+                        }
+                        className="h-8 text-xs"
+                      />
                     </div>
                   </div>
                 </div>

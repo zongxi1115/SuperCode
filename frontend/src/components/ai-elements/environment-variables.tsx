@@ -2,6 +2,7 @@
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { message as appMessage } from "@/components/ui/message";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 import { CheckIcon, CopyIcon, EyeIcon, EyeOffIcon } from "lucide-react";
@@ -275,7 +276,9 @@ export const EnvironmentVariableCopyButton = ({
 
   const copyToClipboard = useCallback(async () => {
     if (typeof window === "undefined" || !navigator?.clipboard?.writeText) {
-      onError?.(new Error("Clipboard API not available"));
+      const error = new Error("Clipboard API not available");
+      onError?.(error);
+      appMessage.error("当前环境不支持复制");
       return;
     }
 
@@ -283,9 +286,11 @@ export const EnvironmentVariableCopyButton = ({
       await navigator.clipboard.writeText(getTextToCopy());
       setIsCopied(true);
       onCopy?.();
+      appMessage.success("环境变量已复制");
       timeoutRef.current = window.setTimeout(() => setIsCopied(false), timeout);
     } catch (error) {
       onError?.(error as Error);
+      appMessage.error(error instanceof Error ? error.message : "复制环境变量失败");
     }
   }, [getTextToCopy, onCopy, onError, timeout]);
 

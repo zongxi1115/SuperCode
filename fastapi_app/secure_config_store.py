@@ -96,6 +96,7 @@ class SecureConfigStore:
                     provider_id TEXT NOT NULL,
                     model_id TEXT NOT NULL,
                     context_window INTEGER,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
                     sort_order INTEGER NOT NULL DEFAULT 0,
                     created_at INTEGER NOT NULL,
                     FOREIGN KEY (provider_id) REFERENCES model_providers(id) ON DELETE CASCADE,
@@ -119,6 +120,7 @@ class SecureConfigStore:
             """)
             self._ensure_column(conn, "model_providers", "sort_order", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(conn, "models", "sort_order", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(conn, "models", "metadata_json", "TEXT NOT NULL DEFAULT '{}'")
 
     def _ensure_column(
         self,
@@ -179,15 +181,40 @@ class SecureConfigStore:
 
                     context_window = model_data.get("contextWindow")
                     model_uuid = f"{provider_id}::{model_id}"
-
-                    conn.execute("""
-                        INSERT INTO models (id, provider_id, model_id, context_window, sort_order, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    """, (model_uuid, provider_id, model_id, context_window, model_index, now))
-                    stored_models.append({
+                    stored_model = {
                         "id": model_id,
                         "contextWindow": context_window,
-                    })
+                    }
+                    for key in (
+                        "name",
+                        "maxOutputTokens",
+                        "inputModalities",
+                        "outputModalities",
+                        "supportedParameters",
+                        "capabilities",
+                        "pricing",
+                        "ownedBy",
+                        "created",
+                        "description",
+                    ):
+                        value = model_data.get(key)
+                        if value not in (None, "", [], {}):
+                            stored_model[key] = value
+                    metadata_json = json.dumps(
+                        {
+                            key: value
+                            for key, value in stored_model.items()
+                            if key not in {"id", "contextWindow"}
+                        },
+                        ensure_ascii=False,
+                    )
+
+                    conn.execute("""
+                        INSERT INTO models
+                        (id, provider_id, model_id, context_window, metadata_json, sort_order, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """, (model_uuid, provider_id, model_id, context_window, metadata_json, model_index, now))
+                    stored_models.append(stored_model)
 
                 normalized_providers.append({
                     "id": provider_id,
@@ -219,19 +246,28 @@ class SecureConfigStore:
 
                 # 加载该供应商的模型
                 model_rows = conn.execute("""
-                    SELECT model_id, context_window
+                    SELECT model_id, context_window, metadata_json
                     FROM models
                     WHERE provider_id = ?
                     ORDER BY sort_order ASC, model_id ASC
                 """, (provider_id,)).fetchall()
 
-                models = [
-                    {
-                        "id": model_row["model_id"],
-                        "contextWindow": model_row["context_window"],
-                    }
-                    for model_row in model_rows
-                ]
+                models = []
+                for model_row in model_rows:
+                    metadata: dict[str, Any] = {}
+                    try:
+                        parsed_metadata = json.loads(model_row["metadata_json"] or "{}")
+                        if isinstance(parsed_metadata, dict):
+                            metadata = parsed_metadata
+                    except json.JSONDecodeError:
+                        metadata = {}
+                    models.append(
+                        {
+                            **metadata,
+                            "id": model_row["model_id"],
+                            "contextWindow": model_row["context_window"],
+                        }
+                    )
 
                 providers.append({
                     "id": provider_id,

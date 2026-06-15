@@ -4,6 +4,7 @@ import json
 import shutil
 import sqlite3
 import threading
+import time
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -181,6 +182,151 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
         with self._lock, self._connect() as connection:
             row = connection.execute("SELECT COUNT(*) AS total FROM sessions").fetchone()
             return int(row["total"] if row is not None else 0)
+
+    def storage_overview(self, active_session_ids: set[str] | None = None) -> dict[str, Any]:
+        active_ids = active_session_ids or set()
+        now_ms = int(time.time() * 1000)
+        with self._lock, self._connect() as connection:
+            session_rows = connection.execute(
+                """
+                SELECT
+                    session_id, workspace, execution_mode, base_workspace, worktree_path,
+                    agent_type, title, preview, message_count, tool_call_count,
+                    created_at, updated_at
+                FROM sessions
+                ORDER BY updated_at DESC
+                """
+            ).fetchall()
+            message_counts = self._count_by_session(connection, "session_messages")
+            tool_counts = self._count_by_session(connection, "session_tool_calls")
+            code_change_counts = self._count_by_session(connection, "session_code_changes")
+            artifact_stats = self._artifact_stats_by_session(connection)
+            data_kinds = self._storage_kind_breakdown(connection)
+
+        workspaces: dict[str, dict[str, Any]] = {}
+        age_buckets = [
+            {"key": "recent", "label": "7 天内", "minDays": 0, "maxDays": 7, "count": 0},
+            {"key": "month", "label": "7-30 天", "minDays": 7, "maxDays": 30, "count": 0},
+            {"key": "quarter", "label": "30-90 天", "minDays": 30, "maxDays": 90, "count": 0},
+            {"key": "old", "label": "90 天以上", "minDays": 90, "maxDays": None, "count": 0},
+        ]
+        agent_types: dict[str, int] = {}
+        total_messages = 0
+        total_tools = 0
+        total_code_changes = 0
+        total_artifacts = 0
+        total_artifact_bytes = 0
+        active_count = 0
+        empty_count = 0
+        for row in session_rows:
+            session_id = str(row["session_id"])
+            workspace = str(row["base_workspace"] or row["workspace"] or "未命名工作区")
+            updated_at = int(row["updated_at"] or 0)
+            messages = int(message_counts.get(session_id, row["message_count"] or 0))
+            tools = int(tool_counts.get(session_id, row["tool_call_count"] or 0))
+            code_changes = int(code_change_counts.get(session_id, 0))
+            artifacts = artifact_stats.get(session_id, {"count": 0, "bytes": 0})
+            artifact_count = int(artifacts["count"])
+            artifact_bytes = int(artifacts["bytes"])
+            is_active = session_id in active_ids
+            active_count += 1 if is_active else 0
+            empty_count += 1 if messages == 0 and tools == 0 and code_changes == 0 and artifact_count == 0 else 0
+            total_messages += messages
+            total_tools += tools
+            total_code_changes += code_changes
+            total_artifacts += artifact_count
+            total_artifact_bytes += artifact_bytes
+            agent_type = str(row["agent_type"] or "coding")
+            agent_types[agent_type] = agent_types.get(agent_type, 0) + 1
+            workspace_entry = workspaces.setdefault(
+                workspace,
+                {
+                    "workspace": workspace,
+                    "sessionCount": 0,
+                    "messageCount": 0,
+                    "toolCallCount": 0,
+                    "codeChangeCount": 0,
+                    "artifactCount": 0,
+                    "artifactBytes": 0,
+                    "latestUpdatedAt": 0,
+                },
+            )
+            workspace_entry["sessionCount"] += 1
+            workspace_entry["messageCount"] += messages
+            workspace_entry["toolCallCount"] += tools
+            workspace_entry["codeChangeCount"] += code_changes
+            workspace_entry["artifactCount"] += artifact_count
+            workspace_entry["artifactBytes"] += artifact_bytes
+            workspace_entry["latestUpdatedAt"] = max(int(workspace_entry["latestUpdatedAt"]), updated_at)
+            age_days = max(0, (now_ms - updated_at) / 86_400_000) if updated_at else 999_999
+            for bucket in age_buckets:
+                max_days = bucket["maxDays"]
+                if age_days >= int(bucket["minDays"]) and (max_days is None or age_days < int(max_days)):
+                    bucket["count"] += 1
+                    break
+
+        db_file_bytes = self.db_path.stat().st_size if self.db_path.exists() else 0
+        return {
+            "generatedAt": now_ms,
+            "databasePath": str(self.db_path),
+            "databaseBytes": db_file_bytes,
+            "totalSessions": len(session_rows),
+            "activeSessions": active_count,
+            "emptySessions": empty_count,
+            "totalMessages": total_messages,
+            "totalToolCalls": total_tools,
+            "totalCodeChanges": total_code_changes,
+            "totalArtifacts": total_artifacts,
+            "totalArtifactBytes": total_artifact_bytes,
+            "dataKinds": data_kinds,
+            "ageBuckets": age_buckets,
+            "workspaces": sorted(
+                workspaces.values(),
+                key=lambda item: (int(item["sessionCount"]), int(item["latestUpdatedAt"])),
+                reverse=True,
+            ),
+            "agentTypes": [
+                {"agentType": key, "count": count}
+                for key, count in sorted(agent_types.items(), key=lambda item: item[1], reverse=True)
+            ],
+        }
+
+    def summarize_session_ids(self, session_ids: list[str]) -> dict[str, int]:
+        normalized_ids = [session_id for session_id in dict.fromkeys(session_ids) if session_id]
+        if not normalized_ids:
+            return {
+                "sessionCount": 0,
+                "messageCount": 0,
+                "toolCallCount": 0,
+                "codeChangeCount": 0,
+                "artifactCount": 0,
+                "artifactBytes": 0,
+            }
+        placeholders = ",".join("?" for _ in normalized_ids)
+        with self._lock, self._connect() as connection:
+            def count_table(table_name: str) -> int:
+                row = connection.execute(
+                    f"SELECT COUNT(*) AS total FROM {table_name} WHERE session_id IN ({placeholders})",
+                    normalized_ids,
+                ).fetchone()
+                return int(row["total"] if row is not None else 0)
+
+            artifact_row = connection.execute(
+                f"""
+                SELECT COUNT(*) AS total, COALESCE(SUM(size), 0) AS bytes
+                FROM session_artifacts
+                WHERE session_id IN ({placeholders})
+                """,
+                normalized_ids,
+            ).fetchone()
+            return {
+                "sessionCount": len(normalized_ids),
+                "messageCount": count_table("session_messages"),
+                "toolCallCount": count_table("session_tool_calls"),
+                "codeChangeCount": count_table("session_code_changes"),
+                "artifactCount": int(artifact_row["total"] if artifact_row is not None else 0),
+                "artifactBytes": int(artifact_row["bytes"] if artifact_row is not None else 0),
+            }
 
     def delete(self, session_id: str) -> None:
         with self._lock, self._connect() as connection:
@@ -565,6 +711,117 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
         ]
         for statement in statements:
             connection.execute(statement)
+
+    def _count_by_session(self, connection: sqlite3.Connection, table_name: str) -> dict[str, int]:
+        rows = connection.execute(
+            f"SELECT session_id, COUNT(*) AS total FROM {table_name} GROUP BY session_id"
+        ).fetchall()
+        return {str(row["session_id"]): int(row["total"]) for row in rows}
+
+    def _artifact_stats_by_session(self, connection: sqlite3.Connection) -> dict[str, dict[str, int]]:
+        rows = connection.execute(
+            """
+            SELECT session_id, COUNT(*) AS total, COALESCE(SUM(size), 0) AS bytes
+            FROM session_artifacts
+            GROUP BY session_id
+            """
+        ).fetchall()
+        return {
+            str(row["session_id"]): {"count": int(row["total"]), "bytes": int(row["bytes"])}
+            for row in rows
+        }
+
+    def _storage_kind_breakdown(self, connection: sqlite3.Connection) -> list[dict[str, Any]]:
+        queries = [
+            (
+                "sessions",
+                "Session 索引",
+                """
+                SELECT COUNT(*) AS records,
+                       COALESCE(SUM(LENGTH(title) + LENGTH(preview) + LENGTH(route_state_json) +
+                                    LENGTH(plan_state_json) + LENGTH(deploy_state_json)), 0) AS weight
+                FROM sessions
+                """,
+            ),
+            (
+                "messages",
+                "消息",
+                """
+                SELECT COUNT(*) AS records,
+                       COALESCE(SUM(LENGTH(content) + LENGTH(thought_text) + LENGTH(metadata_json)), 0) AS weight
+                FROM session_messages
+                """,
+            ),
+            (
+                "message_parts",
+                "消息片段",
+                """
+                SELECT COUNT(*) AS records,
+                       COALESCE(SUM(LENGTH(COALESCE(text_value, '')) + LENGTH(COALESCE(tool_call_id, ''))), 0) AS weight
+                FROM session_message_parts
+                """,
+            ),
+            (
+                "tool_calls",
+                "工具调用",
+                """
+                SELECT COUNT(*) AS records,
+                       COALESCE(SUM(LENGTH(arguments_json) + LENGTH(output_json) +
+                                    LENGTH(COALESCE(error_message, '')) + LENGTH(summary) + LENGTH(metadata_json)), 0) AS weight
+                FROM session_tool_calls
+                """,
+            ),
+            (
+                "code_changes",
+                "代码变更",
+                """
+                SELECT COUNT(*) AS records,
+                       COALESCE(SUM(LENGTH(path) + LENGTH(COALESCE(absolute_path, '')) +
+                                    LENGTH(summary) + LENGTH(diff_preview)), 0) AS weight
+                FROM session_code_changes
+                """,
+            ),
+            (
+                "plan_steps",
+                "计划步骤",
+                """
+                SELECT COUNT(*) AS records,
+                       COALESCE(SUM(LENGTH(title) + LENGTH(description) + LENGTH(status)), 0) AS weight
+                FROM session_plan_steps
+                """,
+            ),
+            (
+                "artifacts",
+                "附件与产物",
+                """
+                SELECT COUNT(*) AS records,
+                       COALESCE(SUM(size + LENGTH(path) + LENGTH(metadata_json)), 0) AS weight
+                FROM session_artifacts
+                """,
+            ),
+            (
+                "open_files",
+                "打开文件",
+                """
+                SELECT COUNT(*) AS records, COALESCE(SUM(LENGTH(path)), 0) AS weight
+                FROM session_open_files
+                """,
+            ),
+        ]
+        breakdown: list[dict[str, Any]] = []
+        for key, label, query in queries:
+            row = connection.execute(query).fetchone()
+            records = int(row["records"] if row is not None else 0)
+            weight = int(row["weight"] if row is not None else 0)
+            breakdown.append(
+                {
+                    "key": key,
+                    "label": label,
+                    "records": records,
+                    "weight": max(weight, records),
+                }
+            )
+        return breakdown
 
     def _migrate_settings_memory_if_needed(self) -> None:
         settings_path = self.db_path.parent / "settings.json"

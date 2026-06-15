@@ -156,6 +156,7 @@ import type {
   SubagentSnapshot,
   ToolCallRecord,
 } from "@/lib/app-types";
+import dragUploadImage from "@/assets/drag-upload.png";
 import {
   ChevronDown,
   ChevronRight,
@@ -203,7 +204,6 @@ import {
   useCallback,
   useEffect,
   useId,
-  useLayoutEffect,
 } from "react";
 import { createPortal } from "react-dom";
 
@@ -241,7 +241,6 @@ type ChatPanelProps = {
   fileTree: FileTreeNode[];
   onContextOpenChange: (open: boolean) => void;
   onInputChange: (value: string) => void;
-  onKeyDown: (e: React.KeyboardEvent<HTMLElement>) => void;
   onSendMessage: (attachments?: ChatAttachment[]) => void;
   onStopMessage: () => void;
   onResolveDeleteConfirmation: (toolCallId: string, approved: boolean) => void;
@@ -300,11 +299,6 @@ type MentionRenderSegment =
       label: string;
       kind?: MentionSuggestion["kind"];
     };
-
-type ComposerSelectionOffsets = {
-  start: number;
-  end: number;
-};
 
 const TOOL_ICONS: Record<string, React.ReactNode> = {
   connect: <GlobeIcon className="size-4" />,
@@ -1390,9 +1384,14 @@ function useStreamingCodeBlocks(
   isAnimating: boolean,
 ) {
   useEffect(() => {
-    if (!isAnimating) return;
     const container = containerRef.current;
     if (!container) return;
+    if (!isAnimating) {
+      container
+        .querySelectorAll<HTMLElement>(".streaming-code-badge")
+        .forEach((badge) => badge.remove());
+      return;
+    }
 
     const scrollStates = new WeakMap<HTMLElement, boolean>();
     const badgeMap = new WeakMap<HTMLElement, HTMLElement>();
@@ -1544,11 +1543,12 @@ function useStreamingCodeBlocks(
     return () => {
       mo.disconnect();
       container
+        .querySelectorAll<HTMLElement>(".streaming-code-badge")
+        .forEach((badge) => badge.remove());
+      container
         .querySelectorAll<HTMLPreElement>('[data-streamdown="code-block"] pre')
         .forEach((pre) => {
           pre.removeEventListener("scroll", onScroll);
-          const badge = badgeMap.get(pre);
-          if (badge) badge.remove();
         });
     };
   }, [isAnimating, containerRef]);
@@ -2084,6 +2084,81 @@ function SubagentToolSummary({
   );
 }
 
+function splitLinesForDiff(value: string) {
+  const normalized = value.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  if (!normalized) return [];
+  return normalized.endsWith("\n")
+    ? normalized.slice(0, -1).split("\n")
+    : normalized.split("\n");
+}
+
+function buildReplacementDiff(oldContent: string, newContent: string) {
+  const oldLines = splitLinesForDiff(oldContent);
+  const newLines = splitLinesForDiff(newContent);
+  const oldLineCount = oldLines.length;
+  const newLineCount = newLines.length;
+
+  if (oldLineCount * newLineCount > 120_000) {
+    return {
+      diff: [
+        ...oldLines.map((line) => `-${line}`),
+        ...newLines.map((line) => `+${line}`),
+      ].join("\n"),
+      oldLineCount,
+      newLineCount,
+      unchangedLineCount: 0,
+    };
+  }
+
+  const table = Array.from({ length: oldLineCount + 1 }, () =>
+    Array<number>(newLineCount + 1).fill(0),
+  );
+
+  for (let oldIndex = oldLineCount - 1; oldIndex >= 0; oldIndex -= 1) {
+    for (let newIndex = newLineCount - 1; newIndex >= 0; newIndex -= 1) {
+      table[oldIndex][newIndex] =
+        oldLines[oldIndex] === newLines[newIndex]
+          ? table[oldIndex + 1][newIndex + 1] + 1
+          : Math.max(table[oldIndex + 1][newIndex], table[oldIndex][newIndex + 1]);
+    }
+  }
+
+  const diffLines: string[] = [];
+  let oldIndex = 0;
+  let newIndex = 0;
+  let unchangedLineCount = 0;
+
+  while (oldIndex < oldLineCount || newIndex < newLineCount) {
+    if (
+      oldIndex < oldLineCount &&
+      newIndex < newLineCount &&
+      oldLines[oldIndex] === newLines[newIndex]
+    ) {
+      diffLines.push(` ${oldLines[oldIndex]}`);
+      unchangedLineCount += 1;
+      oldIndex += 1;
+      newIndex += 1;
+    } else if (
+      newIndex < newLineCount &&
+      (oldIndex >= oldLineCount ||
+        table[oldIndex][newIndex + 1] >= table[oldIndex + 1][newIndex])
+    ) {
+      diffLines.push(`+${newLines[newIndex]}`);
+      newIndex += 1;
+    } else {
+      diffLines.push(`-${oldLines[oldIndex]}`);
+      oldIndex += 1;
+    }
+  }
+
+  return {
+    diff: diffLines.join("\n"),
+    oldLineCount,
+    newLineCount,
+    unchangedLineCount,
+  };
+}
+
 function ToolBody({
   toolCall,
   sessionId,
@@ -2138,12 +2213,20 @@ function ToolBody({
   const content =
     (args.content as string | undefined) ??
     (toolCall.name === "write_file" ? toolCall.streamedInput : undefined);
-  const oldContent = args.old_content || (args.old_code as string | undefined);
-  const newContent = (args.new_content ||
-    args.new_code ||
-    (toolCall.name === "replace_file" ? toolCall.streamedInput : undefined)) as
-    | string
-    | undefined;
+  const oldContent =
+    typeof args.old_content === "string"
+      ? args.old_content
+      : typeof args.old_code === "string"
+        ? args.old_code
+        : undefined;
+  const newContent =
+    typeof args.new_content === "string"
+      ? args.new_content
+      : typeof args.new_code === "string"
+        ? args.new_code
+        : toolCall.name === "replace_file"
+          ? toolCall.streamedInput
+          : undefined;
   const applyPatchPreview = (
     toolCall.name === "apply_patch" && isStreaming
       ? args.new_content || toolCall.streamedInput
@@ -2551,12 +2634,8 @@ function ToolBody({
     );
   }
 
-  if (toolCall.name === "replace_file" && oldContent && newContent) {
-    const diffLines = [
-      ...oldContent.split("\n").map((l: string) => `- ${l}`),
-      "---",
-      ...newContent.split("\n").map((l: string) => `+ ${l}`),
-    ].join("\n");
+  if (toolCall.name === "replace_file" && oldContent != null && newContent != null) {
+    const replacementDiff = buildReplacementDiff(oldContent, newContent);
 
     return (
       <div className="space-y-2">
@@ -2566,7 +2645,22 @@ function ToolBody({
             {filename}
           </TaskItemFile>
         )}
-        <CodeBlockDiff diff={diffLines} />
+        <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+          <span className="rounded-md border border-red-500/20 bg-red-500/10 px-2 py-0.5 text-red-700 dark:text-red-300">
+            被替换 {replacementDiff.oldLineCount} 行
+          </span>
+          <span className="text-muted-foreground/60">-&gt;</span>
+          <span className="rounded-md border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 text-emerald-700 dark:text-emerald-300">
+            替换为 {replacementDiff.newLineCount} 行
+          </span>
+          {replacementDiff.unchangedLineCount > 0 ? (
+            <span className="rounded-md border bg-background/80 px-2 py-0.5">
+              保留 {replacementDiff.unchangedLineCount} 行上下文
+            </span>
+          ) : null}
+          <span className="text-muted-foreground/70">匹配片段之外保持不变</span>
+        </div>
+        <CodeBlockDiff diff={replacementDiff.diff} showLineNumbers={false} />
       </div>
     );
   }
@@ -4090,6 +4184,7 @@ const MessageList = memo(function MessageList({
   onEditMessage,
   subagentMessages = [],
   onOpenSubagentLog,
+  mentionSuggestionByToken = new Map(),
   thinkingRendering = "text",
   finalAnswerRendering = "markdown",
 }: {
@@ -4125,6 +4220,7 @@ const MessageList = memo(function MessageList({
   onEditMessage?: (content: string) => void;
   subagentMessages?: ChatMessage[];
   onOpenSubagentLog?: (parentToolCallId: string) => void;
+  mentionSuggestionByToken?: Map<string, MentionSuggestion>;
   thinkingRendering?: "text" | "markdown";
   finalAnswerRendering?: "markdown" | "html";
 }) {
@@ -4343,81 +4439,78 @@ const MessageList = memo(function MessageList({
     );
   };
 
+  const renderToolCallGroup = (
+    groupKey: string,
+    toolCalls: { tc: ToolCallRecord; idx: number }[],
+    lastRunningIdx: number,
+    optionsForTool?: (tc: ToolCallRecord) =>
+      | {
+          replaceCompletedPlanQuestionsWithLoading?: boolean;
+        }
+      | undefined,
+  ) => {
+    if (toolCalls.length === 0) {
+      return null;
+    }
+
+    if (toolCalls.length === 1) {
+      const item = toolCalls[0];
+      return renderToolCall(
+        item.tc,
+        item.idx === lastRunningIdx,
+        optionsForTool?.(item.tc),
+      );
+    }
+
+    const anyRunning = toolCalls.some((item) => item.tc.state === "running");
+    const needsAttention = toolCalls.some((item) =>
+      ["input-requested", "approval-requested"].includes(item.tc.state),
+    );
+    const completedCount = toolCalls.filter((item) =>
+      ["completed", "output-available", "output-denied"].includes(item.tc.state),
+    ).length;
+    const defaultOpen = anyRunning || needsAttention;
+
+    return (
+      <Task key={groupKey} defaultOpen={defaultOpen}>
+        <TaskTrigger
+          title={
+            anyRunning ? (
+              <Shimmer duration={1}>
+                {`已调用 ${toolCalls.length} 次工具 · 执行中`}
+              </Shimmer>
+            ) : (
+              `已调用 ${toolCalls.length} 次工具 · ${completedCount}/${toolCalls.length} 已完成`
+            )
+          }
+          icon={<ListChecks className="size-4" />}
+        />
+        <TaskContent>
+          <div className="space-y-2">
+            {toolCalls.map((item) => (
+              <div key={item.tc.id}>
+                {renderToolCall(
+                  item.tc,
+                  item.idx === lastRunningIdx,
+                  optionsForTool?.(item.tc),
+                )}
+              </div>
+            ))}
+          </div>
+        </TaskContent>
+      </Task>
+    );
+  };
+
   const renderParallelGroupedToolCalls = (
     toolCalls: ToolCallRecord[],
     lastRunningIdx: number,
   ) => {
-    const items: React.ReactNode[] = [];
-    let i = 0;
-    while (i < toolCalls.length) {
-      const tc = toolCalls[i];
-      if (tc.name === "read_file") {
-        const readFiles: { tc: ToolCallRecord; idx: number }[] = [];
-        let j = i;
-        while (j < toolCalls.length && toolCalls[j].name === "read_file") {
-          readFiles.push({ tc: toolCalls[j], idx: j });
-          j++;
-        }
-        if (readFiles.length === 1) {
-          const rf = readFiles[0];
-          items.push(renderToolCall(rf.tc, rf.idx === lastRunningIdx));
-        } else {
-          const anyRunning = readFiles.some((rf) => rf.tc.state === "running");
-          const allCompleted = readFiles.every(
-            (rf) =>
-              rf.tc.state === "completed" || rf.tc.state === "output-available",
-          );
-          items.push(
-            <Task key={`read-file-group-${i}`} defaultOpen={anyRunning}>
-              <TaskTrigger
-                title={
-                  anyRunning ? (
-                    <Shimmer duration={1}>
-                      {`正在阅读 ${readFiles.length} 个文件 · 执行中`}
-                    </Shimmer>
-                  ) : (
-                    `已阅读 ${readFiles.length} 个文件 · ${allCompleted ? "已完成" : "执行中"}`
-                  )
-                }
-                icon={<FileSearchIcon className="size-4" />}
-              />
-              <TaskContent>
-                <TaskItem>
-                  <span className="inline-flex flex-wrap items-center gap-1">
-                    <span>{anyRunning ? "正在阅读" : "已阅读"}</span>
-                    {readFiles.map((rf, rfi) => {
-                      const rfArgs = rf.tc.arguments || {};
-                      const rfFilename = (rfArgs.filename ||
-                        rfArgs.path ||
-                        rfArgs.file_path) as string | undefined;
-                      const leaf = rfFilename?.split(/[\\/]/).pop();
-                      const fileIcon = leaf ? getFileIcon(leaf) : null;
-                      return (
-                        <TaskItemFile key={rfi}>
-                          {fileIcon ? (
-                            <span style={{ color: fileIcon.color }}>
-                              {fileIcon.icon}
-                            </span>
-                          ) : (
-                            <FileCodeIcon className="size-3" />
-                          )}
-                          <span>{leaf || (rfFilename ?? "...")}</span>
-                        </TaskItemFile>
-                      );
-                    })}
-                  </span>
-                </TaskItem>
-              </TaskContent>
-            </Task>,
-          );
-        }
-        i = j;
-      } else {
-        items.push(renderToolCall(tc, i === lastRunningIdx));
-        i++;
-      }
-    }
-    return items;
+    return renderToolCallGroup(
+      "tool-call-group",
+      toolCalls.map((tc, idx) => ({ tc, idx })),
+      lastRunningIdx,
+    );
   };
 
   const renderLegacyAssistant = (msg: ChatMessage, isLast: boolean) => {
@@ -4649,105 +4742,21 @@ const MessageList = memo(function MessageList({
         const lastRunningIdx = group.blocks.findLastIndex(
           (b) => b.type === "tool_call" && b.toolCall.state === "running",
         );
-        const toolItems: React.ReactNode[] = [];
-        let ti = 0;
-        while (ti < group.blocks.length) {
-          const block = group.blocks[ti];
-          if (
-            block.type === "tool_call" &&
-            block.toolCall.name === "read_file"
-          ) {
-            const readFiles: {
-              block: Extract<ContentBlock, { type: "tool_call" }>;
-              idx: number;
-            }[] = [];
-            let tj = ti;
-            while (
-              tj < group.blocks.length &&
-              group.blocks[tj].type === "tool_call" &&
-              (group.blocks[tj] as Extract<ContentBlock, { type: "tool_call" }>)
-                .toolCall.name === "read_file"
-            ) {
-              readFiles.push({
-                block: group.blocks[tj] as Extract<
-                  ContentBlock,
-                  { type: "tool_call" }
-                >,
-                idx: tj,
-              });
-              tj++;
-            }
-            if (readFiles.length === 1) {
-              const rf = readFiles[0];
-              toolItems.push(
-                renderToolCall(rf.block.toolCall, rf.idx === lastRunningIdx),
-              );
-            } else {
-              const anyRunning = readFiles.some(
-                (rf) => rf.block.toolCall.state === "running",
-              );
-              const allCompleted = readFiles.every(
-                (rf) =>
-                  rf.block.toolCall.state === "completed" ||
-                  rf.block.toolCall.state === "output-available",
-              );
-              toolItems.push(
-                <Task
-                  key={`read-file-group-${gi}-${ti}`}
-                  defaultOpen={anyRunning}
-                >
-                  <TaskTrigger
-                    title={
-                      anyRunning ? (
-                        <Shimmer duration={1}>
-                          {`正在阅读 ${readFiles.length} 个文件 · 执行中`}
-                        </Shimmer>
-                      ) : (
-                        `已阅读 ${readFiles.length} 个文件 · ${allCompleted ? "已完成" : "执行中"}`
-                      )
-                    }
-                    icon={<FileSearchIcon className="size-4" />}
-                  />
-                  <TaskContent>
-                    <TaskItem>
-                      <span className="inline-flex flex-wrap items-center gap-1">
-                        <span>{anyRunning ? "正在阅读" : "已阅读"}</span>
-                        {readFiles.map((rf, rfi) => {
-                          const rfArgs = rf.block.toolCall.arguments || {};
-                          const rfFilename = (rfArgs.filename ||
-                            rfArgs.path ||
-                            rfArgs.file_path) as string | undefined;
-                          const leaf = rfFilename?.split(/[\\/]/).pop();
-                          const fileIcon = leaf ? getFileIcon(leaf) : null;
-                          return (
-                            <TaskItemFile key={rfi}>
-                              {fileIcon ? (
-                                <span style={{ color: fileIcon.color }}>
-                                  {fileIcon.icon}
-                                </span>
-                              ) : (
-                                <FileCodeIcon className="size-3" />
-                              )}
-                              <span>{leaf || (rfFilename ?? "...")}</span>
-                            </TaskItemFile>
-                          );
-                        })}
-                      </span>
-                    </TaskItem>
-                  </TaskContent>
-                </Task>,
-              );
-            }
-            ti = tj;
-          } else if (block.type === "tool_call") {
-            toolItems.push(
-              renderToolCall(block.toolCall, ti === lastRunningIdx),
-            );
-            ti++;
-          } else {
-            ti++;
-          }
-        }
+        const toolItems = [
+          renderToolCallGroup(
+            `tool-call-group-${gi}`,
+            group.blocks
+              .map((block, idx) =>
+                block.type === "tool_call"
+                  ? { tc: block.toolCall, idx }
+                  : null,
+              )
+              .filter((item): item is { tc: ToolCallRecord; idx: number } =>
+                item !== null,
+              ),
+            lastRunningIdx,
+          ),
+        ];
         return (
           <div key={`tools-${gi}`} className="space-y-2">
             {toolItems}
@@ -4764,13 +4773,6 @@ const MessageList = memo(function MessageList({
             block.toolCall.state,
           ),
       );
-      const autoCloseDelay = group.blocks.some(
-        (block) =>
-          block.type === "tool_call" &&
-          block.toolCall.inputRequest?.kind === "plan_questions",
-      )
-        ? 3500
-        : 0;
       const lastRunningTool = isActive
         ? [...group.blocks]
             .reverse()
@@ -4804,7 +4806,6 @@ const MessageList = memo(function MessageList({
           key={`cot-${gi}`}
           defaultOpen={isActive || hasContent || hasErrorThinking}
           autoOpen={isActive || hasAutoOpenTool || hasErrorThinking}
-          autoCloseDelay={autoCloseDelay}
         >
           <ChainOfThoughtHeader>
             {isActive && !hasErrorThinking ? (
@@ -4895,119 +4896,37 @@ const MessageList = memo(function MessageList({
                     }
                   }
                   i++;
-                } else if (
-                  block.type === "tool_call" &&
-                  block.toolCall.name === "read_file"
-                ) {
-                  const readFiles: {
-                    block: Extract<ContentBlock, { type: "tool_call" }>;
-                    idx: number;
-                  }[] = [];
+                } else if (block.type === "tool_call") {
+                  const toolRun: { tc: ToolCallRecord; idx: number }[] = [];
                   let j = i;
                   while (
                     j < group.blocks.length &&
-                    group.blocks[j].type === "tool_call" &&
-                    (
-                      group.blocks[j] as Extract<
-                        ContentBlock,
-                        { type: "tool_call" }
-                      >
-                    ).toolCall.name === "read_file"
+                    group.blocks[j].type === "tool_call"
                   ) {
-                    readFiles.push({
-                      block: group.blocks[j] as Extract<
-                        ContentBlock,
-                        { type: "tool_call" }
-                      >,
-                      idx: j,
-                    });
+                    const toolBlock = group.blocks[j] as Extract<
+                      ContentBlock,
+                      { type: "tool_call" }
+                    >;
+                    toolRun.push({ tc: toolBlock.toolCall, idx: j });
                     j++;
                   }
-                  if (readFiles.length === 1) {
-                    const rf = readFiles[0];
-                    rendered.push(
-                      <div key={`tool-${gi}-${rf.idx}`}>
-                        {renderToolCall(
-                          rf.block.toolCall,
-                          rf.idx === lastRunningIdx,
-                          {
-                            replaceCompletedPlanQuestionsWithLoading:
-                              isDraftingPlan &&
-                              (rf.block.toolCall.inputRequest?.kind ===
-                                "plan_questions" ||
-                                rf.block.toolCall.name ===
-                                  "ask_plan_questions" ||
-                                rf.block.toolCall.name === "ask_user"),
-                          },
-                        )}
-                      </div>,
-                    );
-                  } else {
-                    const allCompleted = readFiles.every(
-                      (rf) =>
-                        rf.block.toolCall.state === "completed" ||
-                        rf.block.toolCall.state === "output-available",
-                    );
-                    const anyRunning = readFiles.some(
-                      (rf) => rf.block.toolCall.state === "running",
-                    );
-                    const isLastInGroup = readFiles.some(
-                      (rf) => rf.idx === lastRunningIdx,
-                    );
-                    const status: "complete" | "active" | "pending" =
-                      anyRunning && isLastInGroup && isActive
-                        ? "active"
-                        : allCompleted
-                          ? "complete"
-                          : "active";
-                    rendered.push(
-                      <ChainOfThoughtStep
-                        key={`read-file-group-${gi}-${i}`}
-                        icon={FileSearchIcon}
-                        label={
-                          <span className="inline-flex flex-wrap items-center gap-1">
-                            <span>{anyRunning ? "正在阅读" : "已阅读"}</span>
-                            {readFiles.map((rf, rfi) => {
-                              const rfArgs = rf.block.toolCall.arguments || {};
-                              const rfFilename = (rfArgs.filename ||
-                                rfArgs.path ||
-                                rfArgs.file_path) as string | undefined;
-                              const leaf = rfFilename?.split(/[\\/]/).pop();
-                              const fileIcon = leaf ? getFileIcon(leaf) : null;
-                              return (
-                                <TaskItemFile key={rfi}>
-                                  {fileIcon ? (
-                                    <span style={{ color: fileIcon.color }}>
-                                      {fileIcon.icon}
-                                    </span>
-                                  ) : (
-                                    <FileCodeIcon className="size-3" />
-                                  )}
-                                  <span>{leaf || (rfFilename ?? "...")}</span>
-                                </TaskItemFile>
-                              );
-                            })}
-                          </span>
-                        }
-                        status={status}
-                      />,
-                    );
-                  }
-                  i = j;
-                } else if (block.type === "tool_call") {
                   rendered.push(
-                    <div key={`tool-${gi}-${i}`}>
-                      {renderToolCall(block.toolCall, i === lastRunningIdx, {
-                        replaceCompletedPlanQuestionsWithLoading:
-                          isDraftingPlan &&
-                          (block.toolCall.inputRequest?.kind ===
-                            "plan_questions" ||
-                            block.toolCall.name === "ask_plan_questions" ||
-                            block.toolCall.name === "ask_user"),
-                      })}
+                    <div key={`tool-run-${gi}-${i}`}>
+                      {renderToolCallGroup(
+                        `cot-tool-call-group-${gi}-${i}`,
+                        toolRun,
+                        lastRunningIdx,
+                        (tc) => ({
+                          replaceCompletedPlanQuestionsWithLoading:
+                            isDraftingPlan &&
+                            (tc.inputRequest?.kind === "plan_questions" ||
+                              tc.name === "ask_plan_questions" ||
+                              tc.name === "ask_user"),
+                        }),
+                      )}
                     </div>,
                   );
-                  i++;
+                  i = j;
                 } else if (
                   block.dataType === "data-session-state"
                 ) {
@@ -5184,9 +5103,7 @@ const MessageList = memo(function MessageList({
                         ? renderPartsAssistant(displayMessage, isLast)
                         : renderLegacyAssistant(displayMessage, isLast))}
                     {isUser && msg.content
-                      ? renderFinalAnswerContent(msg.content, new Map(), {
-                          finalAnswerRendering: "markdown",
-                        })
+                      ? renderUserMessageContent(msg.content, mentionSuggestionByToken)
                       : null}
                     {msg.role === "assistant" && !displayMessage.parts?.length && msg.content
                       ? renderFinalAnswerContent(msg.content, new Map(), {
@@ -5254,6 +5171,7 @@ const ChatStreamBody = memo(function ChatStreamBody({
   onEditMessage,
   subagentMessages = [],
   onOpenSubagentLog,
+  mentionSuggestionByToken,
   thinkingRendering = "text",
   finalAnswerRendering = "markdown",
 }: {
@@ -5289,6 +5207,7 @@ const ChatStreamBody = memo(function ChatStreamBody({
   onEditMessage?: (content: string) => void;
   subagentMessages?: ChatMessage[];
   onOpenSubagentLog?: (parentToolCallId: string) => void;
+  mentionSuggestionByToken?: Map<string, MentionSuggestion>;
   thinkingRendering?: "text" | "markdown";
   finalAnswerRendering?: "markdown" | "html";
 }) {
@@ -5342,6 +5261,7 @@ const ChatStreamBody = memo(function ChatStreamBody({
         onEditMessage={onEditMessage}
         subagentMessages={subagentMessages}
         onOpenSubagentLog={onOpenSubagentLog}
+        mentionSuggestionByToken={mentionSuggestionByToken}
         thinkingRendering={thinkingRendering}
         finalAnswerRendering={finalAnswerRendering}
       />
@@ -5683,44 +5603,6 @@ function getPathLeaf(input: string) {
   return normalized.split("/").filter(Boolean).pop() ?? input;
 }
 
-function getActiveMentionAtCaret(value: string, caret: number) {
-  const safeCaret = Math.max(0, Math.min(caret, value.length));
-  const mentionToken = findMentionTokenAtCaret(value, safeCaret);
-  if (
-    mentionToken &&
-    safeCaret > mentionToken.start &&
-    safeCaret <= mentionToken.end
-  ) {
-    return null;
-  }
-  const mentionStart = value.lastIndexOf("@", safeCaret - 1);
-  if (mentionStart < 0) return null;
-
-  const previousChar = value[mentionStart - 1];
-  if (previousChar && !/[\s([{"'`]/.test(previousChar)) {
-    return null;
-  }
-
-  const query = value.slice(mentionStart + 1, safeCaret);
-  if (/[\s@]/.test(query)) {
-    return null;
-  }
-
-  return {
-    start: mentionStart,
-    end: safeCaret,
-    query,
-  };
-}
-
-const MENTION_KIND_LABELS: Record<MentionSuggestion["kind"], string> = {
-  workspace: "工作区",
-  file: "文件",
-  change: "改动",
-  element: "元素",
-  skill: "技能",
-};
-
 function getMentionSuggestionIcon(kind: MentionSuggestion["kind"]) {
   switch (kind) {
     case "workspace":
@@ -5744,180 +5626,6 @@ function formatMentionToken(value: string) {
 
 function decodeMentionTokenValue(value: string) {
   return value.replace(/\\\]/g, "]");
-}
-
-function findMentionTokenAtCaret(value: string, caret: number) {
-  const mentionTokenRe = /@\[((?:\\.|[^\]])*)\]/g;
-  let match: RegExpExecArray | null;
-
-  while ((match = mentionTokenRe.exec(value)) !== null) {
-    const token = match[0];
-    const start = match.index;
-    const end = start + token.length;
-    if (caret >= start && caret <= end) {
-      return {
-        start,
-        end,
-        token,
-        value: decodeMentionTokenValue(match[1] ?? ""),
-      };
-    }
-  }
-
-  return null;
-}
-
-function getComposerNodeLength(node: Node): number {
-  if (node.nodeType === Node.TEXT_NODE) {
-    return node.textContent?.length ?? 0;
-  }
-
-  if (node instanceof HTMLElement) {
-    const mentionToken = node.dataset.mentionToken;
-    if (mentionToken) {
-      return mentionToken.length;
-    }
-
-    if (node.tagName === "BR") {
-      return 1;
-    }
-  }
-
-  return Array.from(node.childNodes).reduce(
-    (total, child) => total + getComposerNodeLength(child),
-    0,
-  );
-}
-
-function getComposerPointOffset(
-  root: HTMLElement,
-  container: Node,
-  offset: number,
-): number {
-  if (container === root) {
-    return Array.from(root.childNodes)
-      .slice(0, offset)
-      .reduce((total, child) => total + getComposerNodeLength(child), 0);
-  }
-
-  let total = 0;
-  for (const child of Array.from(root.childNodes)) {
-    if (child === container) {
-      if (child.nodeType === Node.TEXT_NODE) {
-        return total + offset;
-      }
-
-      if (child instanceof HTMLElement && child.dataset.mentionToken) {
-        return total + (offset > 0 ? child.dataset.mentionToken.length : 0);
-      }
-    }
-
-    if (child.contains?.(container)) {
-      if (child instanceof HTMLElement && child.dataset.mentionToken) {
-        return total + (offset > 0 ? child.dataset.mentionToken.length : 0);
-      }
-
-      return (
-        total + getComposerPointOffset(child as HTMLElement, container, offset)
-      );
-    }
-
-    total += getComposerNodeLength(child);
-  }
-
-  return total;
-}
-
-function getComposerSelectionOffsets(
-  root: HTMLElement,
-): ComposerSelectionOffsets | null {
-  const selection = window.getSelection();
-  if (!selection || selection.rangeCount === 0) return null;
-
-  const range = selection.getRangeAt(0);
-  if (
-    !root.contains(range.startContainer) ||
-    !root.contains(range.endContainer)
-  ) {
-    return null;
-  }
-
-  return {
-    start: getComposerPointOffset(
-      root,
-      range.startContainer,
-      range.startOffset,
-    ),
-    end: getComposerPointOffset(root, range.endContainer, range.endOffset),
-  };
-}
-
-function resolveComposerOffsetToPoint(root: HTMLElement, offset: number) {
-  let total = 0;
-  const children = Array.from(root.childNodes);
-
-  for (let index = 0; index < children.length; index += 1) {
-    const child = children[index];
-    const childLength = getComposerNodeLength(child);
-
-    if (offset <= total + childLength) {
-      if (child.nodeType === Node.TEXT_NODE) {
-        return {
-          container: child,
-          offset: Math.max(0, Math.min(offset - total, childLength)),
-        };
-      }
-
-      if (child instanceof HTMLElement && child.dataset.mentionToken) {
-        return offset <= total + childLength / 2
-          ? { container: root, offset: index }
-          : { container: root, offset: index + 1 };
-      }
-    }
-
-    total += childLength;
-  }
-
-  return { container: root, offset: root.childNodes.length };
-}
-
-function setComposerSelectionOffsets(
-  root: HTMLElement,
-  start: number,
-  end = start,
-) {
-  const selection = window.getSelection();
-  if (!selection) return;
-
-  const range = document.createRange();
-  const startPoint = resolveComposerOffsetToPoint(root, start);
-  const endPoint = resolveComposerOffsetToPoint(root, end);
-  range.setStart(startPoint.container, startPoint.offset);
-  range.setEnd(endPoint.container, endPoint.offset);
-  selection.removeAllRanges();
-  selection.addRange(range);
-}
-
-function serializeComposerContent(root: HTMLElement) {
-  return Array.from(root.childNodes)
-    .map((child) => {
-      if (child.nodeType === Node.TEXT_NODE) {
-        return child.textContent?.replace(/\u00a0/g, " ") ?? "";
-      }
-
-      if (child instanceof HTMLElement) {
-        if (child.dataset.mentionToken) {
-          return child.dataset.mentionToken;
-        }
-
-        if (child.tagName === "BR") {
-          return "\n";
-        }
-      }
-
-      return child.textContent?.replace(/\u00a0/g, " ") ?? "";
-    })
-    .join("");
 }
 
 function buildMentionRenderSegments(
@@ -5969,6 +5677,7 @@ const MENTION_KIND_ICON_COLORS: Record<MentionSuggestion["kind"], string> = {
     "text-emerald-600 bg-emerald-50 dark:text-emerald-400 dark:bg-emerald-950/60",
   element:
     "text-violet-600 bg-violet-50 dark:text-violet-400 dark:bg-violet-950/60",
+  skill: "text-cyan-700 bg-cyan-50 dark:text-cyan-300 dark:bg-cyan-950/60",
 };
 
 const MENTION_KIND_BADGE_STYLES: Record<MentionSuggestion["kind"], string> = {
@@ -5979,22 +5688,188 @@ const MENTION_KIND_BADGE_STYLES: Record<MentionSuggestion["kind"], string> = {
     "border-emerald-200/80 bg-emerald-50/95 text-emerald-950 dark:border-emerald-900/80 dark:bg-emerald-950/70 dark:text-emerald-100",
   element:
     "border-violet-200/80 bg-violet-50/95 text-violet-950 dark:border-violet-900/80 dark:bg-violet-950/70 dark:text-violet-100",
+  skill:
+    "border-cyan-200/80 bg-cyan-50/95 text-cyan-950 dark:border-cyan-900/80 dark:bg-cyan-950/70 dark:text-cyan-100",
 };
 
-function focusComposerAtOffset(composerId: string, start: number, end = start) {
-  window.requestAnimationFrame(() => {
-    const composer = document.getElementById(composerId);
-    if (!(composer instanceof HTMLElement)) return;
-    composer.focus({ preventScroll: true });
-    setComposerSelectionOffsets(composer, start, end);
-  });
+type UserMessageRenderSegment =
+  | { type: "text"; value: string }
+  | {
+      type: "code-selection";
+      filePath: string;
+      lineLabel: string;
+      language: string;
+      code: string;
+    };
+
+const USER_CODE_SELECTION_RE =
+  /(^|\n)引用代码：(.+):(L\d+(?:-L?\d+)?)\n```([^\n`]*)\n([\s\S]*?)\n```/g;
+
+function inferMentionKind(value: string): MentionSuggestion["kind"] {
+  const normalized = value.trim().toLowerCase();
+  if (normalized.startsWith("skill:")) return "skill";
+  return "file";
 }
 
-function normalizeMentionCaret(value: string, caret: number) {
-  const token = findMentionTokenAtCaret(value, caret);
-  if (!token) return caret;
-  if (caret === token.start || caret === token.end) return caret;
-  return caret - token.start < token.end - caret ? token.start : token.end;
+function getMentionDisplayLabel(value: string, fallback: string) {
+  if (value.toLowerCase().startsWith("skill:")) {
+    return value.slice("skill:".length).trim() || fallback;
+  }
+  return fallback || getPathLeaf(value);
+}
+
+function parseUserMessageSegments(value: string): UserMessageRenderSegment[] {
+  const normalized = value.replace(/\r\n/g, "\n");
+  const segments: UserMessageRenderSegment[] = [];
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  USER_CODE_SELECTION_RE.lastIndex = 0;
+  while ((match = USER_CODE_SELECTION_RE.exec(normalized)) !== null) {
+    if (match.index > lastIndex) {
+      segments.push({
+        type: "text",
+        value: normalized.slice(lastIndex, match.index),
+      });
+    }
+
+    segments.push({
+      type: "code-selection",
+      filePath: match[2].trim(),
+      lineLabel: match[3].trim(),
+      language: match[4].trim(),
+      code: match[5].replace(/\n$/, ""),
+    });
+    lastIndex = match.index + match[0].length;
+  }
+
+  if (lastIndex < normalized.length) {
+    segments.push({ type: "text", value: normalized.slice(lastIndex) });
+  }
+
+  return segments.length > 0 ? segments : [{ type: "text", value }];
+}
+
+function renderMentionBadge(segment: Extract<MentionRenderSegment, { type: "mention" }>, key: string) {
+  const kind = segment.kind ?? inferMentionKind(segment.value);
+  const label = getMentionDisplayLabel(segment.value, segment.label);
+  const fileIcon =
+    kind === "file" || kind === "change"
+      ? getFileIcon(getPathLeaf(segment.value))
+      : null;
+
+  return (
+    <span
+      key={key}
+      className={cn(
+        "mx-0.5 inline-flex max-w-[14rem] items-center gap-1 rounded-md border px-1.5 py-0.5 align-baseline shadow-sm",
+        MENTION_KIND_BADGE_STYLES[kind],
+      )}
+      title={segment.value}
+    >
+      <span
+        className={cn(
+          "flex size-4 shrink-0 items-center justify-center rounded-sm",
+          MENTION_KIND_ICON_COLORS[kind],
+        )}
+      >
+        {fileIcon ? (
+          <span style={{ color: fileIcon.color }} className="text-[12px] leading-none">
+            {fileIcon.icon}
+          </span>
+        ) : (
+          getMentionSuggestionIcon(kind)
+        )}
+      </span>
+      <span className="truncate">{label}</span>
+    </span>
+  );
+}
+
+function renderUserTextWithMentions(
+  text: string,
+  suggestionByToken: Map<string, MentionSuggestion>,
+  key: string,
+) {
+  if (!text) return null;
+  const segments = buildMentionRenderSegments(text, suggestionByToken);
+  const hasMention = segments.some((segment) => segment.type === "mention");
+  if (!hasMention && !text.trim()) return null;
+  if (!hasMention) {
+    return renderFinalAnswerContent(text, new Map(), {
+      key,
+      finalAnswerRendering: "markdown",
+    });
+  }
+
+  return (
+    <div key={key} className="whitespace-pre-wrap break-words leading-relaxed">
+      {segments.map((segment, index) =>
+        segment.type === "mention"
+          ? renderMentionBadge(segment, `${key}-mention-${index}`)
+          : segment.value,
+      )}
+    </div>
+  );
+}
+
+function renderUserCodeSelection(
+  segment: Extract<UserMessageRenderSegment, { type: "code-selection" }>,
+  key: string,
+) {
+  const filename = getPathLeaf(segment.filePath);
+  const fileIcon = getFileIcon(filename);
+  const language =
+    segment.language && segment.language !== "plaintext"
+      ? segment.language
+      : getShikiLanguage(segment.filePath);
+
+  return (
+    <div
+      key={key}
+      className="overflow-hidden rounded-md border border-border/70 bg-background/80 text-foreground"
+    >
+      <div className="flex min-w-0 items-center justify-between gap-3 border-b bg-muted/70 px-3 py-2 text-xs">
+        <div className="flex min-w-0 items-center gap-1.5">
+          {fileIcon ? (
+            <span style={{ color: fileIcon.color }} className="shrink-0 text-sm leading-none">
+              {fileIcon.icon}
+            </span>
+          ) : (
+            <FileCodeIcon className="size-3.5 shrink-0 text-muted-foreground" />
+          )}
+          <span className="truncate font-mono text-foreground">{filename}</span>
+        </div>
+        <span className="shrink-0 rounded-sm bg-background/80 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">
+          {segment.lineLabel}
+        </span>
+      </div>
+      <CodeBlock
+        code={segment.code}
+        enableHighlighting
+        language={language as never}
+        viewportClassName="max-h-56"
+        className="rounded-none border-0 bg-transparent"
+      />
+    </div>
+  );
+}
+
+function renderUserMessageContent(
+  text: string,
+  suggestionByToken: Map<string, MentionSuggestion>,
+) {
+  const segments = parseUserMessageSegments(text);
+
+  return (
+    <div className="space-y-2">
+      {segments.map((segment, index) =>
+        segment.type === "code-selection"
+          ? renderUserCodeSelection(segment, `code-${index}`)
+          : renderUserTextWithMentions(segment.value, suggestionByToken, `text-${index}`),
+      )}
+    </div>
+  );
 }
 
 function readFileAsDataUrl(file: File): Promise<string> {
@@ -6024,7 +5899,6 @@ export function ChatPanel({
   fileTree,
   onContextOpenChange,
   onInputChange,
-  onKeyDown,
   onSendMessage,
   onStopMessage,
   onResolveDeleteConfirmation,
@@ -6062,8 +5936,6 @@ export function ChatPanel({
   const [attachmentFiles, setAttachmentFiles] = useState<ComposerAttachment[]>([]);
   const [isGlobalDragOver, setIsGlobalDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const composerInputRef = useRef<HTMLDivElement>(null);
-  const composerInputId = useId();
   const [isModelSelectorOpen, setIsModelSelectorOpen] = useState(false);
   const [isHandling, setIsHandling] = useState(false);
   const [isSubagentDrawerOpen, setIsSubagentDrawerOpen] = useState(false);
@@ -6117,14 +5989,6 @@ export function ChatPanel({
     submitMessage();
   }, [isHandling, submitMessage]);
 
-  const handleEditMessage = useCallback(
-    (content: string) => {
-      onInputChange(content);
-      composerInputRef.current?.focus();
-    },
-    [onInputChange],
-  );
-
   useEffect(() => {
     if (!isHandling || isLoading) return;
     setIsHandling(false);
@@ -6145,22 +6009,6 @@ export function ChatPanel({
 
     return () => clearTimeout(timer);
   }, [isHandling]);
-
-  const [composerSelection, setComposerSelection] =
-    useState<ComposerSelectionOffsets>({
-      start: 0,
-      end: 0,
-    });
-  const [mentionNavigation, setMentionNavigation] = useState<{
-    key: string | null;
-    index: number;
-  }>({
-    key: null,
-    index: 0,
-  });
-  const [dismissedMentionKey, setDismissedMentionKey] = useState<string | null>(
-    null,
-  );
 
   useCompletionNotification(isLoading, mainMessages.length > 0);
 
@@ -6439,41 +6287,6 @@ export function ChatPanel({
     }
     return map;
   }, [mentionSuggestions]);
-  const mentionRenderSegments = useMemo(
-    () => buildMentionRenderSegments(input, mentionSuggestionByToken),
-    [input, mentionSuggestionByToken],
-  );
-
-  const activeMention = useMemo(
-    () => getActiveMentionAtCaret(input, composerSelection.start),
-    [composerSelection.start, input],
-  );
-  const activeMentionKey = activeMention
-    ? `${activeMention.start}:${activeMention.query}`
-    : null;
-  const filteredMentionSuggestions = useMemo(() => {
-    if (!activeMention) return [];
-
-    const normalizedQuery = activeMention.query.trim().toLowerCase();
-    if (!normalizedQuery) {
-      return mentionSuggestions;
-    }
-
-    return mentionSuggestions.filter((suggestion) =>
-      [suggestion.label, suggestion.description, suggestion.insertValue].some(
-        (value) => value.toLowerCase().includes(normalizedQuery),
-      ),
-    );
-  }, [activeMention, mentionSuggestions]);
-  const mentionSelectedIndex =
-    activeMentionKey && mentionNavigation.key === activeMentionKey
-      ? Math.min(
-          mentionNavigation.index,
-          Math.max(filteredMentionSuggestions.length - 1, 0),
-        )
-      : 0;
-  const isMentionMenuOpen =
-    Boolean(activeMention) && dismissedMentionKey !== activeMentionKey;
 
   const lastAssistantMessage = useMemo(() => {
     for (let i = mainMessages.length - 1; i >= 0; i--) {
@@ -6517,236 +6330,6 @@ export function ChatPanel({
     isFocused,
     isLoading,
   ]);
-
-  useEffect(() => {
-    if (!isMentionMenuOpen) return;
-    const frame = window.requestAnimationFrame(() => {
-      composerInputRef.current?.focus({ preventScroll: true });
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [isMentionMenuOpen]);
-
-  useLayoutEffect(() => {
-    const composer = composerInputRef.current;
-    if (!composer || document.activeElement !== composer) return;
-    setComposerSelectionOffsets(
-      composer,
-      composerSelection.start,
-      composerSelection.end,
-    );
-  }, [composerSelection, input]);
-
-  const syncComposerSelection = useCallback(
-    (target: HTMLElement) => {
-      const selection = getComposerSelectionOffsets(target);
-      if (!selection) return;
-      const normalizedStart = normalizeMentionCaret(input, selection.start);
-      const normalizedEnd = normalizeMentionCaret(input, selection.end);
-      if (
-        normalizedStart !== selection.start ||
-        normalizedEnd !== selection.end
-      ) {
-        setComposerSelectionOffsets(target, normalizedStart, normalizedEnd);
-      }
-      setComposerSelection({
-        start: normalizedStart,
-        end: normalizedEnd,
-      });
-    },
-    [input],
-  );
-
-  const buildMentionInsertion = useCallback(
-    (suggestion: MentionSuggestion) => {
-      if (!activeMention) return null;
-
-      const nextValue =
-        input.slice(0, activeMention.start) +
-        `${suggestion.insertValue} ` +
-        input.slice(activeMention.end);
-      const nextCaret = activeMention.start + suggestion.insertValue.length + 1;
-
-      return { nextValue, nextCaret };
-    },
-    [activeMention, input],
-  );
-
-  const removeMentionToken = useCallback(
-    (start: number, end: number) => {
-      const nextValue = input.slice(0, start) + input.slice(end);
-      onInputChange(nextValue);
-      setComposerSelection({ start, end: start });
-      setDismissedMentionKey(null);
-      focusComposerAtOffset(composerInputId, start);
-    },
-    [composerInputId, input, onInputChange],
-  );
-
-  const handleComposerInput = useCallback(
-    (e: React.FormEvent<HTMLDivElement>) => {
-      const nextValue = serializeComposerContent(e.currentTarget);
-      const selection = getComposerSelectionOffsets(e.currentTarget);
-      onInputChange(nextValue);
-      setComposerSelection({
-        start: normalizeMentionCaret(
-          nextValue,
-          selection?.start ?? nextValue.length,
-        ),
-        end: normalizeMentionCaret(
-          nextValue,
-          selection?.end ?? nextValue.length,
-        ),
-      });
-    },
-    [onInputChange],
-  );
-
-  const handleComposerPaste = useCallback(
-    (e: React.ClipboardEvent<HTMLDivElement>) => {
-      e.preventDefault();
-      const pastedText = e.clipboardData.getData("text/plain");
-      if (!pastedText) return;
-
-      const nextValue =
-        input.slice(0, composerSelection.start) +
-        pastedText +
-        input.slice(composerSelection.end);
-      const nextCaret = composerSelection.start + pastedText.length;
-      onInputChange(nextValue);
-      setComposerSelection({ start: nextCaret, end: nextCaret });
-      focusComposerAtOffset(composerInputId, nextCaret);
-    },
-    [
-      composerInputId,
-      composerSelection.end,
-      composerSelection.start,
-      input,
-      onInputChange,
-    ],
-  );
-
-  const handleComposerKeyDown = useCallback(
-    (e: React.KeyboardEvent<HTMLDivElement>) => {
-      const caretStart = composerSelection.start;
-      const caretEnd = composerSelection.end;
-      const suggestionCount = filteredMentionSuggestions.length;
-
-      if (caretStart === caretEnd) {
-        if (e.key === "Backspace") {
-          const activeToken =
-            findMentionTokenAtCaret(input, caretStart) ??
-            findMentionTokenAtCaret(input, Math.max(caretStart - 1, 0));
-          if (activeToken && caretStart > activeToken.start) {
-            e.preventDefault();
-            removeMentionToken(activeToken.start, activeToken.end);
-            return;
-          }
-        }
-
-        if (e.key === "Delete") {
-          const activeToken = findMentionTokenAtCaret(input, caretStart);
-          if (activeToken && caretStart < activeToken.end) {
-            e.preventDefault();
-            removeMentionToken(activeToken.start, activeToken.end);
-            return;
-          }
-        }
-      }
-
-      if (isMentionMenuOpen && suggestionCount > 0) {
-        if (e.key === "ArrowDown") {
-          e.preventDefault();
-          setMentionNavigation((prev) => ({
-            key: activeMentionKey,
-            index:
-              prev.key === activeMentionKey
-                ? (prev.index + 1) % suggestionCount
-                : 0,
-          }));
-          return;
-        }
-
-        if (e.key === "ArrowUp") {
-          e.preventDefault();
-          setMentionNavigation((prev) => ({
-            key: activeMentionKey,
-            index:
-              prev.key === activeMentionKey
-                ? (prev.index - 1 + suggestionCount) % suggestionCount
-                : suggestionCount - 1,
-          }));
-          return;
-        }
-
-        if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-          e.preventDefault();
-          const insertion = buildMentionInsertion(
-            filteredMentionSuggestions[
-              Math.min(mentionSelectedIndex, suggestionCount - 1)
-            ],
-          );
-          if (insertion) {
-            onInputChange(insertion.nextValue);
-            setComposerSelection({
-              start: insertion.nextCaret,
-              end: insertion.nextCaret,
-            });
-            setDismissedMentionKey(null);
-            focusComposerAtOffset(composerInputId, insertion.nextCaret);
-          }
-          return;
-        }
-      }
-
-      if (e.key === "Enter" && e.shiftKey) {
-        e.preventDefault();
-        const nextValue =
-          input.slice(0, caretStart) + "\n" + input.slice(caretEnd);
-        const nextCaret = caretStart + 1;
-        onInputChange(nextValue);
-        setComposerSelection({ start: nextCaret, end: nextCaret });
-        focusComposerAtOffset(composerInputId, nextCaret);
-        return;
-      }
-
-      if (isMentionMenuOpen && (e.key === "Escape" || e.key === "Tab")) {
-        setDismissedMentionKey(activeMentionKey);
-      }
-
-      onKeyDown(e);
-      window.requestAnimationFrame(() => {
-        if (composerInputRef.current) {
-          syncComposerSelection(composerInputRef.current);
-        }
-      });
-    },
-    [
-      activeMentionKey,
-      buildMentionInsertion,
-      composerInputId,
-      composerSelection.end,
-      composerSelection.start,
-      filteredMentionSuggestions,
-      input,
-      isMentionMenuOpen,
-      mentionSelectedIndex,
-      onKeyDown,
-      onInputChange,
-      removeMentionToken,
-      syncComposerSelection,
-    ],
-  );
-
-  const handleMentionInteractOutside = useCallback(
-    (event: Event) => {
-      const target = event.target;
-      if (target instanceof Node && composerRef.current?.contains(target)) {
-        return;
-      }
-      setDismissedMentionKey(activeMentionKey);
-    },
-    [activeMentionKey],
-  );
 
   const composer = (
     <div className="shrink-0 border-t bg-background">
@@ -7115,6 +6698,7 @@ export function ChatPanel({
                       onEditMessage={onEditMessage}
                       subagentMessages={subagentMessages}
                       onOpenSubagentLog={handleOpenSubagentLog}
+                      mentionSuggestionByToken={mentionSuggestionByToken}
                       thinkingRendering={thinkingRendering}
                       finalAnswerRendering={finalAnswerRendering}
                     />
@@ -7158,20 +6742,13 @@ export function ChatPanel({
       </AnimatePresence>
 
       {isGlobalDragOver && createPortal(
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-background/60 backdrop-blur-sm">
-          <div className="flex flex-col items-center gap-4 rounded-2xl border-2 border-dashed border-primary/40 bg-background/90 px-10 py-8 shadow-2xl backdrop-blur-md">
-            <div className="relative flex size-16 items-center justify-center">
-              <div className="absolute inset-0 rounded-full bg-primary/10 animate-pulse" />
-              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="text-primary relative z-10">
-                <path d="M12 16V4m0 0L8 8m4-4l4 4" />
-                <path d="M20 16v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-2" />
-              </svg>
-            </div>
-            <div className="flex flex-col items-center gap-1">
-              <span className="text-base font-semibold text-foreground">释放以添加文件</span>
-              <span className="text-xs text-muted-foreground">文件将作为附件发送给 AI</span>
-            </div>
-          </div>
+        <div className="pointer-events-none fixed inset-0 z-[200] flex items-center justify-center bg-[#eef6fb]">
+          <img
+            src={dragUploadImage}
+            alt="松开以上传"
+            className="h-auto w-[20vw] object-contain"
+            draggable={false}
+          />
         </div>,
         document.body,
       )}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -9,7 +10,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from coding_agent.git_tools import init_git_repo
-from fastapi_app.api_models import CreateSessionRequest
+from fastapi_app.api_models import CreateSessionRequest, SessionCleanupRequest
 from fastapi_app.workspace_utils import build_default_open_files, pick_default_file
 
 
@@ -85,6 +86,54 @@ def register_session_routes(
     *,
     deps: SessionRouteDeps,
 ) -> None:
+    def close_runtime_session(session_id: str) -> None:
+        session = deps.sessions_dict.pop(session_id, None)
+        if session is None:
+            return
+        deps.stop_session_execution(session)
+        for runtime in session.terminal_runtimes.values():
+            runtime.close()
+        if session.interactive_command_session is not None:
+            session.interactive_command_session.close()
+
+    def cleanup_candidates(request: SessionCleanupRequest) -> tuple[list[Any], int]:
+        states = deps.session_store.list(limit=None)
+        active_ids = set(deps.sessions_dict.keys())
+        selected_ids = {str(session_id).strip() for session_id in request.sessionIds if str(session_id).strip()}
+        now_ms = int(time.time() * 1000)
+        cutoff_ms: int | None = None
+        if request.mode == "older_than":
+            days = int(request.days or 0)
+            if days <= 0:
+                raise HTTPException(status_code=400, detail="清理天数必须大于 0")
+            cutoff_ms = now_ms - days * 86_400_000
+        if request.mode == "workspace" and not str(request.workspace or "").strip():
+            raise HTTPException(status_code=400, detail="请选择要清理的工作区")
+
+        candidates: list[Any] = []
+        protected_active = 0
+        for state in states:
+            session_id = state.session_id
+            workspace_key = str(state.base_workspace or state.workspace or "").strip()
+            matched = False
+            if request.mode == "older_than":
+                matched = cutoff_ms is not None and int(state.updated_at or 0) < cutoff_ms
+            elif request.mode == "workspace":
+                matched = workspace_key == str(request.workspace or "").strip()
+            elif request.mode == "empty":
+                matched = state.message_count <= 0 and state.tool_call_count <= 0
+            elif request.mode == "ids":
+                matched = session_id in selected_ids
+            elif request.mode == "all":
+                matched = True
+            if not matched:
+                continue
+            if session_id in active_ids and not request.includeActive:
+                protected_active += 1
+                continue
+            candidates.append(state)
+        return candidates, protected_active
+
     @app.post("/api/sessions")
     async def create_session(request: CreateSessionRequest) -> JSONResponse:
         session_id = uuid.uuid4().hex
@@ -216,6 +265,45 @@ def register_session_routes(
             }
         )
 
+    @app.get("/api/sessions/storage")
+    async def get_session_storage_overview() -> JSONResponse:
+        overview = await asyncio.to_thread(
+            deps.session_store.storage_overview,
+            set(deps.sessions_dict.keys()),
+        )
+        return JSONResponse(overview)
+
+    @app.post("/api/sessions/cleanup")
+    async def cleanup_sessions(request: SessionCleanupRequest) -> JSONResponse:
+        candidates, protected_active = await asyncio.to_thread(cleanup_candidates, request)
+        candidate_ids = [state.session_id for state in candidates]
+        summary = await asyncio.to_thread(deps.session_store.summarize_session_ids, candidate_ids)
+        candidate_items = [
+            {
+                **deps.persisted_state_to_history_item(state).model_dump(),
+                "isActive": state.session_id in deps.sessions_dict,
+            }
+            for state in candidates[:200]
+        ]
+        deleted_ids: list[str] = []
+        if not request.dryRun:
+            for session_id in candidate_ids:
+                close_runtime_session(session_id)
+                deps.session_store.delete(session_id)
+                deleted_ids.append(session_id)
+        return JSONResponse(
+            {
+                "dryRun": request.dryRun,
+                "deletedCount": len(deleted_ids),
+                "deletedSessionIds": deleted_ids,
+                "candidateCount": len(candidate_ids),
+                "protectedActiveCount": protected_active,
+                "summary": summary,
+                "candidates": candidate_items,
+                "candidatePreviewLimit": 200,
+            }
+        )
+
     @app.get("/api/sessions/{session_id}")
     async def get_session_snapshot(session_id: str) -> JSONResponse:
         session = deps.require_session(session_id)
@@ -227,16 +315,10 @@ def register_session_routes(
 
     @app.delete("/api/sessions/{session_id}")
     async def delete_session(session_id: str) -> JSONResponse:
-        session = deps.sessions_dict.pop(session_id, None)
-        if session is None:
+        if session_id not in deps.sessions_dict:
             if deps.session_store.load(session_id) is None:
                 raise HTTPException(status_code=404, detail="session 不存在")
-        else:
-            deps.stop_session_execution(session)
-            for runtime in session.terminal_runtimes.values():
-                runtime.close()
-            if session.interactive_command_session is not None:
-                session.interactive_command_session.close()
+        close_runtime_session(session_id)
         deps.session_store.delete(session_id)
         return JSONResponse({"deleted": True, "sessionId": session_id})
 

@@ -21,7 +21,7 @@ TRANSIENT_MCP_ERROR_PATTERNS = (
     "tls connection",
 )
 MCP_RETRY_ATTEMPTS = 3
-MCP_TOOL_CACHE_TTL_SECONDS = 300
+MCP_TOOL_CACHE_TTL_SECONDS = 24 * 60 * 60
 _TOOLS_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
 
@@ -158,6 +158,10 @@ def _remember_tools(server: dict[str, Any], tools: list[dict[str, Any]]) -> None
         time.monotonic(),
         [dict(tool) for tool in tools],
     )
+
+
+def clear_mcp_tool_cache() -> None:
+    _TOOLS_CACHE.clear()
 
 
 def _is_transient_mcp_error(exc: BaseException) -> bool:

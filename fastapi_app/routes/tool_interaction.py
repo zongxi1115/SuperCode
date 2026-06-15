@@ -158,6 +158,29 @@ def _format_tool_input_answers_for_agent(
     return "\n".join(lines)
 
 
+def _merge_plan_answers(
+    current_state: object,
+    *,
+    title: str,
+    answers: list[dict[str, Any]],
+) -> dict[str, Any]:
+    state = current_state if isinstance(current_state, dict) else {}
+    previous_answers = state.get("answered_questions")
+    merged_answers = list(previous_answers) if isinstance(previous_answers, list) else []
+    answer_batch = {
+        "title": title,
+        "answers": answers,
+    }
+    merged_answers.append(answer_batch)
+    if len(merged_answers) > 12:
+        merged_answers = merged_answers[-12:]
+
+    return {
+        "answered_questions": merged_answers,
+        "answer_summary": _format_tool_input_answers_for_agent(title, answers),
+    }
+
+
 def register_tool_interaction_routes(
     app: FastAPI,
     *,
@@ -619,8 +642,17 @@ def register_tool_interaction_routes(
             _format_tool_input_answers_for_agent(title, answers),
         )
         if session.agent_type == "plan":
+            plan_answer_state = _merge_plan_answers(
+                session.plan_state,
+                title=title,
+                answers=answers,
+            )
             deps.set_session_phase(session, "clarifying")
-            deps.update_plan_state(session, status="clarifying")
+            deps.update_plan_state(
+                session,
+                status="clarifying",
+                **plan_answer_state,
+            )
         elif session.agent_type == "super":
             deps.set_session_phase(session, "idle")
         session.touch()

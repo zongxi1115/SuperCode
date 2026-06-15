@@ -10,8 +10,9 @@ import time
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlparse
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
+from agent.http_transport import open_url
 from agent.schema import ConversationMessage
 from fastapi_app.memory_store import remember_preference as save_memory_preference
 from fastapi_app.settings_store import load_settings
@@ -316,7 +317,7 @@ class ImageGenerator:
             method="POST",
         )
         try:
-            with urlopen(request, timeout=120) as response:
+            with open_url(request, timeout=120) as response:
                 raw_body = response.read().decode("utf-8")
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace").strip()
@@ -431,7 +432,7 @@ class ImageGenerator:
             method="GET",
         )
         try:
-            with urlopen(request, timeout=120) as response:
+            with open_url(request, timeout=120) as response:
                 image_bytes = response.read()
                 content_type = response.headers.get("Content-Type", "")
         except HTTPError as exc:

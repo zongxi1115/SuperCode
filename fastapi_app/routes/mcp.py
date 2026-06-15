@@ -9,7 +9,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
 from fastapi_app.api_models import MCPServerTestRequest, MCPServersPayload
-from fastapi_app.mcp.client import list_mcp_tools
+from fastapi_app.mcp.client import clear_mcp_tool_cache, list_mcp_tools
 from fastapi_app.mcp.config_store import (
     load_mcp_servers,
     load_mcp_servers_with_status,
@@ -42,6 +42,7 @@ def register_mcp_routes(app: FastAPI, *, deps: MCPRouteDeps) -> None:
             deps.app_data_root,
             [server.model_dump(exclude_none=True) for server in payload.servers],
         )
+        clear_mcp_tool_cache()
         return JSONResponse(
             {
                 "servers": load_mcp_servers_with_status(deps.app_data_root),
@@ -64,7 +65,7 @@ def register_mcp_routes(app: FastAPI, *, deps: MCPRouteDeps) -> None:
         server["id"] = server_id or str(server.get("id") or "")
 
         try:
-            tools = await asyncio.to_thread(list_mcp_tools, server)
+            tools = await asyncio.to_thread(list_mcp_tools, server, use_cache=False)
         except Exception as exc:  # noqa: BLE001 - surface protocol/setup failures to UI
             set_mcp_server_status(
                 str(server.get("id") or server_id),

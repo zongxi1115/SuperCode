@@ -132,6 +132,7 @@ export function getShikiLanguage(path: string): string {
 }
 
 const COMPRESSION_SUMMARY_PREFIX = "[会话压缩摘要]";
+const INTERNAL_TRACE_SUMMARY_PREFIX = "[内部工具轨迹摘要]";
 
 function isCompressionSummaryMessage(message: ChatMessage): boolean {
   if (message.role !== "assistant") return false;
@@ -145,12 +146,26 @@ function isCompressionSummaryMessage(message: ChatMessage): boolean {
   return false;
 }
 
+function isInternalTraceSummaryMessage(message: ChatMessage): boolean {
+  if (message.role !== "assistant") return false;
+  const text = message.content ?? "";
+  if (text.startsWith(INTERNAL_TRACE_SUMMARY_PREFIX)) return true;
+  if (Array.isArray(message.parts)) {
+    return message.parts.some(
+      (part) => part.type === "text" && part.text.startsWith(INTERNAL_TRACE_SUMMARY_PREFIX),
+    );
+  }
+  return false;
+}
+
 export function hydrateMessages(
   baseMessages: ChatMessage[],
   thoughts?: string[],
   toolCalls?: ToolCallRecord[]
 ): ChatMessage[] {
-  const filtered = baseMessages.filter((m) => !isCompressionSummaryMessage(m));
+  const filtered = baseMessages.filter(
+    (m) => !isCompressionSummaryMessage(m) && !isInternalTraceSummaryMessage(m),
+  );
   if (!filtered.length) {
     return filtered;
   }

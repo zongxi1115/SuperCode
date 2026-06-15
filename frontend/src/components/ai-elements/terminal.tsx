@@ -1,6 +1,7 @@
 "use client";
 
 import { Button } from "@/components/ui/button";
+import { message as appMessage } from "@/components/ui/message";
 import { cn } from "@/lib/utils";
 import _Ansi from "ansi-to-react";
 const Ansi = (_Ansi as any).default ?? _Ansi;
@@ -118,7 +119,9 @@ export const TerminalCopyButton = ({
 
   const copyToClipboard = useCallback(async () => {
     if (typeof window === "undefined" || !navigator?.clipboard?.writeText) {
-      onError?.(new Error("Clipboard API not available"));
+      const error = new Error("Clipboard API not available");
+      onError?.(error);
+      appMessage.error("当前环境不支持复制");
       return;
     }
 
@@ -126,9 +129,11 @@ export const TerminalCopyButton = ({
       await navigator.clipboard.writeText(output);
       setIsCopied(true);
       onCopy?.();
+      appMessage.success("终端输出已复制");
       timeoutRef.current = window.setTimeout(() => setIsCopied(false), timeout);
     } catch (error) {
       onError?.(error as Error);
+      appMessage.error(error instanceof Error ? error.message : "复制终端输出失败");
     }
   }, [output, onCopy, onError, timeout]);
 

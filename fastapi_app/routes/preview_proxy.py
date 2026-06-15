@@ -5,8 +5,8 @@ import re
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urljoin, urlparse
 from urllib.request import Request as UrlRequest
-from urllib.request import urlopen
 
+from agent.http_transport import open_url
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import Response
 
@@ -173,7 +173,7 @@ async def _fetch_upstream(request: Request, target_url: str) -> Response:
     )
 
     def fetch() -> tuple[int, str, dict[str, str], bytes, str]:
-        with urlopen(upstream_request, timeout=PREVIEW_PROXY_TIMEOUT_SECONDS) as upstream:
+        with open_url(upstream_request, timeout=PREVIEW_PROXY_TIMEOUT_SECONDS) as upstream:
             body_bytes = upstream.read()
             final_url = upstream.geturl()
             content_type = upstream.headers.get("content-type", "")

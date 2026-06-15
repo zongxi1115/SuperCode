@@ -5,7 +5,7 @@ import uuid
 import json
 from typing import Any
 
-from agent import ConversationMessage, StepRecord, ToolResult
+from agent import ConversationMessage, StepRecord, ToolCall, ToolResult
 
 MAX_PLANNING_RECORD_CHARS = 1_200
 MAX_STORED_TOOL_RECORDS = 80
@@ -418,14 +418,76 @@ def model_content_from_history_message(message: dict[str, Any]) -> str:
     if role != "assistant" or is_subagent_record(message):
         return content
 
-    trace_summary = build_assistant_tool_trace_summary(message)
-    if not trace_summary:
-        return content
-    if not content:
-        return trace_summary
-    if content.startswith("后端处理失败") or content.startswith("后端处理在流式阶段失败"):
-        return f"{content}\n\n{trace_summary}"
     return content
+
+
+def build_step_records_from_tool_records(tool_records: list[dict[str, Any]]) -> list[StepRecord]:
+    grouped: dict[tuple[int, int], dict[str, Any]] = {}
+    for fallback_index, record in enumerate(tool_records, start=1):
+        turn_index = _coerce_optional_int(record.get("turn_index")) or 0
+        step_index = _coerce_optional_int(record.get("step_index")) or fallback_index
+        group = grouped.setdefault(
+            (turn_index, step_index),
+            {"thought": "", "tool_calls": [], "tool_results": []},
+        )
+
+        thought = str(record.get("thought") or "").strip()
+        if thought and not group["thought"]:
+            group["thought"] = thought
+
+        name = str(record.get("name") or "").strip()
+        if not name:
+            continue
+        tool_id = str(record.get("id") or "").strip() or None
+        arguments = record.get("arguments")
+        tool_call = ToolCall(
+            name=name,
+            id=tool_id,
+            arguments=arguments if isinstance(arguments, dict) else {},
+        )
+        group["tool_calls"].append(tool_call)
+
+        state = str(record.get("state") or "").strip()
+        success = record.get("success")
+        has_result = (
+            success is not None
+            or record.get("output") is not None
+            or bool(record.get("error_message"))
+            or state in {"completed", "error", "output-available", "output-denied"}
+        )
+        if has_result:
+            group["tool_results"].append(
+                ToolResult(
+                    name=name,
+                    output=record.get("output"),
+                    tool_call_id=tool_id,
+                    success=success if isinstance(success, bool) else state not in {"error", "output-denied"},
+                    error_message=(
+                        str(record.get("error_message"))
+                        if record.get("error_message") is not None
+                        else None
+                    ),
+                )
+            )
+
+    step_records: list[StepRecord] = []
+    for (turn_index, step_index), group in sorted(grouped.items()):
+        tool_calls = group["tool_calls"]
+        tool_results = group["tool_results"]
+        first_tool_call = tool_calls[0] if tool_calls else None
+        first_tool_result = tool_results[0] if tool_results else None
+        step_records.append(
+            StepRecord(
+                turn_index=turn_index,
+                index=step_index,
+                thought=str(group["thought"]),
+                tool_call=first_tool_call,
+                tool_result=first_tool_result,
+                tool_calls=tool_calls,
+                tool_results=tool_results,
+            )
+        )
+    return step_records
 
 
 def seed_chat_session_history(
@@ -458,9 +520,36 @@ def seed_chat_session_history(
     tool_records = build_tool_records_from_history(history_messages, history_tools or [])
     if tool_records:
         chat_session.state.data["tool_records"] = tool_records
+        chat_session.state.data["step_records"] = build_step_records_from_tool_records(tool_records)
     planning_records = build_planning_records_from_history(history_messages)
     if planning_records:
         chat_session.state.data["planning_records"] = planning_records
+    chat_session.state.data["turn_index"] = _max_turn_index(
+        history_messages,
+        tool_records,
+        planning_records,
+    )
+
+
+def _max_turn_index(
+    history_messages: list[dict[str, Any]],
+    tool_records: list[dict[str, Any]],
+    planning_records: list[dict[str, Any]],
+) -> int:
+    values: list[int] = []
+    for message in history_messages:
+        if not isinstance(message, dict):
+            continue
+        turn_index = _coerce_optional_int(message.get("turnIndex", message.get("turn_index")))
+        if turn_index is not None:
+            values.append(turn_index)
+    for record in [*tool_records, *planning_records]:
+        if not isinstance(record, dict):
+            continue
+        turn_index = _coerce_optional_int(record.get("turn_index", record.get("turnIndex")))
+        if turn_index is not None:
+            values.append(turn_index)
+    return max(values, default=0)
 
 
 def record_confirmation_result_for_agent(session: Any, content: str) -> None:
@@ -718,6 +807,7 @@ def normalize_tool_record(raw_record: dict[str, Any]) -> dict[str, Any]:
         "success": success,
         "state": state,
         "error_message": raw_record.get("errorMessage", raw_record.get("error_message")),
+        "thought": str(raw_record.get("thought") or ""),
     }
     turn_index = _coerce_optional_int(raw_record.get("turnIndex", raw_record.get("turn_index")))
     if turn_index is not None:

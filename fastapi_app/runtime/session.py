@@ -69,6 +69,8 @@ def build_default_plan_state() -> dict[str, Any]:
         "status": "idle",
         "draft": None,
         "last_submitted_plan": None,
+        "answered_questions": [],
+        "answer_summary": "",
         "pending_coding_input": None,
         "tasks": [],
         "active_task_id": None,
@@ -383,6 +385,9 @@ def normalize_plan_state(value: object) -> dict[str, Any]:
         state["draft"] = None
     if not isinstance(state.get("last_submitted_plan"), dict):
         state["last_submitted_plan"] = None
+    if not isinstance(state.get("answered_questions"), list):
+        state["answered_questions"] = []
+    state["answer_summary"] = str(state.get("answer_summary") or "").strip()
     pending_coding_input = state.get("pending_coding_input")
     state["pending_coding_input"] = (
         str(pending_coding_input).strip() if isinstance(pending_coding_input, str) else None
@@ -415,9 +420,69 @@ def normalize_plan_state(value: object) -> dict[str, Any]:
     return state
 
 
+def _format_plan_answer_summary(title: str, answers: list[dict[str, Any]]) -> str:
+    lines = [f"[用户回答] {title}".strip()]
+    for answer in answers:
+        if not isinstance(answer, dict):
+            continue
+        prompt = str(answer.get("prompt") or answer.get("questionId") or "未命名问题").strip()
+        answer_type = str(answer.get("type") or "").strip()
+        if answer_type == "short_text":
+            value = str(answer.get("text") or answer.get("otherText") or "").strip() or "(未填写)"
+        else:
+            labels = [
+                str(option.get("label") or "").strip()
+                for option in answer.get("selectedOptions", [])
+                if isinstance(option, dict) and str(option.get("label") or "").strip()
+            ]
+            other_text = str(answer.get("otherText") or "").strip()
+            if other_text:
+                labels.append(f"其他：{other_text}")
+            value = "；".join(labels) if labels else "(未填写)"
+        lines.append(f"- {prompt}: {value}")
+    return "\n".join(lines)
+
+
+def _sync_plan_answers_from_history(session: Any) -> None:
+    state = normalize_plan_state(session.plan_state)
+    if state.get("answered_questions"):
+        session.plan_state = state
+        return
+
+    batches: list[dict[str, Any]] = []
+    for tool in getattr(session, "history_tools", []):
+        if not isinstance(tool, dict):
+            continue
+        tool_name = str(tool.get("name") or tool.get("tool_name") or "").strip()
+        if tool_name != "ask_plan_questions":
+            continue
+        output = tool.get("output")
+        if not isinstance(output, dict):
+            continue
+        answers = output.get("answers")
+        if not isinstance(answers, list) or not answers:
+            continue
+        title = str(output.get("title") or "需求澄清").strip()
+        batches.append({"title": title, "answers": answers})
+
+    if not batches:
+        session.plan_state = state
+        return
+
+    batches = batches[-12:]
+    last_batch = batches[-1]
+    state["answered_questions"] = batches
+    state["answer_summary"] = _format_plan_answer_summary(
+        str(last_batch.get("title") or "需求澄清"),
+        last_batch.get("answers") if isinstance(last_batch.get("answers"), list) else [],
+    )
+    session.plan_state = normalize_plan_state(state)
+
+
 def refresh_session_runtime_state(session: Any) -> None:
     if session.agent_type == "plan":
         session.plan_state = normalize_plan_state(session.plan_state)
+        _sync_plan_answers_from_history(session)
         _sync_plan_steps_from_tasks(session)
         session.deploy_state = normalize_deploy_state(session.deploy_state)
         if session.pending_user_input_requests:

@@ -351,6 +351,77 @@ export type SessionHistoryResponse = {
   hasMore: boolean;
 };
 
+export type SessionStorageDataKind = {
+  key: string;
+  label: string;
+  records: number;
+  weight: number;
+};
+
+export type SessionStorageAgeBucket = {
+  key: string;
+  label: string;
+  minDays: number;
+  maxDays: number | null;
+  count: number;
+};
+
+export type SessionStorageWorkspace = {
+  workspace: string;
+  sessionCount: number;
+  messageCount: number;
+  toolCallCount: number;
+  codeChangeCount: number;
+  artifactCount: number;
+  artifactBytes: number;
+  latestUpdatedAt: number;
+};
+
+export type SessionStorageOverview = {
+  generatedAt: number;
+  databasePath: string;
+  databaseBytes: number;
+  totalSessions: number;
+  activeSessions: number;
+  emptySessions: number;
+  totalMessages: number;
+  totalToolCalls: number;
+  totalCodeChanges: number;
+  totalArtifacts: number;
+  totalArtifactBytes: number;
+  dataKinds: SessionStorageDataKind[];
+  ageBuckets: SessionStorageAgeBucket[];
+  workspaces: SessionStorageWorkspace[];
+  agentTypes: { agentType: string; count: number }[];
+};
+
+export type SessionCleanupRequest = {
+  mode: 'older_than' | 'workspace' | 'empty' | 'all' | 'ids';
+  days?: number | null;
+  workspace?: string | null;
+  sessionIds?: string[];
+  dryRun?: boolean;
+  includeActive?: boolean;
+};
+
+export type SessionCleanupResponse = {
+  dryRun: boolean;
+  deletedCount: number;
+  deletedSessionIds: string[];
+  candidateCount: number;
+  protectedActiveCount: number;
+  summary: {
+    sessionCount: number;
+    messageCount: number;
+    toolCallCount: number;
+    codeChangeCount: number;
+    artifactCount: number;
+    artifactBytes: number;
+  };
+  candidates: (SessionHistoryItem & { isActive?: boolean })[];
+  candidatePreviewLimit: number;
+};
+
 export type TerminalSnapshotPayload = {
   sessionId: string;
   output: string;
@@ -425,19 +496,37 @@ export type TerminalInfo = {
 export type ModelOption = {
   id: string;
   name: string;
+  displayName?: string | null;
   model?: string;
   provider: string;
+  apiMode?: 'chat_completions' | 'responses' | string;
   envFile: string;
   label: string;
   sourceType?: 'env' | 'ui' | string;
   sourceLabel?: string;
   contextWindow?: number | null;
+  maxOutputTokens?: number | null;
+  inputModalities?: string[];
+  outputModalities?: string[];
+  supportedParameters?: string[];
+  capabilities?: string[];
+  pricing?: Record<string, string | number | boolean>;
   readOnly?: boolean;
 };
 
 export type UIModelRecord = {
   id: string;
+  name?: string | null;
   contextWindow?: number | null;
+  maxOutputTokens?: number | null;
+  inputModalities?: string[];
+  outputModalities?: string[];
+  supportedParameters?: string[];
+  capabilities?: string[];
+  pricing?: Record<string, string | number | boolean>;
+  ownedBy?: string | null;
+  created?: number | null;
+  description?: string | null;
 };
 
 export type UIModelProvider = {
@@ -454,6 +543,15 @@ export type ModelConfigPayload = {
   providers: UIModelProvider[];
   envConfigs: ModelOption[];
   configPath: string;
+};
+
+export type ModelConnectionTestResult = {
+  ok: boolean;
+  message: string;
+  modelCount: number;
+  model?: string | null;
+  responsePreview?: string;
+  usage?: Partial<SessionTokenUsage>;
 };
 
 export type MCPTransport = 'stdio' | 'streamable_http';
@@ -525,6 +623,13 @@ export type AppSettings = {
     model: string;
     size: string;
     quality: string;
+  };
+  tinyfish: {
+    enabled: boolean;
+    apiKey: string;
+    searchUrl: string;
+    fetchUrl: string;
+    timeout: number;
   };
   memory: {
     enabled: boolean;

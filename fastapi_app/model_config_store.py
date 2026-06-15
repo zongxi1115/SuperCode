@@ -6,9 +6,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
-from agent import AgentLLMConfig
+from agent import AgentLLMConfig, OpenAICompatibleClient
+from agent.http_transport import open_url
 from fastapi_app.secure_config_store import get_secure_config_store
 
 CONFIG_DIRECTORY_NAME = ".supercode"
@@ -26,7 +27,44 @@ MODEL_CONTEXT_TOKEN_KEYS = {
     "maxInputTokens",
     "input_token_limit",
     "inputTokenLimit",
+    "token_limit",
+    "tokenLimit",
+    "max_position_embeddings",
 }
+MODEL_MAX_OUTPUT_TOKEN_KEYS = {
+    "max_output_tokens",
+    "maxOutputTokens",
+    "max_completion_tokens",
+    "maxCompletionTokens",
+    "output_token_limit",
+    "outputTokenLimit",
+    "completion_token_limit",
+    "completionTokenLimit",
+}
+MODEL_INPUT_MODALITY_KEYS = {
+    "input_modalities",
+    "inputModalities",
+    "input_modality",
+    "inputModality",
+}
+MODEL_OUTPUT_MODALITY_KEYS = {
+    "output_modalities",
+    "outputModalities",
+    "output_modality",
+    "outputModality",
+}
+MODEL_METADATA_KEYS = (
+    "name",
+    "maxOutputTokens",
+    "inputModalities",
+    "outputModalities",
+    "supportedParameters",
+    "capabilities",
+    "pricing",
+    "ownedBy",
+    "created",
+    "description",
+)
 
 
 def config_store_path(root: Path) -> Path:
@@ -66,6 +104,59 @@ def _model_name_from_payload(value: dict[str, Any]) -> str:
     return str(value.get("id") or value.get("name") or value.get("model") or "").strip()
 
 
+def _model_display_name_from_payload(value: dict[str, Any], model_id: str) -> str | None:
+    for key in ("name", "display_name", "displayName", "label"):
+        name = str(value.get(key) or "").strip()
+        if name and name != model_id:
+            return name
+    return None
+
+
+def _normalize_model_record(value: dict[str, Any]) -> dict[str, Any] | None:
+    model_id = _model_name_from_payload(value)
+    if not model_id:
+        return None
+
+    input_modalities = extract_model_modalities(value, model_id, direction="input")
+    output_modalities = extract_model_modalities(value, model_id, direction="output")
+    supported_parameters = extract_supported_parameters(value)
+    capabilities = extract_model_capabilities(
+        model_id,
+        value,
+        input_modalities=input_modalities,
+        output_modalities=output_modalities,
+        supported_parameters=supported_parameters,
+    )
+
+    record: dict[str, Any] = {
+        "id": model_id,
+        "contextWindow": _context_window_for_model(model_id, value),
+        "inputModalities": input_modalities,
+        "outputModalities": output_modalities,
+        "supportedParameters": supported_parameters,
+        "capabilities": capabilities,
+    }
+    display_name = _model_display_name_from_payload(value, model_id)
+    if display_name:
+        record["name"] = display_name
+    max_output_tokens = extract_model_max_output_tokens(value)
+    if max_output_tokens is not None:
+        record["maxOutputTokens"] = max_output_tokens
+    pricing = extract_model_pricing(value)
+    if pricing:
+        record["pricing"] = pricing
+    owned_by = _extract_first_string(value, ("owned_by", "ownedBy", "owner", "provider"))
+    if owned_by:
+        record["ownedBy"] = owned_by
+    created = _coerce_context_tokens(value.get("created") or value.get("created_at") or value.get("createdAt"))
+    if created is not None:
+        record["created"] = created
+    description = _extract_first_string(value, ("description", "desc"))
+    if description:
+        record["description"] = description
+    return record
+
+
 def _context_window_for_model(model_id: str, payload: object) -> int:
     return extract_model_context_tokens(payload) or _infer_model_context_window(model_id)
 
@@ -103,16 +194,14 @@ def _normalize_model_records(values: list[Any] | tuple[Any, ...] | set[Any] | No
     for raw_value in values:
         if not isinstance(raw_value, dict):
             continue
-        model_id = _model_name_from_payload(raw_value)
+        record = _normalize_model_record(raw_value)
+        if record is None:
+            continue
+        model_id = str(record.get("id") or "").strip()
         if not model_id or model_id in seen:
             continue
         seen.add(model_id)
-        records.append(
-            {
-                "id": model_id,
-                "contextWindow": _context_window_for_model(model_id, raw_value),
-            }
-        )
+        records.append(record)
     return records
 
 
@@ -175,6 +264,7 @@ def build_ui_model_sources(root: Path) -> list[dict[str, Any]]:
                 {
                     "id": config_ref,
                     "name": model_name,
+                    "displayName": model.get("name"),
                     "model": model_name,
                     "provider": provider["provider"],
                     "apiMode": provider["apiMode"],
@@ -183,6 +273,12 @@ def build_ui_model_sources(root: Path) -> list[dict[str, Any]]:
                     "sourceType": "ui",
                     "sourceLabel": provider["name"],
                     "contextWindow": extract_model_context_tokens(model),
+                    "maxOutputTokens": model.get("maxOutputTokens"),
+                    "inputModalities": model.get("inputModalities", []),
+                    "outputModalities": model.get("outputModalities", []),
+                    "supportedParameters": model.get("supportedParameters", []),
+                    "capabilities": model.get("capabilities", []),
+                    "pricing": model.get("pricing", {}),
                     "readOnly": False,
                 }
             )
@@ -296,7 +392,7 @@ def _fetch_provider_model_records(provider_payload: dict[str, Any]) -> list[dict
     )
 
     try:
-        with urlopen(request, timeout=15) as response:
+        with open_url(request, timeout=15) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="ignore").strip()
@@ -332,7 +428,7 @@ def _fetch_anthropic_model_records(provider: dict[str, Any]) -> list[dict[str, A
     )
 
     try:
-        with urlopen(request, timeout=15) as response:
+        with open_url(request, timeout=15) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="ignore").strip()
@@ -356,20 +452,68 @@ def discover_provider_model_catalog(provider_payload: dict[str, Any]) -> dict[st
     return {"models": models}
 
 
+def test_provider_connection(provider_payload: dict[str, Any], model_id: str | None = None) -> dict[str, Any]:
+    provider = _normalize_provider_payload(provider_payload)
+    data = _fetch_provider_model_records(provider)
+    models = _model_records_from_provider_records(data)
+    selected_model = (model_id or "").strip()
+    if not selected_model and provider["models"]:
+        selected_model = str(provider["models"][0].get("id") or "").strip()
+    if not selected_model and models:
+        selected_model = str(models[0].get("id") or "").strip()
+
+    result: dict[str, Any] = {
+        "ok": True,
+        "modelCount": len(models),
+        "model": selected_model or None,
+        "message": f"模型列表连接成功，发现 {len(models)} 个模型。",
+    }
+    if not selected_model:
+        return result
+
+    config = AgentLLMConfig.from_mapping(
+        {
+            "SC_AGENT_API_KEY": provider["apiKey"],
+            "SC_AGENT_BASE_URL": provider["baseUrl"],
+            "SC_AGENT_MODEL": selected_model,
+            "SC_AGENT_PROVIDER": provider["provider"],
+            "SC_AGENT_API_MODE": provider["apiMode"],
+            "SC_AGENT_TIMEOUT": "20",
+            "SC_AGENT_MAX_RETRIES": "0",
+        }
+    )
+    client = OpenAICompatibleClient(config)
+    completion = client.chat_completion_messages(
+        [
+            {
+                "role": "user",
+                "content": "Reply with OK only.",
+            }
+        ]
+    )
+    preview = completion.text.strip()
+    result.update(
+        {
+            "message": f"连接成功，模型 {selected_model} 已返回响应。",
+            "responsePreview": preview[:240],
+            "usage": client.last_usage or {},
+        }
+    )
+    return result
+
+
 def _model_records_from_provider_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     models: list[dict[str, Any]] = []
     seen: set[str] = set()
     for record in records:
-        model_id = _model_name_from_payload(record)
+        model = _normalize_model_record(record)
+        if model is None:
+            continue
+        model_id = str(model.get("id") or "").strip()
         if not model_id or model_id in seen:
             continue
         seen.add(model_id)
-        models.append(
-            {
-                "id": model_id,
-                "contextWindow": _context_window_for_model(model_id, record),
-            }
-        )
+        models.append(model)
     return models
 
 
@@ -409,12 +553,11 @@ def _refresh_single_provider_context_window(provider: dict[str, Any]) -> dict[st
     for model in normalized_provider["models"]:
         model_id = str(model.get("id") or "").strip()
         record = records_by_id.get(model_id)
-        refreshed_models.append(
-            {
-                "id": model_id,
-                "contextWindow": _context_window_for_model(model_id, record or model),
-            }
-        )
+        refreshed_model = _normalize_model_record(record or model) or {
+            "id": model_id,
+            "contextWindow": _context_window_for_model(model_id, model),
+        }
+        refreshed_models.append({**model, **refreshed_model, "id": model_id})
     return {**normalized_provider, "models": refreshed_models}
 
 
@@ -457,6 +600,258 @@ def resolve_model_context_tokens(root: Path, model_ref: str | None) -> int | Non
         if str(model.get("id") or "").strip() == model_name:
             return extract_model_context_tokens(model)
     return None
+
+
+def extract_model_max_output_tokens(model_payload: object) -> int | None:
+    if not isinstance(model_payload, dict):
+        return None
+    for key in MODEL_MAX_OUTPUT_TOKEN_KEYS:
+        value = _coerce_context_tokens(model_payload.get(key))
+        if value is not None:
+            return value
+    for value in model_payload.values():
+        if isinstance(value, dict):
+            nested = extract_model_max_output_tokens(value)
+            if nested is not None:
+                return nested
+    return None
+
+
+def extract_supported_parameters(model_payload: object) -> list[str]:
+    if not isinstance(model_payload, dict):
+        return []
+    for key in ("supported_parameters", "supportedParameters", "parameters"):
+        parameters = _coerce_string_list(model_payload.get(key))
+        if parameters:
+            return parameters
+    return []
+
+
+def extract_model_pricing(model_payload: object) -> dict[str, str | int | float | bool]:
+    if not isinstance(model_payload, dict):
+        return {}
+    pricing = model_payload.get("pricing")
+    if not isinstance(pricing, dict):
+        return {}
+    result: dict[str, str | int | float | bool] = {}
+    for key, value in pricing.items():
+        if isinstance(key, str) and isinstance(value, str | int | float | bool):
+            result[key] = value
+    return result
+
+
+def extract_model_modalities(
+    model_payload: object,
+    model_id: str,
+    *,
+    direction: str,
+) -> list[str]:
+    if direction not in {"input", "output"}:
+        raise ValueError(f"不支持的模型模态方向：{direction}")
+    explicit = _extract_modalities_from_payload(model_payload, direction)
+    inferred = _infer_model_modalities(model_id, direction)
+    if explicit:
+        inferred = [item for item in inferred if item != "text"]
+    merged = _unique_strings([*explicit, *inferred])
+    return merged or ["text"]
+
+
+def extract_model_capabilities(
+    model_id: str,
+    model_payload: object,
+    *,
+    input_modalities: list[str],
+    output_modalities: list[str],
+    supported_parameters: list[str],
+) -> list[str]:
+    capabilities: list[str] = []
+    if isinstance(model_payload, dict):
+        capabilities.extend(_coerce_string_list(model_payload.get("capabilities")))
+        architecture = model_payload.get("architecture")
+        if isinstance(architecture, dict):
+            capabilities.extend(_coerce_string_list(architecture.get("capabilities")))
+
+    normalized_parameters = {item.lower() for item in supported_parameters}
+    normalized_id = model_id.lower()
+    if "image" in input_modalities:
+        capabilities.append("vision")
+    if "audio" in input_modalities:
+        capabilities.append("audio_input")
+    if "video" in input_modalities:
+        capabilities.append("video_input")
+    if "image" in output_modalities:
+        capabilities.append("image_generation")
+    if "audio" in output_modalities:
+        capabilities.append("audio_output")
+    if "video" in output_modalities:
+        capabilities.append("video_generation")
+    if {"tools", "tool_choice", "function_call", "function_calling"} & normalized_parameters:
+        capabilities.append("tools")
+    if {"response_format", "structured_outputs", "json_schema", "json_object"} & normalized_parameters:
+        capabilities.append("json")
+    if (
+        {"reasoning", "include_reasoning", "reasoning_effort"} & normalized_parameters
+        or (isinstance(model_payload, dict) and model_payload.get("reasoning") is not None)
+        or any(marker in normalized_id for marker in ("reasoning", "thinking", "o1", "o3", "o4"))
+    ):
+        capabilities.append("reasoning")
+    if any(marker in normalized_id for marker in ("embedding", "embed", "text-embedding")):
+        capabilities.append("embedding")
+    if any(marker in normalized_id for marker in ("rerank", "re-rank")):
+        capabilities.append("rerank")
+    return _unique_strings(capabilities)
+
+
+def _extract_first_string(payload: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _extract_modalities_from_payload(model_payload: object, direction: str) -> list[str]:
+    if not isinstance(model_payload, dict):
+        return []
+    keys = MODEL_INPUT_MODALITY_KEYS if direction == "input" else MODEL_OUTPUT_MODALITY_KEYS
+    for key in keys:
+        modalities = _coerce_modalities(model_payload.get(key))
+        if modalities:
+            return modalities
+    modality = model_payload.get("modality")
+    if isinstance(modality, str):
+        parsed = _parse_modality_expression(modality, direction)
+        if parsed:
+            return parsed
+    for value in model_payload.values():
+        if isinstance(value, dict):
+            nested = _extract_modalities_from_payload(value, direction)
+            if nested:
+                return nested
+    return []
+
+
+def _parse_modality_expression(value: str, direction: str) -> list[str]:
+    cleaned = value.strip().lower()
+    if not cleaned:
+        return []
+    if "->" in cleaned:
+        input_part, output_part = cleaned.split("->", 1)
+        cleaned = input_part if direction == "input" else output_part
+    return _coerce_modalities(cleaned.replace("/", "+").replace(",", "+"))
+
+
+def _coerce_modalities(value: object) -> list[str]:
+    raw_items = _coerce_string_list(value, separators=("+", ",", "|", "/"))
+    modalities: list[str] = []
+    for item in raw_items:
+        normalized = item.strip().lower().replace("-", "_")
+        if normalized in {"txt", "input_text", "output_text", "text"}:
+            modalities.append("text")
+        elif normalized in {"img", "image_url", "input_image", "output_image", "vision", "image"}:
+            modalities.append("image")
+        elif normalized in {"speech", "voice", "input_audio", "output_audio", "audio"}:
+            modalities.append("audio")
+        elif normalized in {"movie", "input_video", "output_video", "video"}:
+            modalities.append("video")
+        elif normalized in {"pdf", "document", "file"}:
+            modalities.append("file")
+        elif normalized in {"embedding", "embeddings", "vector"}:
+            modalities.append("embedding")
+    return _unique_strings(modalities)
+
+
+def _infer_model_modalities(model_id: str, direction: str) -> list[str]:
+    normalized = model_id.lower()
+    input_modalities = ["text"]
+    output_modalities = ["text"]
+    is_embedding = any(marker in normalized for marker in ("embedding", "embed", "text-embedding"))
+    is_audio_input = any(marker in normalized for marker in ("whisper", "transcrib", "speech-to-text", "stt"))
+    is_audio_output = any(marker in normalized for marker in ("tts", "text-to-speech", "voice", "speechgen"))
+    is_image_output = any(
+        marker in normalized
+        for marker in ("gpt-image", "dall-e", "imagen", "image-generation", "text-to-image", "stable-diffusion")
+    )
+    is_video_output = any(marker in normalized for marker in ("text-to-video", "video-generation", "sora"))
+    is_vision = _infer_model_supports_vision(normalized)
+
+    if is_embedding:
+        output_modalities = ["embedding"]
+    if is_audio_input:
+        input_modalities.append("audio")
+    if is_audio_output:
+        output_modalities.append("audio")
+    if is_image_output:
+        output_modalities.append("image")
+    if is_video_output:
+        output_modalities.append("video")
+    if is_vision:
+        input_modalities.append("image")
+    return _unique_strings(input_modalities if direction == "input" else output_modalities)
+
+
+def _infer_model_supports_vision(normalized_model_id: str) -> bool:
+    if any(
+        marker in normalized_model_id
+        for marker in ("embedding", "tts", "whisper", "rerank", "moderation", "audio-preview")
+    ):
+        return False
+    vision_markers = (
+        "vision",
+        "vl",
+        "llava",
+        "minicpm",
+        "moondream",
+        "pixtral",
+        "gemini",
+        "gpt-4o",
+        "gpt-4.1",
+        "gpt-5",
+        "o3",
+        "o4",
+        "claude-3",
+        "claude-sonnet-4",
+        "claude-opus-4",
+        "qwen-vl",
+        "qwen2.5-vl",
+        "qwen3-vl",
+        "doubao-vision",
+        "grok-vision",
+    )
+    return any(marker in normalized_model_id for marker in vision_markers)
+
+
+def _coerce_string_list(
+    value: object,
+    *,
+    separators: tuple[str, ...] = (",",),
+) -> list[str]:
+    if isinstance(value, str):
+        items = [value]
+        for separator in separators:
+            next_items: list[str] = []
+            for item in items:
+                next_items.extend(item.split(separator))
+            items = next_items
+        return _unique_strings(item.strip() for item in items if item.strip())
+    if not isinstance(value, list | tuple | set):
+        return []
+    return _unique_strings(str(item).strip() for item in value if str(item).strip())
+
+
+def _unique_strings(values: Any) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = str(value).strip()
+        if not normalized:
+            continue
+        key = normalized.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(normalized)
+    return result
 
 
 def _coerce_context_tokens(value: object) -> int | None:
