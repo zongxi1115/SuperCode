@@ -59,6 +59,9 @@ type PlanQuestionsQuizProps = {
 
 const OTHER_OPTION_ID = "__other__";
 
+const getSubmitErrorMessage = (error: unknown) =>
+  error instanceof Error ? error.message : "提交失败，请稍后重试。";
+
 export function PlanQuestionsQuiz({
   questions,
   initialAnswers,
@@ -137,47 +140,67 @@ export function PlanQuestionsQuiz({
     return submission;
   };
 
-  const validateCurrentQuestion = () => {
-    if (!currentQuestion) return true;
-    const required = currentQuestion.required ?? true;
+  const getQuestionValidationMessage = (question: Question) => {
+    const required = question.required ?? true;
     if (!required) {
-      setValidationMessage(null);
-      return true;
+      return null;
     }
 
-    const answer = answers[currentQuestion.id];
-    const otherText = otherTexts[currentQuestion.id]?.trim() ?? "";
+    const answer = answers[question.id];
+    const otherText = otherTexts[question.id]?.trim() ?? "";
+    const title = question.title ? `「${question.title}」` : "当前问题";
 
-    if (currentQuestion.type === "single") {
+    if (question.type === "single") {
       if (!answer) {
-        setValidationMessage("请选择一个选项后再继续。");
-        return false;
+        return `${title}请选择一个选项。`;
       }
       if (answer === OTHER_OPTION_ID && !otherText) {
-        setValidationMessage("请补充更多信息后再继续。");
-        return false;
+        return `${title}请补充更多信息。`;
       }
     }
 
-    if (currentQuestion.type === "multiple") {
+    if (question.type === "multiple") {
       const selected = (answer as string[] | undefined) ?? [];
       if (selected.length === 0) {
-        setValidationMessage("请至少选择一个选项后再继续。");
-        return false;
+        return `${title}请至少选择一个选项。`;
       }
       if (selected.includes(OTHER_OPTION_ID) && !otherText) {
-        setValidationMessage("请补充更多信息后再继续。");
-        return false;
+        return `${title}请补充更多信息。`;
       }
     }
 
-    if (currentQuestion.type === "text") {
+    if (question.type === "text") {
       if (!String(answer ?? "").trim()) {
-        setValidationMessage("请补充更多信息后再继续。");
-        return false;
+        return `${title}请补充更多信息。`;
       }
     }
 
+    return null;
+  };
+
+  const validateCurrentQuestion = () => {
+    if (!currentQuestion) return true;
+    const message = getQuestionValidationMessage(currentQuestion);
+    if (message) {
+      setValidationMessage(message);
+      return false;
+    }
+    setValidationMessage(null);
+    return true;
+  };
+
+  const validateAllQuestions = () => {
+    for (let index = 0; index < questions.length; index += 1) {
+      const question = questions[index];
+      const message = getQuestionValidationMessage(question);
+      if (message) {
+        setDirection(index >= currentIdx ? 1 : -1);
+        setCurrentIdx(index);
+        setExpanded((prev) => ({ ...prev, [question.id]: true }));
+        setValidationMessage(message);
+        return false;
+      }
+    }
     setValidationMessage(null);
     return true;
   };
@@ -198,11 +221,13 @@ export function PlanQuestionsQuiz({
   };
 
   const handleSubmit = async () => {
-    if (!validateCurrentQuestion()) return;
+    if (!validateAllQuestions()) return;
     setIsSubmitting(true);
     try {
       await onSubmit?.(buildSubmission());
       setIsSubmitted(true);
+    } catch (error) {
+      setValidationMessage(getSubmitErrorMessage(error));
     } finally {
       setIsSubmitting(false);
     }

@@ -72,6 +72,12 @@ class UIMessageStreamAdapter:
                 {"type": "finish"},
             ]
 
+        if event_type == "usage":
+            return [
+                *self._ensure_started(str(payload.get("assistant_id") or "")),
+                {"type": "data-usage", "data": payload},
+            ]
+
         if event_type == "thought_delta":
             delta = str(payload.get("delta") or "")
             if not delta:

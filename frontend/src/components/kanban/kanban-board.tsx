@@ -12,6 +12,7 @@ import { KanbanColumn } from './kanban-column';
 import { KanbanCardDrawer } from './kanban-card-drawer';
 import { ScrollArea, ScrollBar } from '@/components/ui/scroll-area';
 import { Button } from '@/components/ui/button';
+import { message as appMessage } from '@/components/ui/message';
 import { Filter, LayoutDashboard, Plus, RefreshCw, Search, Trash2 } from 'lucide-react';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
@@ -45,6 +46,10 @@ async function readApiError(response: Response, fallback: string) {
   return fallback;
 }
 
+function getErrorMessage(error: unknown, fallback: string) {
+  return error instanceof Error && error.message ? error.message : fallback;
+}
+
 export function KanbanBoard({ workspace, fileTree = [], onSendCardToAi }: KanbanBoardProps) {
   const [board, setBoard] = useState<KanbanBoardType | null>(null);
   const [draggedCardId, setDraggedCardId] = useState<string | null>(null);
@@ -57,7 +62,7 @@ export function KanbanBoard({ workspace, fileTree = [], onSendCardToAi }: Kanban
   const [isSaving, setIsSaving] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  const loadBoard = useCallback(async () => {
+  const loadBoard = useCallback(async (options?: { silent?: boolean }) => {
     if (!workspace) return;
 
     setIsLoading(true);
@@ -92,8 +97,12 @@ export function KanbanBoard({ workspace, fileTree = [], onSendCardToAi }: Kanban
       setBoard(createData.board ?? null);
     } catch (error) {
       console.error(error);
-      setErrorMessage(error instanceof Error ? error.message : '加载看板失败');
-      setBoard(null);
+      const message = getErrorMessage(error, '加载看板失败');
+      setErrorMessage(message);
+      if (!options?.silent) {
+        setBoard(null);
+        appMessage.error(message);
+      }
     } finally {
       setIsLoading(false);
     }
@@ -111,7 +120,7 @@ export function KanbanBoard({ workspace, fileTree = [], onSendCardToAi }: Kanban
       return;
     }
     const intervalId = window.setInterval(() => {
-      void loadBoard();
+      void loadBoard({ silent: true });
     }, 2500);
     return () => window.clearInterval(intervalId);
   }, [board?.cards, loadBoard]);
@@ -185,7 +194,9 @@ export function KanbanBoard({ workspace, fileTree = [], onSendCardToAi }: Kanban
       updateBoardFromPayload(payload, draggedCardId);
     } catch (error) {
       console.error(error);
-      setErrorMessage(error instanceof Error ? error.message : '移动卡片失败');
+      const message = getErrorMessage(error, '移动卡片失败');
+      setErrorMessage(message);
+      appMessage.error(message);
       void loadBoard();
     }
   };
@@ -249,9 +260,12 @@ export function KanbanBoard({ workspace, fileTree = [], onSendCardToAi }: Kanban
       const payload = await response.json() as BoardPayload;
       updateBoardFromPayload(payload, updatedCard.id);
       setIsDrawerOpen(false);
+      appMessage.success('卡片已保存');
     } catch (error) {
       console.error(error);
-      setErrorMessage(error instanceof Error ? error.message : '保存卡片失败');
+      const message = getErrorMessage(error, '保存卡片失败');
+      setErrorMessage(message);
+      appMessage.error(message);
     } finally {
       setIsSaving(false);
     }
@@ -272,9 +286,12 @@ export function KanbanBoard({ workspace, fileTree = [], onSendCardToAi }: Kanban
       setBoard({ ...board, cards: board.cards.filter((card) => card.id !== cardId) });
       setIsDrawerOpen(false);
       setSelectedCard(null);
+      appMessage.success('卡片已删除');
     } catch (error) {
       console.error(error);
-      setErrorMessage(error instanceof Error ? error.message : '删除卡片失败');
+      const message = getErrorMessage(error, '删除卡片失败');
+      setErrorMessage(message);
+      appMessage.error(message);
     } finally {
       setIsSaving(false);
     }
@@ -308,9 +325,12 @@ export function KanbanBoard({ workspace, fileTree = [], onSendCardToAi }: Kanban
         setSelectedCard(payload.card);
         setIsDrawerOpen(true);
       }
+      appMessage.success('卡片已创建');
     } catch (error) {
       console.error(error);
-      setErrorMessage(error instanceof Error ? error.message : '创建卡片失败');
+      const message = getErrorMessage(error, '创建卡片失败');
+      setErrorMessage(message);
+      appMessage.error(message);
     } finally {
       setIsSaving(false);
     }
@@ -445,15 +465,21 @@ export function KanbanBoard({ workspace, fileTree = [], onSendCardToAi }: Kanban
         onDelete={(cardId) => void handleDeleteCard(cardId)}
         onSendToAi={async (card) => {
           setIsDrawerOpen(false);
-          const nextAiState = await onSendCardToAi?.(card);
-          if (nextAiState) {
-            applyCardUpdateLocally(card.id, (currentCard) => ({
-              ...currentCard,
-              aiState: nextAiState,
-              updatedAt: new Date().toISOString(),
-            }));
-          } else {
-            void loadBoard();
+          try {
+            const nextAiState = await onSendCardToAi?.(card);
+            if (nextAiState) {
+              applyCardUpdateLocally(card.id, (currentCard) => ({
+                ...currentCard,
+                aiState: nextAiState,
+                updatedAt: new Date().toISOString(),
+              }));
+              appMessage.success('已发送给 AI');
+            } else {
+              void loadBoard();
+            }
+          } catch (error) {
+            console.error(error);
+            appMessage.error(getErrorMessage(error, '发送给 AI 失败'));
           }
         }}
       />

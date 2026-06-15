@@ -2,6 +2,7 @@
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
+import { message as appMessage } from "@/components/ui/message";
 import {
   Collapsible,
   CollapsibleContent,
@@ -226,7 +227,9 @@ export const CommitCopyButton = ({
 
   const copyToClipboard = useCallback(async () => {
     if (typeof window === "undefined" || !navigator?.clipboard?.writeText) {
-      onError?.(new Error("Clipboard API not available"));
+      const error = new Error("Clipboard API not available");
+      onError?.(error);
+      appMessage.error("当前环境不支持复制");
       return;
     }
 
@@ -235,6 +238,7 @@ export const CommitCopyButton = ({
         await navigator.clipboard.writeText(hash);
         setIsCopied(true);
         onCopy?.();
+        appMessage.success("提交哈希已复制");
         timeoutRef.current = window.setTimeout(
           () => setIsCopied(false),
           timeout
@@ -242,6 +246,7 @@ export const CommitCopyButton = ({
       }
     } catch (error) {
       onError?.(error as Error);
+      appMessage.error(error instanceof Error ? error.message : "复制提交哈希失败");
     }
   }, [hash, onCopy, onError, timeout, isCopied]);
 

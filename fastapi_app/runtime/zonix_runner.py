@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -258,15 +259,22 @@ class ZonixAgentRunner:
             on_event=on_event,
         )
         recorder.emit(events.turn_started(state.current_input))
-        task_content = _zonix_content_from_text_and_attachments(
-            state.current_input,
-            state.data.get("current_input_attachments"),
-        )
+        if continue_existing_turn:
+            task_content = "请基于上面的工具调用结果继续完成当前任务，不要重复已经成功完成的工具调用。"
+        else:
+            task_content = _zonix_content_from_text_and_attachments(
+                state.current_input,
+                state.data.get("current_input_attachments"),
+            )
         await run_node(
             self.agent,
             task_content,
             ctx=SuperCodeRunContext(workspace=workspace, metadata=metadata, state=state),
-            message_history=_zonix_message_history_from_state(state),
+            message_history=_zonix_message_history_from_state(
+                state,
+                include_current_turn_tools=continue_existing_turn,
+                omit_current_input=not continue_existing_turn,
+            ),
             emit=recorder.publish,
         )
         return recorder.response()
@@ -570,7 +578,94 @@ def _zonix_content_from_text_and_attachments(
     return parts
 
 
-def _zonix_message_history_from_state(state: AgentState) -> list[ZonixMessage]:
+def _zonix_tool_result_content(tool_result: ToolResult) -> str:
+    output = tool_result.output
+    if not tool_result.success:
+        payload: dict[str, Any] = {
+            "success": False,
+            "error": str(tool_result.error_message or "Tool execution failed."),
+        }
+        if output is not None:
+            payload["output"] = output
+        output = payload
+    return output if isinstance(output, str) else json.dumps(output, ensure_ascii=False)
+
+
+def _current_turn_tool_messages_from_state(state: AgentState) -> list[ZonixMessage]:
+    turn_index = state.data.get("turn_index")
+    if turn_index is None:
+        return []
+    raw_steps = state.data.get("step_records", [])
+    if not isinstance(raw_steps, list):
+        return []
+
+    messages: list[ZonixMessage] = []
+    for step in raw_steps:
+        if not isinstance(step, StepRecord) or step.turn_index != turn_index:
+            continue
+
+        tool_calls = step.tool_calls or ([step.tool_call] if step.tool_call is not None else [])
+        tool_calls = [tool_call for tool_call in tool_calls if tool_call is not None]
+        if not tool_calls:
+            continue
+
+        call_payloads: list[dict[str, Any]] = []
+        call_ids: dict[int, str] = {}
+        for position, tool_call in enumerate(tool_calls, start=1):
+            tool_call_id = tool_call.id or f"step-{step.index}-tool-{position}-{tool_call.name}"
+            call_ids[id(tool_call)] = tool_call_id
+            call_payloads.append(
+                {
+                    "call_id": tool_call_id,
+                    "tool": tool_call.name,
+                    "input": tool_call.arguments,
+                }
+            )
+        messages.append(ZonixMessage(role="assistant", content=None, data={"tool_calls": call_payloads}))
+
+        tool_results = step.tool_results or ([step.tool_result] if step.tool_result is not None else [])
+        results_by_id = {
+            result.tool_call_id: result
+            for result in tool_results
+            if result is not None and result.tool_call_id
+        }
+        emitted_result_ids: set[str | None] = set()
+        for tool_call in tool_calls:
+            tool_call_id = call_ids[id(tool_call)]
+            result = results_by_id.get(tool_call_id)
+            if result is None:
+                continue
+            emitted_result_ids.add(result.tool_call_id)
+            messages.append(
+                ZonixMessage(
+                    role="tool",
+                    name=result.name,
+                    tool_call_id=tool_call_id,
+                    content=_zonix_tool_result_content(result),
+                )
+            )
+
+        for result in tool_results:
+            if result is None or result.tool_call_id in emitted_result_ids:
+                continue
+            messages.append(
+                ZonixMessage(
+                    role="tool",
+                    name=result.name,
+                    tool_call_id=result.tool_call_id or f"step-{step.index}-tool-result",
+                    content=_zonix_tool_result_content(result),
+                )
+            )
+
+    return messages
+
+
+def _zonix_message_history_from_state(
+    state: AgentState,
+    *,
+    include_current_turn_tools: bool = False,
+    omit_current_input: bool = True,
+) -> list[ZonixMessage]:
     current_input = state.current_input.strip()
     messages: list[ZonixMessage] = []
     for message in state.conversation_messages:
@@ -591,12 +686,15 @@ def _zonix_message_history_from_state(state: AgentState) -> list[ZonixMessage]:
             )
         )
     if (
+        omit_current_input and
         messages
         and messages[-1].role == "user"
         and current_input
         and content_text(messages[-1].content).strip() == current_input
     ):
-        return messages[:-1]
+        messages = messages[:-1]
+    if include_current_turn_tools:
+        messages.extend(_current_turn_tool_messages_from_state(state))
     return messages
 
 

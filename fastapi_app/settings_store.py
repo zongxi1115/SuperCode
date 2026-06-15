@@ -9,7 +9,7 @@ from fastapi_app.secure_config_store import get_secure_config_store
 
 CONFIG_DIRECTORY_NAME = ".supercode"
 SETTINGS_FILE_NAME = "settings.json"
-SENSITIVE_SETTING_KEYS = ("embedding", "imageGeneration")
+SENSITIVE_SETTING_KEYS = ("embedding", "imageGeneration", "tinyfish")
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "autoApprove": False,
@@ -32,6 +32,13 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "size": "1024x1024",
         "quality": "auto",
     },
+    "tinyfish": {
+        "enabled": False,
+        "apiKey": "",
+        "searchUrl": "https://api.search.tinyfish.ai",
+        "fetchUrl": "https://api.fetch.tinyfish.ai",
+        "timeout": 30,
+    },
 }
 
 
@@ -51,6 +58,12 @@ def _merge_settings(payload: dict[str, Any]) -> dict[str, Any]:
         merged["imageGeneration"] = {**default_image_generation, **raw_image_generation}
     elif isinstance(default_image_generation, dict):
         merged["imageGeneration"] = {**default_image_generation}
+    default_tinyfish = DEFAULT_SETTINGS["tinyfish"]
+    raw_tinyfish = payload.get("tinyfish")
+    if isinstance(default_tinyfish, dict) and isinstance(raw_tinyfish, dict):
+        merged["tinyfish"] = {**default_tinyfish, **raw_tinyfish}
+    elif isinstance(default_tinyfish, dict):
+        merged["tinyfish"] = {**default_tinyfish}
     return merged
 
 
@@ -126,13 +139,15 @@ def save_settings(root: Path, settings: dict[str, Any]) -> dict[str, Any]:
     merged = _merge_settings(settings)
 
     # 提取敏感配置存入数据库
-    embedding_config = merged.pop("embedding", DEFAULT_SETTINGS["embedding"])
-    image_gen_config = merged.pop("imageGeneration", DEFAULT_SETTINGS["imageGeneration"])
+    sensitive_configs = {
+        key: merged.pop(key, DEFAULT_SETTINGS[key])
+        for key in SENSITIVE_SETTING_KEYS
+    }
     merged.pop("memory", None)
 
     secure_store = get_secure_config_store(root)
-    secure_store.save_setting("embedding", embedding_config)
-    secure_store.save_setting("imageGeneration", image_gen_config)
+    for key, value in sensitive_configs.items():
+        secure_store.save_setting(key, value)
 
     # 保存非敏感配置到文件
     path = settings_store_path(root)
@@ -143,6 +158,5 @@ def save_settings(root: Path, settings: dict[str, Any]) -> dict[str, Any]:
     )
 
     # 返回完整配置
-    merged["embedding"] = embedding_config
-    merged["imageGeneration"] = image_gen_config
+    merged.update(sensitive_configs)
     return merged

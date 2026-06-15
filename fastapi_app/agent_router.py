@@ -7,7 +7,7 @@ from typing import Any
 from agent.llm_client import OpenAICompatibleClient
 
 
-ALLOWED_AGENT_TYPES = {"chat", "coding", "deploy", "plan", "super"}
+ALLOWED_AGENT_TYPES = {"chat", "coding", "deploy", "plan", "super", "conflux"}
 
 
 def build_default_route_state() -> dict[str, Any]:

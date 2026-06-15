@@ -4,8 +4,9 @@ import json
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
+from agent.http_transport import open_url
 from zonix.tools import ToolContext
 
 
@@ -36,7 +37,7 @@ def _request_backend_json(
         },
     )
     try:
-        with urlopen(request, timeout=timeout) as response:
+        with open_url(request, timeout=timeout) as response:
             raw_body = response.read().decode("utf-8")
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace").strip()

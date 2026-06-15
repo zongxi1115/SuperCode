@@ -24,6 +24,7 @@ import type {
   MCPServerConfig,
   MCPServersPayload,
   MCPServerTestResult,
+  ModelConnectionTestResult,
   ModelConfigPayload,
   ModelOption,
   PlanStep,
@@ -31,6 +32,7 @@ import type {
   RecentProject,
   SessionContextPayload,
   SessionContextCompressionPayload,
+  SessionTokenUsage,
   SessionHistoryItem,
   SessionHistoryResponse,
   SessionExecutionMode,
@@ -66,6 +68,7 @@ import { apiFetch, apiUrl, openExternalUrl } from '@/lib/api-client';
 import { Info, Minus, Moon, PanelRightOpen, PanelRightClose, Settings2, Square, Sun, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
+import { message as appMessage } from '@/components/ui/message';
 import { AnimatePresence, motion } from 'motion/react';
 import { SplashScreen } from '@/components/app/splash-screen';
 
@@ -465,7 +468,7 @@ function advanceKanbanPlanSteps(currentSteps: PlanStep[], toolName: string): Pla
 }
 
 function isAgentMode(value: unknown): value is AgentMode {
-  return value === 'chat' || value === 'plan' || value === 'coding' || value === 'deploy' || value === 'super';
+  return value === 'chat' || value === 'plan' || value === 'coding' || value === 'deploy' || value === 'super' || value === 'conflux';
 }
 
 function resolveAgentModeForRequest(value: unknown) {
@@ -536,6 +539,7 @@ type SubagentStreamEvent = {
   thought?: string;
   finalAnswer?: string;
   finalOutput?: string;
+  usage?: unknown;
   toolCall?: Partial<ToolCallRecord> | null;
   toolResult?: {
     name?: string;
@@ -665,6 +669,13 @@ function normalizeAppSettings(settings: AppSettings): AppSettings {
       model: settings.imageGeneration?.model ?? '',
       size: settings.imageGeneration?.size ?? '1024x1024',
       quality: settings.imageGeneration?.quality ?? 'auto',
+    },
+    tinyfish: {
+      enabled: settings.tinyfish?.enabled ?? false,
+      apiKey: settings.tinyfish?.apiKey ?? '',
+      searchUrl: settings.tinyfish?.searchUrl ?? 'https://api.search.tinyfish.ai',
+      fetchUrl: settings.tinyfish?.fetchUrl ?? 'https://api.fetch.tinyfish.ai',
+      timeout: settings.tinyfish?.timeout ?? 30,
     },
     memory: {
       enabled: settings.memory?.enabled ?? true,
@@ -1334,6 +1345,7 @@ export default function App() {
       );
     } catch (error) {
       console.error('关闭计划失败:', error);
+      appMessage.error(getErrorMessage(error, '关闭计划失败'));
       void loadSessionContext({ silent: true });
     }
   }, [loadSessionContext, sessionId]);
@@ -1588,6 +1600,7 @@ export default function App() {
         }
       } catch (error) {
         console.error(error);
+        appMessage.error(getErrorMessage(error, '确认删除失败'));
       }
     },
     [selectedWorkspace],
@@ -1628,11 +1641,16 @@ export default function App() {
       return data;
     } catch (error) {
       console.error(error);
+      const errorMessage =
+        error instanceof DOMException && error.name === 'AbortError'
+          ? '创建会话超时（60秒），请检查后端是否正常运行'
+          : getErrorMessage(error, '创建会话失败');
       if (error instanceof DOMException && error.name === 'AbortError') {
-        setSessionError('创建会话超时（60秒），请检查后端是否正常运行');
+        setSessionError(errorMessage);
       } else {
-        setSessionError(error instanceof Error ? error.message : '创建会话失败');
+        setSessionError(errorMessage);
       }
+      appMessage.error(errorMessage);
       return null;
     } finally {
       setIsSessionBooting(false);
@@ -1669,20 +1687,25 @@ export default function App() {
 
   const handleActivePluginChange = useCallback(
     async (pluginId: string | null) => {
-      const previousPlugin = activePlugin;
-      let targetSessionId = sessionId;
-      if (!targetSessionId && pluginId) {
-        const created = await createSessionWithWorkspace(currentBaseWorkspace || selectedWorkspace);
-        targetSessionId = created?.sessionId ?? null;
-      }
+      try {
+        const previousPlugin = activePlugin;
+        let targetSessionId = sessionId;
+        if (!targetSessionId && pluginId) {
+          const created = await createSessionWithWorkspace(currentBaseWorkspace || selectedWorkspace);
+          targetSessionId = created?.sessionId ?? null;
+        }
 
-      if (targetSessionId && previousPlugin === 'project-docs' && pluginId !== 'project-docs') {
-        await setPluginLoaded(targetSessionId, 'project-docs', false);
+        if (targetSessionId && previousPlugin === 'project-docs' && pluginId !== 'project-docs') {
+          await setPluginLoaded(targetSessionId, 'project-docs', false);
+        }
+        if (targetSessionId && pluginId === 'project-docs') {
+          await setPluginLoaded(targetSessionId, 'project-docs', true);
+        }
+        setActivePlugin(pluginId);
+      } catch (error) {
+        console.error(error);
+        appMessage.error(getErrorMessage(error, '切换插件失败'));
       }
-      if (targetSessionId && pluginId === 'project-docs') {
-        await setPluginLoaded(targetSessionId, 'project-docs', true);
-      }
-      setActivePlugin(pluginId);
     },
     [
       activePlugin,
@@ -1758,6 +1781,7 @@ export default function App() {
     const workspace = customWorkspace.trim() || selectedWorkspace;
     if (!workspace) {
       setSessionError('请选择或输入一个工作区路径');
+      appMessage.warning('请选择或输入一个工作区路径');
       return;
     }
     await createSessionWithWorkspace(workspace, { initializeGitRepository });
@@ -1794,6 +1818,7 @@ export default function App() {
       );
     } catch (error) {
       console.error(error);
+      appMessage.error(getErrorMessage(error, '读取目录失败'));
     }
   };
 
@@ -1817,6 +1842,7 @@ export default function App() {
       setSelectedFileContent(data.selectedFileContent ?? '');
     } catch (error) {
       console.error(error);
+      appMessage.error(getErrorMessage(error, '打开文件失败'));
     }
   }, []);
 
@@ -1926,6 +1952,7 @@ export default function App() {
       return newTerminalId;
     } catch (error) {
       console.error(error);
+      appMessage.error(getErrorMessage(error, '创建终端失败'));
       return null;
     }
   }, [refreshTerminalState, sessionId]);
@@ -1942,8 +1969,10 @@ export default function App() {
         setActiveTerminalId(defaultTerminal?.terminalId ?? terminalInfos[0]?.terminalId ?? null);
       }
       await refreshTerminalState({ includeTerminals: true, silent: true });
+      appMessage.success('终端已关闭');
     } catch (error) {
       console.error(error);
+      appMessage.error(getErrorMessage(error, '关闭终端失败'));
     }
   }, [activeTerminalId, refreshTerminalState, sessionId, terminalInfos]);
 
@@ -1963,8 +1992,10 @@ export default function App() {
           includeProcesses: true,
           includeTerminals: true,
         });
+        appMessage.success('AI 进程已终止');
       } catch (error) {
         console.error(error);
+        appMessage.error(getErrorMessage(error, '终止 AI 进程失败'));
       } finally {
         setIsStoppingProcesses(false);
       }
@@ -1986,8 +2017,10 @@ export default function App() {
         }
         const data = await res.json();
         setManagedProcesses(Array.isArray(data.remaining) ? data.remaining : []);
+        appMessage.success('AI 执行已停止');
       } catch (error) {
         console.error(error);
+        appMessage.error(getErrorMessage(error, '停止 AI 执行失败'));
       } finally {
         setIsStoppingProcesses(false);
       }
@@ -2018,11 +2051,16 @@ export default function App() {
         applySessionPayload(data);
       } catch (error) {
         console.error(error);
+        const errorMessage =
+          error instanceof DOMException && error.name === 'AbortError'
+            ? '恢复会话超时，请重试'
+            : getErrorMessage(error, '恢复历史会话失败');
         if (error instanceof DOMException && error.name === 'AbortError') {
-          setSessionError('恢复会话超时，请重试');
+          setSessionError(errorMessage);
         } else {
-          setSessionError(error instanceof Error ? error.message : '恢复历史会话失败');
+          setSessionError(errorMessage);
         }
+        appMessage.error(errorMessage);
       } finally {
         setIsSessionBooting(false);
       }
@@ -2125,9 +2163,12 @@ export default function App() {
               }
             : prev
         );
+        appMessage.success('模型已切换');
       } catch (error) {
         console.error(error);
-        setSessionError(error instanceof Error ? error.message : '切换模型失败');
+        const errorMessage = getErrorMessage(error, '切换模型失败');
+        setSessionError(errorMessage);
+        appMessage.error(errorMessage);
       }
     },
     [modelOptions, selectedReasoningEffort, sessionId],
@@ -2170,10 +2211,13 @@ export default function App() {
               }
             : prev
         );
+        appMessage.success('思考程度已切换');
       } catch (error) {
         console.error(error);
         setSelectedReasoningEffort(previous);
-        setSessionError(error instanceof Error ? error.message : '切换思考程度失败');
+        const errorMessage = getErrorMessage(error, '切换思考程度失败');
+        setSessionError(errorMessage);
+        appMessage.error(errorMessage);
       }
     },
     [modelOptions, selectedModelId, selectedReasoningEffort, sessionId],
@@ -2195,7 +2239,7 @@ export default function App() {
         throw new Error(String(data.detail ?? '保存模型配置失败'));
       }
       setVisualModelProviders(data.providers ?? []);
-        setModelConfigPath(data.configPath ?? null);
+      setModelConfigPath(data.configPath ?? null);
       await loadModels();
     },
     [loadModels],
@@ -2215,6 +2259,22 @@ export default function App() {
       models: Array.isArray(data.models) ? (data.models as UIModelProvider['models']) : [],
     };
   }, []);
+
+  const testModelConnection = useCallback(
+    async (provider: UIModelProvider, model: string | null) => {
+      const res = await apiFetch('/api/model-configs/test-connection', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider, model }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(String(data.detail ?? '模型连接测试失败'));
+      }
+      return data as ModelConnectionTestResult;
+    },
+    [],
+  );
 
   const saveMcpServers = useCallback(async (servers: MCPServerConfig[]) => {
     const res = await apiFetch('/api/mcp/servers', {
@@ -2268,8 +2328,14 @@ export default function App() {
       const remainingItems = sessionHistory.filter((item) => item.sessionId !== targetSessionId);
       setSessionHistory(remainingItems);
 
-      apiFetch(`/api/sessions/${targetSessionId}`, { method: 'DELETE' }).catch(
-        () => {
+      apiFetch(`/api/sessions/${targetSessionId}`, { method: 'DELETE' })
+        .then(async (res) => {
+          if (!res.ok) {
+            throw new Error(await readApiError(res, '删除历史会话失败'));
+          }
+          appMessage.success('历史会话已删除');
+        })
+        .catch((error) => {
           setSessionHistory((prev) => {
             const insertIdx = prev.findIndex(
               (item) => (item.updatedAt ?? 0) < (deletedItem.updatedAt ?? 0),
@@ -2278,9 +2344,10 @@ export default function App() {
             next.splice(insertIdx === -1 ? next.length : insertIdx, 0, deletedItem);
             return next;
           });
-          setSessionError('删除历史会话失败，已恢复');
-        },
-      );
+          const errorMessage = getErrorMessage(error, '删除历史会话失败，已恢复');
+          setSessionError(errorMessage);
+          appMessage.error(errorMessage);
+        });
 
       if (targetSessionId !== sessionId) return;
 
@@ -2291,7 +2358,9 @@ export default function App() {
           .then((data) => applySessionPayload(data))
           .catch((error) => {
             console.error(error);
-            setSessionError(error instanceof Error ? error.message : '恢复历史会话失败');
+            const errorMessage = getErrorMessage(error, '恢复历史会话失败');
+            setSessionError(errorMessage);
+            appMessage.error(errorMessage);
           });
         return;
       }
@@ -2569,6 +2638,47 @@ export default function App() {
             window.setTimeout(resolve, 0);
           });
         });
+
+      const normalizeStreamUsage = (value: unknown): Partial<SessionTokenUsage> | null => {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) {
+          return null;
+        }
+        const source = value as Record<string, unknown>;
+        const usage: Partial<SessionTokenUsage> = {};
+        const numberKeys = [
+          'inputTokens',
+          'outputTokens',
+          'reasoningTokens',
+          'cachedInputTokens',
+          'totalTokens',
+        ] as const;
+        for (const key of numberKeys) {
+          const rawValue = source[key];
+          if (typeof rawValue === 'number' && Number.isFinite(rawValue)) {
+            usage[key] = Math.max(Math.round(rawValue), 0);
+          }
+        }
+        return Object.keys(usage).length > 0 ? usage : null;
+      };
+
+      const markFirstTokenLatency = (message: ChatMessage): ChatMessage => {
+        if (
+          typeof message.firstTokenLatencyMs === 'number' &&
+          Number.isFinite(message.firstTokenLatencyMs)
+        ) {
+          return message;
+        }
+        const startedAt =
+          typeof message.startTime === 'number' && Number.isFinite(message.startTime)
+            ? message.startTime
+            : requestStartedAt;
+        const normalizedStartTime = startedAt < 1_000_000_000_000 ? startedAt * 1000 : startedAt;
+        return {
+          ...message,
+          startTime: message.startTime ?? requestStartedAt,
+          firstTokenLatencyMs: Math.max(Math.round(Date.now() - normalizedStartTime), 0),
+        };
+      };
 
       const adoptAssistantId = (nextAssistantId: string) => {
         const normalizedNextId = String(nextAssistantId || '').trim();
@@ -2923,11 +3033,21 @@ export default function App() {
             if (eventName === 'final_answer_delta') {
               const delta = String(event.delta ?? '');
               updateAssistantMessage(messageId, (message) => ({
-                ...message,
+                ...markFirstTokenLatency(message),
                 ...metadata,
                 content: `${message.content}${delta}`,
                 parts: appendToLastPart(message, 'text', delta),
               }), false);
+              return;
+            }
+
+            if (eventName === 'usage') {
+              const usage = normalizeStreamUsage(event.usage);
+              updateAssistantMessage(messageId, (message) => ({
+                ...message,
+                ...metadata,
+                tokenUsage: usage ?? message.tokenUsage,
+              }), true);
               return;
             }
 
@@ -3089,7 +3209,7 @@ export default function App() {
             assistantTextById.set(currentAssistantId, nextText);
             onAssistantTextChange?.(nextText);
             updateAssistantMessage(currentAssistantId, (message) => ({
-              ...message,
+              ...markFirstTokenLatency(message),
               content: `${message.content}${data.delta ?? ''}`,
               parts: appendToLastPart(message, 'text', data.delta ?? '')
             }), false);
@@ -3385,6 +3505,20 @@ export default function App() {
             }), true);
           } else if (data.type === 'data-tool-call') {
             return;
+          } else if (data.type === 'data-usage') {
+            const payload = (
+              data.data &&
+              typeof data.data === 'object' &&
+              !Array.isArray(data.data)
+            ) ? data.data as Record<string, unknown> : {};
+            const assistantId = String(payload.assistant_id ?? currentAssistantId);
+            const usage = normalizeStreamUsage(payload.usage);
+            if (!assistantId || !usage) return;
+            adoptAssistantId(assistantId);
+            updateAssistantMessage(assistantId, (message) => ({
+              ...message,
+              tokenUsage: usage,
+            }), true);
           } else if (typeof data.type === 'string' && data.type.startsWith('data-')) {
             const assistantId = currentAssistantId;
             if (!assistantId) return;
@@ -3392,6 +3526,11 @@ export default function App() {
               ...message,
               parts: [...(message.parts ?? []), { type: 'data' as const, dataType: data.type, data: data.data }]
             }), true);
+          } else if (data.type === 'finish') {
+            flushImmediately();
+            if (currentSessionIdRef.current === streamSessionId) {
+              setIsLoading(false);
+            }
           } else if (data.type === 'error') {
             hadStreamError = true;
             const nextText = `${assistantTextById.get(currentAssistantId) ?? ''}${data.errorText ?? ''}`;
@@ -3418,7 +3557,7 @@ export default function App() {
             assistantTextById.set(currentAssistantId, nextText);
             onAssistantTextChange?.(nextText);
             updateAssistantMessage(currentAssistantId, (message) => ({
-              ...message,
+              ...markFirstTokenLatency(message),
               content: `${message.content}${data.payload.delta ?? ''}`,
               parts: appendToLastPart(message, 'text', data.payload.delta ?? '')
             }), false);
@@ -3502,6 +3641,15 @@ export default function App() {
                   : p
               )
             }), true);
+          } else if (data.type === 'usage') {
+            const assistantId = data.payload.assistant_id || currentAssistantId;
+            const usage = normalizeStreamUsage(data.payload.usage);
+            if (!assistantId || !usage) return;
+            adoptAssistantId(assistantId);
+            updateAssistantMessage(assistantId, (message) => ({
+              ...message,
+              tokenUsage: usage,
+            }), true);
           }
         } catch (error) {
           console.error('Failed to parse SSE event', error, eventStr);
@@ -3563,6 +3711,7 @@ export default function App() {
               `已重试 ${STREAM_RETRY_LIMIT} 次仍未成功，自动停止。\n最后错误：${errorMessage}`,
             );
           }
+          appMessage.error(errorMessage);
           onStreamError?.(errorMessage);
           return;
         }
@@ -3593,6 +3742,7 @@ export default function App() {
       return base ? `${base}\n\n${block}` : block;
     });
     setComposerFocusRevision((current) => current + 1);
+    appMessage.success('已加入代码上下文');
   }, []);
 
   const sendMessage = async (
@@ -3650,16 +3800,16 @@ export default function App() {
     });
   }, [sessionId, streamAssistantResponse]);
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      sendMessage(input, elementAttachments.length > 0 ? elementAttachments : undefined);
-    }
-  };
-
   const handleSendKanbanCardToAi = useCallback(
     async (card: KanbanCard) => {
-      if (!sessionId || isLoading) return;
+      if (!sessionId) {
+        appMessage.warning('请先创建或恢复一个会话');
+        return;
+      }
+      if (isLoading) {
+        appMessage.warning('AI 正在执行中，请稍后再发送卡片');
+        return;
+      }
 
       const message = formatKanbanCardTaskPrompt(card);
       setSelectedAgentMode('coding');
@@ -3835,6 +3985,7 @@ export default function App() {
         }
       } catch (error) {
         console.error(error);
+        appMessage.error(getErrorMessage(error, '确认操作失败'));
       }
     },
     [appendCodeChanges, continueAfterConfirmation, findAssistantIdByToolCallId, isTerminalOpen, refreshTerminalState, sessionId]
@@ -3905,6 +4056,7 @@ export default function App() {
         }
       } catch (error) {
         console.error(error);
+        appMessage.error(getErrorMessage(error, '连接失败'));
       }
     },
     [continueAfterConfirmation, findAssistantIdByToolCallId, isTerminalOpen, refreshTerminalState, sessionId]
@@ -3983,7 +4135,9 @@ export default function App() {
       const toolCall = findToolCallById(toolCallId);
       const questions = toolCall?.inputRequest?.questions;
       if (!toolCall || !Array.isArray(questions)) {
-        throw new Error('未找到计划问题定义');
+        const error = new Error('未找到计划问题定义');
+        appMessage.error(error.message);
+        throw error;
       }
 
       const payloadAnswers = questions.map((question) => {
@@ -4012,7 +4166,9 @@ export default function App() {
       });
       const data = await res.json();
       if (!res.ok) {
-        throw new Error(String(data.detail ?? '提交失败'));
+        const error = new Error(String(data.detail ?? '提交失败'));
+        appMessage.error(error.message);
+        throw error;
       }
 
       setMessages((prev) =>
@@ -4073,8 +4229,10 @@ export default function App() {
     }
     try {
       await copyTextToClipboard(message.content);
+      appMessage.success('已复制回答');
     } catch (error) {
       console.error(error);
+      appMessage.error(getErrorMessage(error, '复制失败'));
     }
   }, []);
 
@@ -4099,6 +4257,7 @@ export default function App() {
           throw new Error(String((data as { detail?: string }).detail ?? '压缩会话失败'));
         }
         if (!(data as SessionContextCompressionPayload).applied) {
+          appMessage.info('当前上下文暂不需要压缩');
           return;
         }
 
@@ -4109,8 +4268,10 @@ export default function App() {
           await loadSessionContext({ silent: true, targetSessionId: sessionId });
         }
         await loadSessionHistory();
+        appMessage.success('会话上下文已压缩');
       } catch (error) {
         console.error(error);
+        appMessage.error(getErrorMessage(error, '压缩会话失败'));
       } finally {
         setCompletionActionState(null);
       }
@@ -4136,8 +4297,10 @@ export default function App() {
         applySessionPayload(data);
         await loadSessionHistory();
         await loadSessionContext({ silent: true, targetSessionId: data.sessionId });
+        appMessage.success('已派生新会话');
       } catch (error) {
         console.error(error);
+        appMessage.error(getErrorMessage(error, '派生分支失败'));
       } finally {
         setCompletionActionState(null);
       }
@@ -4165,8 +4328,10 @@ export default function App() {
         syncVisibleSessionSnapshot(data);
         await loadSessionContext({ silent: true, targetSessionId: sessionId });
         await loadSessionHistory();
+        appMessage.success('对话已还原');
       } catch (error) {
         console.error(error);
+        appMessage.error(getErrorMessage(error, '还原对话失败'));
       } finally {
         setCompletionActionState(null);
       }
@@ -4294,7 +4459,10 @@ export default function App() {
           className="h-7 gap-2 rounded-full px-3 text-xs"
           onClick={() => {
             void loadModelConfigs()
-              .catch(console.error)
+              .catch((error) => {
+                console.error(error);
+                appMessage.error(getErrorMessage(error, '加载设置失败'));
+              })
               .finally(() => setIsModelConfigOpen(true));
           }}
           title="模型与供应商设置"
@@ -4406,7 +4574,6 @@ export default function App() {
           setInput(content);
           void sendMessage(content, elementAttachments.length > 0 ? elementAttachments : undefined);
         }}
-        onKeyDown={handleKeyDown}
         onSendMessage={(attachments) =>
           void sendMessage(
             input,
@@ -4425,7 +4592,13 @@ export default function App() {
         agentMode={selectedAgentMode}
         superAutopilotEnabled={selectedAgentMode === 'super' && isSuperAutopilotEnabled}
         onSuperAutopilotChange={setIsSuperAutopilotEnabled}
-        onAgentModeChange={setSelectedAgentMode}
+        onAgentModeChange={(mode) => {
+          if (mode === 'conflux') {
+            window.location.href = '/conflux';
+            return;
+          }
+          setSelectedAgentMode(mode);
+        }}
         elementAttachments={elementAttachments}
         onRemoveElementAttachment={(id) => setElementAttachments((prev) => prev.filter((e) => e.id !== id))}
         onCompletionAction={handleCompletionAction}
@@ -4497,8 +4670,10 @@ export default function App() {
                     : prev,
                 );
               }
+              appMessage.success('计划草案已保存');
             } catch (error) {
               console.error('保存计划草案失败:', error);
+              appMessage.error(getErrorMessage(error, '保存计划草案失败'));
             }
           }}
           onSubmitPlan={async (markdown, annotations) => {
@@ -4552,6 +4727,7 @@ export default function App() {
               );
               await loadSessionHistory();
 
+              appMessage.success('方案已提交，开始执行');
               await streamAssistantResponse({
                 url: apiUrl('/api/chat/stream'),
                 body: {
@@ -4565,6 +4741,7 @@ export default function App() {
               });
             } catch (error) {
               console.error('提交方案失败:', error);
+              appMessage.error(getErrorMessage(error, '提交方案失败'));
             }
           }}
           onClosePlan={() => {
@@ -4605,10 +4782,12 @@ export default function App() {
         currentWorkspace={selectedWorkspace}
         onSaveProviders={saveModelProviders}
         onDiscoverModels={discoverProviderModels}
+        onTestModelConnection={testModelConnection}
         onSaveMcpServers={saveMcpServers}
         onTestMcpServer={testMcpServer}
         onTestEmbedding={testEmbeddingSettings}
         onSaveSettings={saveAppSettings}
+        onSessionsChanged={() => loadSessionHistory()}
       />
       <Dialog open={isAboutOpen} onOpenChange={setIsAboutOpen}>
         <DialogContent className="sm:max-w-md overflow-hidden">

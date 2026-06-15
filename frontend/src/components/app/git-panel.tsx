@@ -14,6 +14,7 @@ import {
 } from '@/components/ai-elements/commit';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { message as appMessage } from '@/components/ui/message';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { cn } from '@/lib/utils';
 import { apiFetch } from '@/lib/api-client';
@@ -45,6 +46,23 @@ function parseFileStatus(line: string): { status: 'added' | 'modified' | 'delete
   const path = line.substring(3).trim();
   const status = FILE_STATUS_MAP[code] ?? 'modified';
   return { status, path };
+}
+
+function getErrorMessage(error: unknown, fallback: string) {
+  return error instanceof Error && error.message ? error.message : fallback;
+}
+
+async function readApiError(response: Response, fallback: string) {
+  try {
+    const data = await response.json();
+    const detail = data?.detail ?? data?.error ?? data?.message;
+    if (typeof detail === 'string' && detail.trim()) {
+      return detail;
+    }
+  } catch {
+    // ignore malformed error responses
+  }
+  return fallback;
 }
 
 function CommitItem({ commit }: { commit: GitCommitInfo }) {
@@ -88,12 +106,15 @@ function CommitForm({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: message.trim() }),
       });
-      if (res.ok) {
-        setMessage('');
-        onCommitSuccess?.();
+      if (!res.ok) {
+        throw new Error(await readApiError(res, '提交失败'));
       }
+      setMessage('');
+      onCommitSuccess?.();
+      appMessage.success('提交已创建');
     } catch (error) {
       console.error(error);
+      appMessage.error(getErrorMessage(error, '提交失败'));
     } finally {
       setIsCommitting(false);
     }
@@ -165,14 +186,17 @@ function TagForm({ sessionId, tags, onTagCreated }: { sessionId: string; tags: G
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ tag: tagName.trim(), message: tagMessage.trim() || undefined }),
       });
-      if (res.ok) {
-        setTagName('');
-        setTagMessage('');
-        setShowForm(false);
-        onTagCreated?.();
+      if (!res.ok) {
+        throw new Error(await readApiError(res, '创建标签失败'));
       }
+      setTagName('');
+      setTagMessage('');
+      setShowForm(false);
+      onTagCreated?.();
+      appMessage.success('标签已创建');
     } catch (error) {
       console.error(error);
+      appMessage.error(getErrorMessage(error, '创建标签失败'));
     } finally {
       setIsCreating(false);
     }
@@ -250,16 +274,19 @@ export const GitPanel = memo(function GitPanel({ sessionId }: GitPanelProps) {
         apiFetch(`/api/sessions/${sessionId}/git/log?count=30`),
         apiFetch(`/api/sessions/${sessionId}/git/tags`),
       ]);
-      if (logRes.ok) {
-        const logData: GitLogPayload = await logRes.json();
-        setGitLog(logData);
+      if (!logRes.ok) {
+        throw new Error(await readApiError(logRes, '读取 Git 状态失败'));
       }
-      if (tagsRes.ok) {
-        const tagsData: GitTagsPayload = await tagsRes.json();
-        setTags(tagsData.tags ?? []);
+      if (!tagsRes.ok) {
+        throw new Error(await readApiError(tagsRes, '读取 Git 标签失败'));
       }
+      const logData: GitLogPayload = await logRes.json();
+      const tagsData: GitTagsPayload = await tagsRes.json();
+      setGitLog(logData);
+      setTags(tagsData.tags ?? []);
     } catch (error) {
       console.error(error);
+      appMessage.error(getErrorMessage(error, '刷新 Git 状态失败'));
     } finally {
       setIsLoading(false);
     }

@@ -158,6 +158,55 @@ def _format_tool_input_answers_for_agent(
     return "\n".join(lines)
 
 
+def _format_plan_answer_batches_for_agent(answer_batches: list[dict[str, Any]]) -> str:
+    blocks: list[str] = []
+    for batch in answer_batches:
+        if not isinstance(batch, dict):
+            continue
+        title = str(batch.get("title") or "需求澄清").strip()
+        answers = batch.get("answers")
+        if not isinstance(answers, list) or not answers:
+            continue
+        blocks.append(_format_tool_input_answers_for_agent(title, answers))
+    return "\n\n".join(blocks)
+
+
+def _merge_plan_answers(
+    current_state: object,
+    *,
+    title: str,
+    answers: list[dict[str, Any]],
+    tool_id: str | None = None,
+) -> dict[str, Any]:
+    state = current_state if isinstance(current_state, dict) else {}
+    previous_answers = state.get("answered_questions")
+    merged_answers = list(previous_answers) if isinstance(previous_answers, list) else []
+    answer_batch = {
+        "title": title,
+        "answers": answers,
+    }
+    normalized_tool_id = str(tool_id or "").strip()
+    if normalized_tool_id:
+        answer_batch["tool_id"] = normalized_tool_id
+        answer_batch["toolId"] = normalized_tool_id
+        merged_answers = [
+            batch
+            for batch in merged_answers
+            if not (
+                isinstance(batch, dict)
+                and str(batch.get("tool_id") or batch.get("toolId") or "").strip() == normalized_tool_id
+            )
+        ]
+    merged_answers.append(answer_batch)
+    if len(merged_answers) > 12:
+        merged_answers = merged_answers[-12:]
+
+    return {
+        "answered_questions": merged_answers,
+        "answer_summary": _format_plan_answer_batches_for_agent(merged_answers),
+    }
+
+
 def register_tool_interaction_routes(
     app: FastAPI,
     *,
@@ -569,8 +618,31 @@ def register_tool_interaction_routes(
         request: ToolInputSubmitRequest,
     ) -> JSONResponse:
         session = deps.require_session(session_id)
-        pending = session.pending_user_input_requests.pop(tool_id, None)
+        pending = session.pending_user_input_requests.get(tool_id)
         if pending is None:
+            existing_tool = next(
+                (
+                    tool
+                    for tool in session.history_tools
+                    if isinstance(tool, dict) and str(tool.get("id") or "").strip() == tool_id
+                ),
+                None,
+            )
+            existing_output = existing_tool.get("output") if isinstance(existing_tool, dict) else None
+            if isinstance(existing_output, dict) and isinstance(existing_output.get("answers"), list):
+                return JSONResponse(
+                    {
+                        "id": tool_id,
+                        "name": str(existing_tool.get("name") or "ask_plan_questions"),
+                        "output": existing_output,
+                        "success": existing_tool.get("success", True),
+                        "state": str(existing_tool.get("state") or "output-available"),
+                        "assistantId": str(existing_tool.get("assistantId") or existing_tool.get("assistant_id") or ""),
+                        "shouldContinue": False,
+                        "phase": session.phase,
+                        "planState": session.plan_state,
+                    }
+                )
             raise HTTPException(status_code=404, detail="未找到待填写的输入请求")
 
         input_request = pending.get("request")
@@ -618,9 +690,20 @@ def register_tool_interaction_routes(
             session,
             _format_tool_input_answers_for_agent(title, answers),
         )
+        session.pending_user_input_requests.pop(tool_id, None)
         if session.agent_type == "plan":
+            plan_answer_state = _merge_plan_answers(
+                session.plan_state,
+                title=title,
+                answers=answers,
+                tool_id=tool_id,
+            )
             deps.set_session_phase(session, "clarifying")
-            deps.update_plan_state(session, status="clarifying")
+            deps.update_plan_state(
+                session,
+                status="clarifying",
+                **plan_answer_state,
+            )
         elif session.agent_type == "super":
             deps.set_session_phase(session, "idle")
         session.touch()

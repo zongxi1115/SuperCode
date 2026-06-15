@@ -32,6 +32,7 @@ from fastapi_app.api_models import (
 from fastapi_app.runtime.chat import ChatRuntimeDeps, register_chat_routes
 from fastapi_app.code_changes import extract_apply_patch_paths
 from fastapi_app.routes.config import ConfigRouteDeps, register_config_routes
+from fastapi_app.routes.conflux import ConfluxRouteDeps, register_conflux_routes
 from fastapi_app.runtime.context import (
     ContextRuntimeDeps,
     auto_compress_session_context_if_needed,
@@ -249,6 +250,13 @@ register_config_routes(
         sync_session_runtime_state_for_agent=sync_session_runtime_state_for_agent,
         invalidate_session_context_usage=invalidate_session_context_usage,
         get_loaded_plugin_ids=get_loaded_plugin_ids,
+    ),
+)
+
+register_conflux_routes(
+    app,
+    deps=ConfluxRouteDeps(
+        app_data_root=APP_DATA_ROOT,
     ),
 )
 

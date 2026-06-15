@@ -176,7 +176,17 @@ class CreateSessionRequest(BaseModel):
 
 class UIModelRecordPayload(BaseModel):
     id: str
+    name: str | None = None
     contextWindow: int | None = None
+    maxOutputTokens: int | None = None
+    inputModalities: list[str] = Field(default_factory=list)
+    outputModalities: list[str] = Field(default_factory=list)
+    supportedParameters: list[str] = Field(default_factory=list)
+    capabilities: list[str] = Field(default_factory=list)
+    pricing: dict[str, Any] = Field(default_factory=dict)
+    ownedBy: str | None = None
+    created: int | None = None
+    description: str | None = None
 
 
 class UIModelProviderPayload(BaseModel):
@@ -191,6 +201,11 @@ class UIModelProviderPayload(BaseModel):
 
 class ModelConfigPayload(BaseModel):
     providers: list[UIModelProviderPayload] = Field(default_factory=list)
+
+
+class ModelConnectionTestRequest(BaseModel):
+    provider: UIModelProviderPayload
+    model: str | None = None
 
 
 class EmbeddingSettingsPayload(BaseModel):
@@ -230,6 +245,14 @@ class ImageGenerationSettingsPayload(BaseModel):
     quality: str = "auto"
 
 
+class TinyfishSettingsPayload(BaseModel):
+    enabled: bool = False
+    apiKey: str = ""
+    searchUrl: str = "https://api.search.tinyfish.ai"
+    fetchUrl: str = "https://api.fetch.tinyfish.ai"
+    timeout: int = 30
+
+
 class MemoryItemPayload(BaseModel):
     id: str
     content: str
@@ -257,6 +280,7 @@ class SettingsPayload(BaseModel):
     bodyLineHeight: int = 22
     embedding: EmbeddingSettingsPayload = Field(default_factory=EmbeddingSettingsPayload)
     imageGeneration: ImageGenerationSettingsPayload = Field(default_factory=ImageGenerationSettingsPayload)
+    tinyfish: TinyfishSettingsPayload = Field(default_factory=TinyfishSettingsPayload)
     memory: MemorySettingsPayload = Field(default_factory=MemorySettingsPayload)
 
 
@@ -277,6 +301,15 @@ class SessionHistoryItem(BaseModel):
     toolCallCount: int
     createdAt: int
     updatedAt: int
+
+
+class SessionCleanupRequest(BaseModel):
+    mode: Literal["older_than", "workspace", "empty", "all", "ids"] = "older_than"
+    days: int | None = 30
+    workspace: str | None = None
+    sessionIds: list[str] = Field(default_factory=list)
+    dryRun: bool = True
+    includeActive: bool = False
 
 
 class ChatAttachmentPayload(BaseModel):

@@ -1,4 +1,5 @@
 import { Button } from '@/components/ui/button';
+import { message as appMessage } from '@/components/ui/message';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { apiFetch } from '@/lib/api-client';
 import type { FileTreeNode } from '@/lib/app-types';
@@ -328,6 +329,10 @@ function readApiDetail(payload: unknown, fallback: string) {
     return String((payload as { detail?: unknown }).detail ?? fallback);
   }
   return fallback;
+}
+
+function getErrorMessage(error: unknown, fallback: string) {
+  return error instanceof Error && error.message ? error.message : fallback;
 }
 
 function clampTableDimension(value: number) {
@@ -1004,9 +1009,11 @@ export function ProjectDocsPage({ sessionId, workspace, fileTree = [] }: Project
         }
       } catch (error) {
         if (activeDocIdRef.current === documentId && !options.silent) {
+          const message = getErrorMessage(error, '同步项目文档失败');
           pendingSyncRef.current = true;
           setSaveState('error');
-          setErrorMessage(error instanceof Error ? error.message : '同步项目文档失败');
+          setErrorMessage(message);
+          appMessage.error(message);
         }
       } finally {
         syncInFlightRef.current.delete(documentId);
@@ -1076,10 +1083,12 @@ export function ProjectDocsPage({ sessionId, workspace, fileTree = [] }: Project
         hasLoadedRef.current = true;
         setSaveState(hasPendingSync ? 'dirty' : 'synced');
       } catch (error) {
+        const message = getErrorMessage(error, '读取项目文档失败');
         setHasLoaded(true);
         hasLoadedRef.current = true;
         setSaveState('error');
-        setErrorMessage(error instanceof Error ? error.message : '读取项目文档失败');
+        setErrorMessage(message);
+        appMessage.error(message);
       }
     },
     [closeFloatingMenus, sessionId, syncDocument, workspace],
@@ -1126,10 +1135,12 @@ export function ProjectDocsPage({ sessionId, workspace, fileTree = [] }: Project
       const nextActiveId = String(listPayload.activeId || safeDocuments[0].id);
       await loadDocument(nextActiveId);
     } catch (error) {
+      const message = getErrorMessage(error, '读取项目文档列表失败');
       setHasLoaded(true);
       hasLoadedRef.current = true;
       setSaveState('error');
-      setErrorMessage(error instanceof Error ? error.message : '读取项目文档列表失败');
+      setErrorMessage(message);
+      appMessage.error(message);
     }
   }, [loadDocument, sessionId]);
 
@@ -1193,9 +1204,12 @@ export function ProjectDocsPage({ sessionId, workspace, fileTree = [] }: Project
       setHasLoaded(true);
       hasLoadedRef.current = true;
       setSaveState('synced');
+      appMessage.success('项目文档已新建');
     } catch (error) {
+      const message = getErrorMessage(error, '新建项目文档失败');
       setSaveState('error');
-      setErrorMessage(error instanceof Error ? error.message : '新建项目文档失败');
+      setErrorMessage(message);
+      appMessage.error(message);
     }
   }, [sessionId, syncDocument]);
 

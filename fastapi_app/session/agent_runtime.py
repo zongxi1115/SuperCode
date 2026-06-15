@@ -205,6 +205,8 @@ def build_chat_session(
                 workspace=resolved_workspace,
                 metadata=metadata,
             )
+        elif agent_type == "conflux":
+            raise NotImplementedError("Conflux orchestrator not yet implemented, coming in Step 6")
         else:
             tools = build_coding_tools()
             if "project-docs" in loaded_plugin_ids:

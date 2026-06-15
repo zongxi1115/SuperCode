@@ -14,6 +14,7 @@ from typing import Any
 from urllib import error, request
 
 from .config import AgentLLMConfig
+from .http_transport import open_url
 
 logger = logging.getLogger(__name__)
 
@@ -306,7 +307,7 @@ class OpenAICompatibleClient:
             tools=tools,
             tool_choice=tool_choice,
         )
-        with request.urlopen(http_request, timeout=self.config.timeout) as response:
+        with open_url(http_request, timeout=self.config.timeout) as response:
             content_type = response.headers.get("Content-Type", "")
             if "text/event-stream" not in content_type.lower():
                 response_body = response.read().decode("utf-8")
@@ -657,7 +658,7 @@ class OpenAICompatibleClient:
             tools=tools,
             tool_choice=tool_choice,
         )
-        with request.urlopen(http_request, timeout=self.config.timeout) as response:
+        with open_url(http_request, timeout=self.config.timeout) as response:
             content_type = response.headers.get("Content-Type", "")
             if "text/event-stream" not in content_type.lower():
                 response_body = response.read().decode("utf-8")
@@ -962,7 +963,7 @@ class OpenAICompatibleClient:
             tools=tools,
             tool_choice=tool_choice,
         )
-        with request.urlopen(http_request, timeout=self.config.timeout) as response:
+        with open_url(http_request, timeout=self.config.timeout) as response:
             return response.read().decode("utf-8")
 
     def _send_responses_request(
@@ -980,7 +981,7 @@ class OpenAICompatibleClient:
             tools=tools,
             tool_choice=tool_choice,
         )
-        with request.urlopen(http_request, timeout=self.config.timeout) as response:
+        with open_url(http_request, timeout=self.config.timeout) as response:
             return response.read().decode("utf-8")
 
     def _extract_chat_completion_response(self, data: dict[str, object]) -> CompletionResponse:
@@ -1572,8 +1573,6 @@ class OpenAICompatibleClient:
         attempts: int,
         error_message: object,
     ) -> None:
-        if on_reasoning_delta is None:
-            return
         retry_number = attempt + 1
         max_retries = max(0, attempts - 1)
         if retry_number > max_retries:
@@ -1582,11 +1581,12 @@ class OpenAICompatibleClient:
         compact_error = " ".join(str(error_message).split())
         if len(compact_error) > 800:
             compact_error = f"{compact_error[:800].rstrip()}..."
-        on_reasoning_delta(
-            "\n\n"
-            f"请求出错：{compact_error}\n"
-            f"正在重试（{retry_number}/{max_retries}），等待 {_format_retry_delay(delay)}。"
-            "\n\n"
+        logger.warning(
+            "模型请求出错，准备重试（%s/%s），等待 %s：%s",
+            retry_number,
+            max_retries,
+            _format_retry_delay(delay),
+            compact_error,
         )
 
     def _should_retry_http(self, status_code: int) -> bool:

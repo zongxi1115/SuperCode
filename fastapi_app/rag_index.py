@@ -11,8 +11,9 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
+from agent.http_transport import open_url
 from fastapi_app.settings_store import load_settings
 
 
@@ -705,7 +706,7 @@ class RagCodeIndex:
             method="POST",
         )
         try:
-            with urlopen(request, timeout=45) as response:
+            with open_url(request, timeout=45) as response:
                 payload = json.loads(response.read().decode("utf-8"))
         except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
             return []

@@ -1,13 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1254 1254" role="img" aria-labelledby="title desc">
   <title id="title">Blue angular command logo</title>
-  <desc id="desc">A neon blue angular mark forming opposing chevrons around a white greater-than sign on a black background.</desc>
+  <desc id="desc">A neon blue angular mark forming opposing chevrons around a white greater-than sign on a transparent background.</desc>
   <defs>
-    <radialGradient id="bg" cx="50%" cy="50%" r="55%">
-      <stop offset="0%" stop-color="#050607"/>
-      <stop offset="55%" stop-color="#010203"/>
-      <stop offset="100%" stop-color="#000000"/>
-    </radialGradient>
-
     <linearGradient id="blueFill" x1="364" y1="256" x2="890" y2="963" gradientUnits="userSpaceOnUse">
       <stop offset="0%" stop-color="#06A7FF"/>
       <stop offset="52%" stop-color="#029AFF"/>

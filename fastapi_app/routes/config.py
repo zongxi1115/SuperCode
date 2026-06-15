@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass
 from typing import Any, Callable
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
+from agent.config import read_dotenv_values
 from agent import OpenAICompatibleClient
 from chat_agent import build_chat_agent
 from coding_agent import build_coding_agent, build_coding_tools, build_project_docs_tools
@@ -15,6 +17,7 @@ from plan_agent import build_plan_agent, build_plan_tools
 from super_agent import build_super_agent, build_super_tools
 from fastapi_app.api_models import (
     EmbeddingSettingsPayload,
+    ModelConnectionTestRequest,
     ModelConfigPayload,
     SettingsPayload,
     SwitchModelRequest,
@@ -29,11 +32,12 @@ from fastapi_app.model_config_store import (
     load_ui_model_providers,
     save_ui_model_providers,
     scan_env_model_sources,
+    test_provider_connection,
 )
-from fastapi_app.mcp import build_enabled_mcp_tools
 from fastapi_app.session.agent_runtime import resolve_model_context_limit
 from fastapi_app.rag_index import schedule_workspace_rag_index, test_embedding_config
 from fastapi_app.runtime.zonix_runner import ZonixChatSession
+from fastapi_app.secure_config_store import get_secure_config_store
 from fastapi_app.session_history import seed_chat_session_history
 from fastapi_app.workspace_utils import resolve_workspace_path
 
@@ -49,6 +53,61 @@ class ConfigRouteDeps:
     sync_session_runtime_state_for_agent: Callable[[Any], None]
     invalidate_session_context_usage: Callable[[Any], None]
     get_loaded_plugin_ids: Callable[[Any], set[str]]
+
+
+def _existing_mcp_tools(session: Any) -> tuple[list[Any], bool]:
+    chat_session = getattr(session, "chat_session", None)
+    agent = getattr(chat_session, "agent", None)
+    tools = list(getattr(agent, "tools", []) or [])
+    metadata = getattr(agent, "tool_context_metadata", {}) or {}
+    loaded = bool(metadata.get("mcp_tools_loaded"))
+    return (
+        [tool for tool in tools if str(getattr(tool, "name", "")).startswith("mcp__")],
+        loaded,
+    )
+
+
+def _append_unique_tools(agent: Any, tools: list[Any]) -> None:
+    existing_tool_names = {tool.name for tool in agent.tools}
+    for tool in tools:
+        if tool.name not in existing_tool_names:
+            agent.tools.append(tool)
+            existing_tool_names.add(tool.name)
+
+
+def _with_legacy_tinyfish_defaults(settings: dict[str, Any], app_data_root: Any) -> dict[str, Any]:
+    if get_secure_config_store(app_data_root).has_setting("tinyfish"):
+        return settings
+
+    env_values = read_dotenv_values(ROOT / ".env")
+    api_key = env_values.get("SC_TINYFISH_API_KEY", os.getenv("SC_TINYFISH_API_KEY", "")).strip()
+    if not api_key:
+        return settings
+
+    tinyfish = settings.get("tinyfish") if isinstance(settings.get("tinyfish"), dict) else {}
+    timeout_raw = env_values.get("SC_TINYFISH_TIMEOUT", os.getenv("SC_TINYFISH_TIMEOUT", "30")).strip()
+    try:
+        timeout = max(5, int(timeout_raw))
+    except ValueError:
+        timeout = 30
+
+    return {
+        **settings,
+        "tinyfish": {
+            **tinyfish,
+            "enabled": True,
+            "apiKey": api_key,
+            "searchUrl": env_values.get(
+                "SC_TINYFISH_SEARCH_URL",
+                os.getenv("SC_TINYFISH_SEARCH_URL", "https://api.search.tinyfish.ai"),
+            ).strip() or "https://api.search.tinyfish.ai",
+            "fetchUrl": env_values.get(
+                "SC_TINYFISH_FETCH_URL",
+                os.getenv("SC_TINYFISH_FETCH_URL", "https://api.fetch.tinyfish.ai"),
+            ).strip() or "https://api.fetch.tinyfish.ai",
+            "timeout": timeout,
+        },
+    }
 
 
 def register_config_routes(
@@ -102,12 +161,27 @@ def register_config_routes(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse(catalog)
 
+    @app.post("/api/model-configs/test-connection")
+    async def test_model_connection(payload: ModelConnectionTestRequest) -> JSONResponse:
+        try:
+            result = await asyncio.to_thread(
+                test_provider_connection,
+                payload.provider.model_dump(exclude_none=True),
+                payload.model,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse(result)
+
     @app.get("/api/settings")
     async def get_settings() -> JSONResponse:
         from fastapi_app.settings_store import load_settings
         from fastapi_app.memory_store import load_memory_settings
 
         settings = load_settings(deps.app_data_root)
+        settings = _with_legacy_tinyfish_defaults(settings, deps.app_data_root)
         settings["memory"] = load_memory_settings(deps.app_data_root)
         return JSONResponse(settings)
 
@@ -148,6 +222,7 @@ def register_config_routes(
     @app.put("/api/sessions/{session_id}/model")
     async def switch_session_model(session_id: str, request: SwitchModelRequest) -> JSONResponse:
         session = deps.require_session(session_id)
+        reusable_mcp_tools, previous_mcp_tools_loaded = _existing_mcp_tools(session)
         model_option = deps.resolve_model_option(request.model, request.env_file)
         model_ref = model_option["envFile"]
         provided_fields = set(getattr(request, "model_fields_set", set()))
@@ -173,6 +248,7 @@ def register_config_routes(
             "project_root": str(ROOT),
             "app_data_root": str(deps.app_data_root),
             "llm_client": client,
+            "mcp_tools_loaded": session.agent_type == "chat" or previous_mcp_tools_loaded,
         }
         if session.agent_type == "deploy":
             tools = build_deploy_tools()
@@ -213,12 +289,9 @@ def register_config_routes(
                 tools=tools,
                 metadata=metadata,
             )
-        if session.agent_type != "chat":
-            existing_tool_names = {tool.name for tool in agent.tools}
-            for tool in build_enabled_mcp_tools(deps.app_data_root):
-                if tool.name not in existing_tool_names:
-                    agent.tools.append(tool)
-                    existing_tool_names.add(tool.name)
+        if session.agent_type != "chat" and reusable_mcp_tools:
+            _append_unique_tools(agent, reusable_mcp_tools)
+            agent.tool_context_metadata["mcp_tools_loaded"] = True
         interactive_command_session = session.interactive_command_session
 
         session.chat_session = ZonixChatSession(agent=agent)

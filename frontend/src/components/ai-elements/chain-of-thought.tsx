@@ -145,6 +145,10 @@ export type ChainOfThoughtStepProps = ComponentProps<"div"> & {
   label: ReactNode;
   description?: ReactNode;
   status?: "complete" | "active" | "pending";
+  overflowPreview?: boolean;
+  overflowPreviewHeight?: number;
+  expandLabel?: ReactNode;
+  collapseLabel?: ReactNode;
 };
 
 const stepStatusStyles = {
@@ -160,31 +164,151 @@ export const ChainOfThoughtStep = memo(
     label,
     description,
     status = "complete",
+    overflowPreview = false,
+    overflowPreviewHeight = 220,
+    expandLabel = "展开这段思考",
+    collapseLabel = "收起这段思考",
     children,
+    onBlur,
+    onFocus,
+    onMouseEnter,
+    onMouseLeave,
     ...props
-  }: ChainOfThoughtStepProps) => (
-    <div
-      className={cn(
-        "flex gap-2 text-sm",
-        stepStatusStyles[status],
-        "fade-in-0 slide-in-from-top-2 animate-in",
-        className
-      )}
-      {...props}
-    >
-      <div className="relative mt-0.5">
-        <Icon className="size-4" />
-        <div className="absolute top-7 bottom-0 left-1/2 -mx-px w-px bg-border" />
-      </div>
-      <div className="flex-1 space-y-2 overflow-hidden">
-        <div className={status === "active" ? "fade-edge-r" : ""}>{label}</div>
-        {description && (
-          <div className="text-muted-foreground text-xs">{description}</div>
+  }: ChainOfThoughtStepProps) => {
+    const contentRef = useRef<HTMLDivElement>(null);
+    const [isExpandActionVisible, setIsExpandActionVisible] = useState(false);
+    const [contentHeight, setContentHeight] = useState(overflowPreviewHeight);
+    const [isOverflowExpanded, setIsOverflowExpanded] = useState(false);
+    const [isOverflowing, setIsOverflowing] = useState(false);
+
+    useEffect(() => {
+      if (!overflowPreview) {
+        setIsOverflowing(false);
+        setIsOverflowExpanded(false);
+        return;
+      }
+
+      const content = contentRef.current;
+      if (!content) {
+        return;
+      }
+
+      const checkOverflow = () => {
+        const nextContentHeight = content.scrollHeight;
+        setContentHeight(nextContentHeight);
+        const nextIsOverflowing =
+          nextContentHeight > overflowPreviewHeight + 1;
+        setIsOverflowing(nextIsOverflowing);
+        if (!nextIsOverflowing) {
+          setIsOverflowExpanded(false);
+        }
+      };
+
+      checkOverflow();
+
+      const resizeObserver = new ResizeObserver(checkOverflow);
+      resizeObserver.observe(content);
+
+      return () => resizeObserver.disconnect();
+    }, [overflowPreview, overflowPreviewHeight]);
+
+    const shouldClip =
+      overflowPreview && isOverflowing && !isOverflowExpanded;
+    const previewMaxHeight =
+      overflowPreview && isOverflowing
+        ? isOverflowExpanded
+          ? contentHeight
+          : overflowPreviewHeight
+        : undefined;
+
+    return (
+      <div
+        className={cn(
+          "flex gap-2 text-sm",
+          stepStatusStyles[status],
+          "fade-in-0 slide-in-from-top-2 animate-in",
+          className
         )}
-        {children}
+        onBlur={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+            setIsExpandActionVisible(false);
+          }
+          onBlur?.(event);
+        }}
+        onFocus={(event) => {
+          setIsExpandActionVisible(true);
+          onFocus?.(event);
+        }}
+        onMouseEnter={(event) => {
+          setIsExpandActionVisible(true);
+          onMouseEnter?.(event);
+        }}
+        onMouseLeave={(event) => {
+          setIsExpandActionVisible(false);
+          onMouseLeave?.(event);
+        }}
+        {...props}
+      >
+        <div className="relative mt-0.5">
+          <Icon className="size-4" />
+          <div className="absolute top-7 bottom-0 left-1/2 -mx-px w-px bg-border" />
+        </div>
+        <div className="flex-1 overflow-hidden">
+          <div className="relative">
+            <div
+              className={cn(
+                "transition-[max-height] duration-300 ease-out",
+                overflowPreview && isOverflowing
+                  ? "overflow-hidden"
+                  : "overflow-visible"
+              )}
+              style={
+                previewMaxHeight ? { maxHeight: previewMaxHeight } : undefined
+              }
+            >
+              <div ref={contentRef} className="space-y-2">
+                <div className={status === "active" ? "fade-edge-r" : ""}>
+                  {label}
+                </div>
+                {description && (
+                  <div className="text-muted-foreground text-xs">
+                    {description}
+                  </div>
+                )}
+                {children}
+              </div>
+            </div>
+            {shouldClip && (
+              <div className="pointer-events-none absolute inset-x-0 bottom-0 flex h-10 items-end justify-center bg-gradient-to-t from-background via-background/95 to-transparent pb-1">
+                <button
+                  type="button"
+                  className={cn(
+                    "pointer-events-none translate-y-1 opacity-0 text-xs text-primary underline-offset-4 transition-[color,opacity,transform] duration-200 ease-out hover:text-primary/80 hover:underline",
+                    isExpandActionVisible &&
+                      "pointer-events-auto translate-y-0 opacity-100"
+                  )}
+                  onClick={() => setIsOverflowExpanded(true)}
+                >
+                  {expandLabel}
+                </button>
+              </div>
+            )}
+            {overflowPreview && isOverflowing && isOverflowExpanded && (
+              <div className="mt-2 flex justify-center">
+                <button
+                  type="button"
+                  className="text-xs text-muted-foreground underline-offset-4 transition-colors hover:text-foreground hover:underline"
+                  onClick={() => setIsOverflowExpanded(false)}
+                >
+                  {collapseLabel}
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
       </div>
-    </div>
-  )
+    );
+  }
 );
 
 export type ChainOfThoughtSearchResultsProps = ComponentProps<"div">;
@@ -214,23 +338,112 @@ export const ChainOfThoughtSearchResult = memo(
 
 export type ChainOfThoughtContentProps = ComponentProps<
   typeof CollapsibleContent
->;
+> & {
+  overflowPreview?: boolean;
+  overflowPreviewHeight?: number;
+  expandLabel?: ReactNode;
+  collapseLabel?: ReactNode;
+};
 
 export const ChainOfThoughtContent = memo(
-  ({ className, children, ...props }: ChainOfThoughtContentProps) => {
+  ({
+    className,
+    children,
+    overflowPreview = false,
+    overflowPreviewHeight = 320,
+    expandLabel = "展开完整思考过程",
+    collapseLabel = "收起思考过程",
+    ...props
+  }: ChainOfThoughtContentProps) => {
     const { isOpen } = useChainOfThought();
+    const contentRef = useRef<HTMLDivElement>(null);
+    const [isOverflowExpanded, setIsOverflowExpanded] = useState(false);
+    const [isOverflowing, setIsOverflowing] = useState(false);
+
+    useEffect(() => {
+      if (!overflowPreview || !isOpen) {
+        setIsOverflowing(false);
+        setIsOverflowExpanded(false);
+        return;
+      }
+
+      const content = contentRef.current;
+      if (!content) {
+        return;
+      }
+
+      const checkOverflow = () => {
+        const nextIsOverflowing =
+          content.scrollHeight > overflowPreviewHeight + 1;
+        setIsOverflowing(nextIsOverflowing);
+        if (!nextIsOverflowing) {
+          setIsOverflowExpanded(false);
+        }
+      };
+
+      checkOverflow();
+
+      const resizeObserver = new ResizeObserver(checkOverflow);
+      resizeObserver.observe(content);
+
+      return () => resizeObserver.disconnect();
+    }, [isOpen, overflowPreview, overflowPreviewHeight]);
+
+    const shouldClip =
+      overflowPreview && isOverflowing && !isOverflowExpanded;
 
     return (
       <Collapsible open={isOpen}>
         <CollapsibleContent
           className={cn(
-            "mt-2 space-y-3",
+            "mt-2",
+            !overflowPreview && "space-y-3",
             "data-[state=closed]:fade-out-0 data-[state=closed]:slide-out-to-top-2 data-[state=open]:slide-in-from-top-2 text-popover-foreground outline-none data-[state=closed]:animate-out data-[state=open]:animate-in",
             className
           )}
           {...props}
         >
-          {children}
+          {overflowPreview ? (
+            <div className="relative">
+              <div
+                className={cn(
+                  "transition-[max-height] duration-200 ease-out",
+                  shouldClip ? "overflow-hidden" : "overflow-visible"
+                )}
+                style={
+                  shouldClip ? { maxHeight: overflowPreviewHeight } : undefined
+                }
+              >
+                <div ref={contentRef} className="space-y-3">
+                  {children}
+                </div>
+              </div>
+              {shouldClip && (
+                <div className="pointer-events-none absolute inset-x-0 bottom-0 flex h-24 items-end justify-center bg-gradient-to-t from-background via-background/95 to-transparent pb-1">
+                  <button
+                    type="button"
+                    className="pointer-events-auto text-xs font-medium text-primary underline-offset-4 transition-colors hover:text-primary/80 hover:underline"
+                    onClick={() => setIsOverflowExpanded(true)}
+                  >
+                    {expandLabel}
+                  </button>
+                </div>
+              )}
+              {overflowPreview && isOverflowing && isOverflowExpanded && (
+                <div className="mt-2 flex justify-center">
+                  <button
+                    type="button"
+                    className="text-xs font-medium text-muted-foreground underline-offset-4 transition-colors hover:text-foreground hover:underline"
+                    onClick={() => setIsOverflowExpanded(false)}
+                  >
+                    {collapseLabel}
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : (
+            children
+          )}
         </CollapsibleContent>
       </Collapsible>
     );

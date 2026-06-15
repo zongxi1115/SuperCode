@@ -7,9 +7,11 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
 from agent.config import read_dotenv_values
+from agent.http_transport import open_url
+from fastapi_app.settings_store import load_settings
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 from zonix.models.base import ModelRequest
 from zonix.tools import ToolContext
@@ -360,6 +362,30 @@ def _slugify(value: str, fallback: str) -> str:
 
 
 def _load_tinyfish_settings(ctx: ToolContext) -> dict[str, Any]:
+    app_data_root = ctx.metadata.get("app_data_root")
+    ui_settings: dict[str, Any] = {}
+    if isinstance(app_data_root, (str, Path)):
+        raw_settings = load_settings(Path(app_data_root)).get("tinyfish")
+        ui_settings = raw_settings if isinstance(raw_settings, dict) else {}
+
+    if bool(ui_settings.get("enabled")):
+        api_key = str(ui_settings.get("apiKey") or "").strip()
+        search_url = str(ui_settings.get("searchUrl") or DEFAULT_TINYFISH_SEARCH_URL).strip()
+        fetch_url = str(ui_settings.get("fetchUrl") or DEFAULT_TINYFISH_FETCH_URL).strip()
+        timeout_raw = str(ui_settings.get("timeout") or DEFAULT_TINYFISH_TIMEOUT_SECONDS).strip()
+        try:
+            timeout = max(5, int(timeout_raw))
+        except ValueError:
+            timeout = DEFAULT_TINYFISH_TIMEOUT_SECONDS
+        if not api_key:
+            raise RuntimeError("缺少 Tinyfish API Key，请先在设置里配置 Tinyfish。")
+        return {
+            "api_key": api_key,
+            "search_url": search_url.rstrip("/") or DEFAULT_TINYFISH_SEARCH_URL,
+            "fetch_url": fetch_url.rstrip("/") or DEFAULT_TINYFISH_FETCH_URL,
+            "timeout": timeout,
+        }
+
     project_root = ctx.metadata.get("project_root")
     env_values = (
         read_dotenv_values(Path(project_root) / ".env")
@@ -385,7 +411,7 @@ def _load_tinyfish_settings(ctx: ToolContext) -> dict[str, Any]:
         timeout = DEFAULT_TINYFISH_TIMEOUT_SECONDS
 
     if not api_key:
-        raise RuntimeError("缺少 SC_TINYFISH_API_KEY，请先在 .env 里配置 Tinyfish API Key。")
+        raise RuntimeError("缺少 Tinyfish API Key，请先在设置或 .env 里配置 Tinyfish。")
 
     return {
         "api_key": api_key,
@@ -417,7 +443,7 @@ def _request_json(
         },
     )
     try:
-        with urlopen(request, timeout=timeout) as response:
+        with open_url(request, timeout=timeout) as response:
             raw_body = response.read().decode("utf-8")
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace").strip()

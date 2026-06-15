@@ -9,6 +9,7 @@ import { ResizableHandle } from '@/components/app/resizable-handle';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { message as appMessage } from '@/components/ui/message';
 import { getFileLanguage } from '@/lib/app-utils';
 import { apiFetch, apiUrl } from '@/lib/api-client';
 import type { FileTreeNode } from '@/lib/app-types';
@@ -64,6 +65,10 @@ const EDITORS: EditorTarget[] = [
   { name: 'Sublime Text', command: 'subl', icon: <SiSublimetext size={14} color="#FF9800" /> },
   { name: 'WebStorm', command: 'webstorm', icon: <SiJetbrains size={14} color="#000000" /> },
 ];
+
+function getErrorMessage(error: unknown, fallback: string) {
+  return error instanceof Error && error.message ? error.message : fallback;
+}
 
 export function EditorPanel({
   fileTree,
@@ -201,8 +206,10 @@ export function EditorPanel({
       setIsEditing(false);
       setEditContent('');
       void onLoadFile(selectedFilePath);
+      appMessage.success('文件已保存');
     } catch (error) {
       console.error(error);
+      appMessage.error(getErrorMessage(error, '保存失败'));
     } finally {
       setIsSaving(false);
     }
@@ -328,6 +335,7 @@ export function EditorPanel({
           ? error.message
           : '未安装该应用或未将其添加到 PATH 中。',
       );
+      appMessage.error(getErrorMessage(error, '打开外部编辑器失败'));
     }
   }, [selectedFilePath, sessionId]);
 
@@ -339,6 +347,7 @@ export function EditorPanel({
       await onRefreshFileTree();
     } catch (error) {
       console.error('刷新文件树失败:', error);
+      appMessage.error(getErrorMessage(error, '刷新文件树失败'));
     } finally {
       setIsRefreshingFileTree(false);
     }

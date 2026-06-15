@@ -580,6 +580,12 @@ async def run_agent_stream(
 
         if event_name == "usage":
             deps.merge_session_token_usage(session, event_payload.get("usage"))
+            usage = event_payload.get("usage")
+            if isinstance(usage, dict):
+                _sync_subagent_message(
+                    event_payload,
+                    lambda message: {**message, "tokenUsage": usage},
+                )
             loop.call_soon_threadsafe(queue.put_nowait, _session_state_event())
             return event_payload
 
@@ -738,6 +744,21 @@ async def run_agent_stream(
 
         if event.type == "usage":
             deps.merge_session_token_usage(session, event.usage)
+            update_assistant_history_message(
+                session,
+                assistant_id,
+                lambda message: {**message, "tokenUsage": event.usage},
+            )
+            loop.call_soon_threadsafe(
+                queue.put_nowait,
+                {
+                    "type": "usage",
+                    "payload": {
+                        "assistant_id": assistant_id,
+                        "usage": event.usage,
+                    },
+                },
+            )
             loop.call_soon_threadsafe(queue.put_nowait, _session_state_event())
             return
 
