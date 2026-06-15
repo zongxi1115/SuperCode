@@ -77,16 +77,6 @@ const BODY_TEXT_SIZE_OPTIONS = [
 ] as const;
 
 const IMAGE_QUALITY_OPTIONS = ['auto', 'low', 'medium', 'high'] as const;
-const MODEL_PROVIDER_OPTIONS = [
-  { value: 'openrouter', label: 'OpenAI 兼容' },
-  { value: 'openai', label: 'OpenAI' },
-  { value: 'anthropic', label: 'Anthropic' },
-  { value: 'deepseek', label: 'DeepSeek' },
-  { value: 'alibaba-cn', label: '通义千问' },
-  { value: 'groq', label: 'Groq' },
-  { value: 'mistral', label: 'Mistral' },
-  { value: 'xai', label: 'xAI' },
-] as const;
 
 type SettingsDialogProps = {
   open: boolean;
@@ -155,14 +145,6 @@ function toEditableProvider(provider?: UIModelProvider): EditableProvider {
     provider: provider?.provider ?? null,
     apiMode: provider?.apiMode ?? 'chat_completions',
   };
-}
-
-function modelProviderOptions(value?: string | null) {
-  const normalized = value?.trim();
-  if (!normalized || MODEL_PROVIDER_OPTIONS.some((option) => option.value === normalized)) {
-    return MODEL_PROVIDER_OPTIONS;
-  }
-  return [...MODEL_PROVIDER_OPTIONS, { value: normalized, label: normalized }];
 }
 
 function createMcpServerId() {
@@ -835,8 +817,11 @@ export function SettingsDialog({
                     const isRefreshing = refreshingId === key;
                     const isKeyVisible = visibleKeys.has(key);
                     const isConfirmingDelete = deleteConfirmId === key;
-                    const providerType = provider.provider?.trim() || 'openrouter';
-                    const isAnthropicProvider = providerType === 'anthropic';
+                    const interfaceMode =
+                      provider.provider?.trim() === 'anthropic'
+                        ? 'anthropic'
+                        : provider.apiMode ?? 'chat_completions';
+                    const isAnthropicProvider = interfaceMode === 'anthropic';
 
                     return (
                       <div className="space-y-3">
@@ -888,35 +873,7 @@ export function SettingsDialog({
                           </div>
                         </div>
 
-                        <div className="grid grid-cols-3 gap-3">
-                          <div className="space-y-1">
-                            <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
-                              <Server className="size-2.5" />
-                              接口类型
-                            </label>
-                            <Select
-                              value={providerType}
-                              onValueChange={(value) =>
-                                updateProvider(index, {
-                                  provider: value,
-                                  apiMode: value === 'anthropic'
-                                    ? 'chat_completions'
-                                    : provider.apiMode ?? 'chat_completions',
-                                })
-                              }
-                            >
-                              <SelectTrigger className="h-7 w-full text-xs">
-                                <SelectValue placeholder="选择接口类型" />
-                              </SelectTrigger>
-                              <SelectContent align="start">
-                                {modelProviderOptions(providerType).map((option) => (
-                                  <SelectItem key={option.value} value={option.value}>
-                                    {option.label}
-                                  </SelectItem>
-                                ))}
-                              </SelectContent>
-                            </Select>
-                          </div>
+                        <div className="grid grid-cols-2 gap-3">
                           <div className="space-y-1">
                             <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
                               <Server className="size-2.5" />
@@ -943,30 +900,38 @@ export function SettingsDialog({
                           </div>
                         </div>
 
-                        {!isAnthropicProvider ? (
-                          <div className="space-y-1">
-                            <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
-                              <Server className="size-2.5" />
-                              接口模式
-                            </label>
-                            <Select
-                              value={provider.apiMode ?? 'chat_completions'}
-                              onValueChange={(value) =>
-                                updateProvider(index, {
-                                  apiMode: value as 'chat_completions' | 'responses',
-                                })
-                              }
-                            >
-                              <SelectTrigger className="h-7 w-full text-xs">
-                                <SelectValue placeholder="选择接口模式" />
-                              </SelectTrigger>
-                              <SelectContent align="start">
-                                <SelectItem value="chat_completions">OpenAI 兼容 /chat/completions</SelectItem>
-                                <SelectItem value="responses">OpenAI /responses</SelectItem>
-                              </SelectContent>
-                            </Select>
-                          </div>
-                        ) : null}
+                        <div className="space-y-1">
+                          <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+                            <Server className="size-2.5" />
+                            接口模式
+                          </label>
+                          <Select
+                            value={interfaceMode}
+                            onValueChange={(value) =>
+                              updateProvider(index, {
+                                provider:
+                                  value === 'anthropic'
+                                    ? 'anthropic'
+                                    : provider.provider === 'anthropic'
+                                      ? null
+                                      : provider.provider,
+                                apiMode:
+                                  value === 'responses'
+                                    ? 'responses'
+                                    : 'chat_completions',
+                              })
+                            }
+                          >
+                            <SelectTrigger className="h-7 w-full text-xs">
+                              <SelectValue placeholder="选择接口模式" />
+                            </SelectTrigger>
+                            <SelectContent align="start">
+                              <SelectItem value="chat_completions">OpenAI 兼容 /chat/completions</SelectItem>
+                              <SelectItem value="responses">OpenAI /responses</SelectItem>
+                              <SelectItem value="anthropic">Anthropic /messages</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
 
                         <div className="space-y-1">
                           <label className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
