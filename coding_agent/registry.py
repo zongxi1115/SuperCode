@@ -20,15 +20,11 @@ from .planning_tools import create_task, finish_task, get_task_status, read_curr
 from .project_docs_tools import read_project_docs, write_project_docs
 from .subagent_tools import delegate_code_exploration
 from .terminal_tools import (
-    excecute,
-    execute,
     run_command,
     start_task,
     task_input,
     task_stop,
     task_wait,
-    terminal_input,
-    terminal_wait,
 )
 from .utility_tools import (
     generate_image,
@@ -72,12 +68,8 @@ def build_coding_tools() -> list[ToolDefinition]:
         _tool(task_input),
         _tool(task_wait),
         _tool(task_stop),
-        _tool(terminal_input),
-        _tool(terminal_wait),
         _tool(open_browser),
         _tool(read_current_plan),
-        _tool(excecute),
-        _tool(execute),
         _tool(git_commit),
         _tool(git_log),
         _tool(git_tag),

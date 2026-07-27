@@ -4,21 +4,12 @@ from pathlib import Path
 from typing import Any
 
 from agent.llm_client import OpenAICompatibleClient
+from supercode_agent import attach_runtime_metadata, attach_tool_agent_prompts
 from zonix import Agent, agent as build_zonix_agent
 from zonix.tools import ToolDefinition
 
 from .model import DeployPromptModel
 from .registry import build_deploy_tools
-
-
-def _tool_definitions(tools: list[ToolDefinition]) -> dict[str, dict[str, object]]:
-    return {
-        tool.name: {
-            "description": tool.description,
-            "input_schema": tool.input_schema(),
-        }
-        for tool in tools
-    }
 
 
 def build_deploy_agent(
@@ -36,12 +27,6 @@ def build_deploy_agent(
         model=model,
         recover_tool_input_errors=True,
     )
-    agent.prompt(model._build_base_prompt())
-    agent.prompt(model._build_system_info())
-    agent.prompt(lambda _ctx, _task: model.build_tool_registry_prompt(_tool_definitions(agent.tools)))
-    agent.prompt(model.build_native_protocol_prompt())
-    agent.prompt(model.build_runtime_context_prompt)
+    attach_tool_agent_prompts(agent, model)
     agent.use(*resolved_tools)
-    agent.workspace = Path(workspace).resolve()
-    agent.tool_context_metadata = dict(metadata or {})
-    return agent
+    return attach_runtime_metadata(agent, workspace=workspace, metadata=metadata)

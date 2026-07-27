@@ -3,17 +3,19 @@ import unittest
 from pathlib import Path
 
 from fastapi_app import main as api_main
-from fastapi_app.session_store import PersistedSessionState, SQLiteSessionStateAdapter
+from fastapi_app.app_config import STATE_DB_PATH
+from fastapi_app.session_store import PersistedSessionState, SQLiteSessionStore
+from fastapi_app.storage import SESSION_STORE
 
 
 class SessionStoreTests(unittest.TestCase):
-    def test_api_main_uses_pytest_specific_state_db_path_under_test(self) -> None:
-        self.assertIn("pytest", str(api_main.STATE_DB_PATH).lower())
-        self.assertNotIn("D:\\vibe_projs\\SuperCode\\.supercode\\state.sqlite3".lower(), str(api_main.STATE_DB_PATH).lower())
+    def test_storage_uses_pytest_specific_state_db_path_under_test(self) -> None:
+        self.assertIn("pytest", str(STATE_DB_PATH).lower())
+        self.assertNotIn("D:\\vibe_projs\\SuperCode\\.supercode\\state.sqlite3".lower(), str(STATE_DB_PATH).lower())
 
-    def test_sqlite_adapter_round_trips_session_state(self) -> None:
+    def test_sqlite_store_round_trips_session_state(self) -> None:
         db_path = Path(tempfile.mkdtemp(prefix="supercode-session-store-")) / "state.sqlite3"
-        adapter = SQLiteSessionStateAdapter(db_path)
+        store = SQLiteSessionStore(db_path)
         state = PersistedSessionState(
             session_id="session-1",
             workspace="D:/demo",
@@ -105,8 +107,8 @@ class SessionStoreTests(unittest.TestCase):
             },
         )
 
-        adapter.save(state)
-        loaded = adapter.load("session-1")
+        store.save(state)
+        loaded = store.load("session-1")
 
         self.assertIsNotNone(loaded)
         assert loaded is not None
@@ -123,32 +125,32 @@ class SessionStoreTests(unittest.TestCase):
         self.assertEqual(loaded.pending_user_input_requests["tool-plan-1"]["tool_name"], "ask_plan_questions")
         self.assertEqual(loaded.deploy_connections["deploy-1"]["display_name"], "prod")
         self.assertEqual(loaded.deploy_state["active_session_id"], "deploy-1")
-        self.assertEqual(adapter.list()[0].session_id, "session-1")
+        self.assertEqual(store.list()[0].session_id, "session-1")
 
-        adapter.delete("session-1")
+        store.delete("session-1")
 
-        self.assertIsNone(adapter.load("session-1"))
+        self.assertIsNone(store.load("session-1"))
 
     def test_empty_new_session_is_not_persisted_until_it_has_interaction(self) -> None:
         workspace = Path(tempfile.mkdtemp(prefix="supercode-empty-session-")).resolve()
-        session = api_main.UISession(
+        session = api_main.SESSION_REGISTRY.session_factory(
             session_id="session-empty",
             model="demo-model",
             workspace=str(workspace),
         )
 
-        api_main.persist_session_state(session)
-        self.assertIsNone(api_main._session_store.load(session.session_id))
+        api_main.SESSION_REGISTRY.persist_session_state(session)
+        self.assertIsNone(SESSION_STORE.load(session.session_id))
 
         session.history_messages.append({"id": "u1", "role": "user", "content": "你好"})
-        api_main.persist_session_state(session)
+        api_main.SESSION_REGISTRY.persist_session_state(session)
 
-        persisted = api_main._session_store.load(session.session_id)
+        persisted = SESSION_STORE.load(session.session_id)
         self.assertIsNotNone(persisted)
         assert persisted is not None
         self.assertEqual(persisted.history_messages[0]["content"], "你好")
 
-        api_main._session_store.delete(session.session_id)
+        SESSION_STORE.delete(session.session_id)
 
 
 if __name__ == "__main__":

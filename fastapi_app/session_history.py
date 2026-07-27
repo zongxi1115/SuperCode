@@ -129,6 +129,24 @@ def update_assistant_history_message(
     session.touch()
 
 
+def stamp_assistant_first_token_latency(message: dict[str, Any]) -> dict[str, Any]:
+    if message.get("firstTokenLatencyMs") is not None:
+        return message
+    start_time = message.get("startTime")
+    try:
+        started_at = float(start_time)
+    except (TypeError, ValueError):
+        return message
+    if started_at <= 0:
+        return message
+    latency_ms = (
+        time.time() * 1000 - started_at
+        if started_at > 1_000_000_000_000
+        else (time.time() - started_at) * 1000
+    )
+    return {**message, "firstTokenLatencyMs": max(round(latency_ms), 0)}
+
+
 def sync_assistant_message_fields(message: dict[str, Any]) -> dict[str, Any]:
     parts = message.get("parts")
     if not isinstance(parts, list):
@@ -186,19 +204,7 @@ def append_assistant_part_delta(
             parts[-1] = {**last_part, "text": f"{str(last_part.get('text') or '')}{delta}"}
         else:
             parts.append({"type": part_type, "text": delta})
-        next_message = {**message, "parts": parts}
-        if part_type == "text" and next_message.get("firstTokenLatencyMs") is None:
-            start_time = next_message.get("startTime")
-            try:
-                start_seconds = float(start_time)
-            except (TypeError, ValueError):
-                start_seconds = 0.0
-            if start_seconds > 0:
-                if start_seconds > 1_000_000_000_000:
-                    latency_ms = time.time() * 1000 - start_seconds
-                else:
-                    latency_ms = (time.time() - start_seconds) * 1000
-                next_message["firstTokenLatencyMs"] = max(round(latency_ms), 0)
+        next_message = stamp_assistant_first_token_latency({**message, "parts": parts})
         return sync_assistant_message_fields(next_message)
 
     update_assistant_history_message(session, assistant_id, _updater)
@@ -221,10 +227,14 @@ def upsert_assistant_thinking_part(
             existing_text = str(part.get("text") or "")
             if thought_text.startswith(existing_text) or existing_text.startswith(thought_text):
                 parts[index] = {**part, "text": thought_text}
-                return sync_assistant_message_fields({**message, "parts": parts})
+                return sync_assistant_message_fields(
+                    stamp_assistant_first_token_latency({**message, "parts": parts})
+                )
             break
         parts.append({"type": "thinking", "text": thought_text})
-        return sync_assistant_message_fields({**message, "parts": parts})
+        return sync_assistant_message_fields(
+            stamp_assistant_first_token_latency({**message, "parts": parts})
+        )
 
     update_assistant_history_message(session, assistant_id, _updater)
 
@@ -242,7 +252,10 @@ def replace_assistant_text_part(
         ]
         if text:
             parts.append({"type": "text", "text": text})
-        return sync_assistant_message_fields({**message, "parts": parts})
+        next_message = {**message, "parts": parts}
+        if text:
+            next_message = stamp_assistant_first_token_latency(next_message)
+        return sync_assistant_message_fields(next_message)
 
     update_assistant_history_message(session, assistant_id, _updater)
 
@@ -277,7 +290,9 @@ def append_assistant_tool_call(
                 next_parts.append(part)
         if not replaced:
             next_parts.append({"type": "tool_call", "toolCall": tool_call})
-        return sync_assistant_message_fields({**message, "parts": next_parts})
+        return sync_assistant_message_fields(
+            stamp_assistant_first_token_latency({**message, "parts": next_parts})
+        )
 
     update_assistant_history_message(session, assistant_id, _updater)
 
@@ -532,12 +547,12 @@ def seed_chat_session_history(
     chat_session.state.conversation_messages = conversation_messages
     tool_records = build_tool_records_from_history(history_messages, history_tools or [])
     if tool_records:
-        chat_session.state.data["tool_records"] = tool_records
-        chat_session.state.data["step_records"] = build_step_records_from_tool_records(tool_records)
+        chat_session.state.tool_records = tool_records
+        chat_session.state.step_records = build_step_records_from_tool_records(tool_records)
     planning_records = build_planning_records_from_history(history_messages)
     if planning_records:
-        chat_session.state.data["planning_records"] = planning_records
-    chat_session.state.data["turn_index"] = _max_turn_index(
+        chat_session.state.planning_records = planning_records
+    chat_session.state.turn_index = _max_turn_index(
         history_messages,
         tool_records,
         planning_records,
@@ -571,9 +586,9 @@ def record_confirmation_result_for_agent(session: Any, content: str) -> None:
     text = content.strip()
     if not text:
         return
-    records = list(session.chat_session.state.data.get("external_records", []))
+    records = list(session.chat_session.state.external_records)
     records.append(text)
-    session.chat_session.state.data["external_records"] = records[-20:]
+    session.chat_session.state.external_records = records[-20:]
 
 
 def record_tool_result_for_agent(
@@ -602,13 +617,13 @@ def record_tool_result_for_agent(
     )
     agent_state = session.chat_session.state
     updated_step = _replace_step_tool_result(
-        agent_state.data.get("step_records", []),
+        agent_state.step_records,
         normalized_tool_id,
         result,
     )
     _replace_latest_tool_result(agent_state.tool_results, normalized_tool_id, result)
     _upsert_agent_tool_record(
-        agent_state.data,
+        agent_state,
         normalized_tool_id,
         tool_name,
         output,
@@ -668,7 +683,7 @@ def _replace_latest_tool_result(
 
 
 def _upsert_agent_tool_record(
-    state_data: dict[str, Any],
+    agent_state: Any,
     tool_id: str,
     tool_name: str,
     output: Any,
@@ -680,7 +695,7 @@ def _upsert_agent_tool_record(
 ) -> None:
     records = [
         record
-        for record in list(state_data.get("tool_records", []))
+        for record in list(agent_state.tool_records)
         if isinstance(record, dict)
     ]
     next_record: dict[str, Any] = {
@@ -712,7 +727,7 @@ def _upsert_agent_tool_record(
     else:
         records.append(next_record)
 
-    state_data["tool_records"] = records[-MAX_STORED_TOOL_RECORDS:]
+    agent_state.tool_records = records[-MAX_STORED_TOOL_RECORDS:]
 
 
 def build_tool_records_from_history(
@@ -880,7 +895,7 @@ def update_plan_steps_for_tool(session: Any, step_index: int | None, tool_name: 
             session.plan_steps[0]["description"] = "已发起部署连接，等待用户填写部署目标信息。"
         elif tool_name in {"list_files", "read_file"} and steps_len > 1:
             session.plan_steps[1]["description"] = "正在读取部署目录、配置文件和发布脚本。"
-        elif tool_name in {"transfer_files", "execute", "excecute", "run_command"} and steps_len > 2:
+        elif tool_name in {"transfer_files", "execute", "run_command"} and steps_len > 2:
             session.plan_steps[2]["description"] = "正在同步文件或执行部署命令，并收集结果。"
         return
 
@@ -890,11 +905,8 @@ def update_plan_steps_for_tool(session: Any, step_index: int | None, tool_name: 
         session.plan_steps[2]["description"] = "已开始落地修改，准备把变更写回工作区。"
     elif tool_name in {
         "execute",
-        "excecute",
         "run_command",
         "start_task",
-        "terminal_input",
-        "terminal_wait",
         "task_input",
         "task_wait",
         "task_stop",

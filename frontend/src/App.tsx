@@ -65,14 +65,23 @@ import {
 } from '@/lib/plan-draft';
 import { apiFetch, apiUrl, openExternalUrl } from '@/lib/api-client';
 
-import { Info, Minus, Moon, PanelRightOpen, PanelRightClose, Settings2, Square, Sun, X } from 'lucide-react';
+import { ChevronDown, FolderOpen, Info, Minus, Moon, PanelRightOpen, PanelRightClose, Settings2, Square, Sun, X } from 'lucide-react';
+import { SiCursor, SiVscodium, SiZedindustries } from '@icons-pack/react-simple-icons';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import { message as appMessage } from '@/components/ui/message';
 import { AnimatePresence, motion } from 'motion/react';
 import { SplashScreen } from '@/components/app/splash-screen';
 
 const DEFAULT_WEB_PREVIEW_URL = 'http://localhost:8888';
+const DEFAULT_MODEL_STORAGE_KEY = 'supercode.defaultModelId';
 const CONTEXT_COMPRESSION_USAGE_THRESHOLD = 0.8;
 const STREAM_RETRY_LIMIT = 10;
 const SESSION_HISTORY_PAGE_SIZE = 30;
@@ -85,6 +94,12 @@ const STREAMABLE_TOOL_NAMES = [
   'save_plan',
   'ask_plan_questions',
   'ask_user',
+];
+
+const PROJECT_OPEN_TARGETS = [
+  { name: 'VS Code', command: 'code', icon: <SiVscodium size={14} color="#007ACC" /> },
+  { name: 'Cursor', command: 'cursor', icon: <SiCursor size={14} color="#111827" /> },
+  { name: 'Zed', command: 'zed', icon: <SiZedindustries size={14} color="#084CCF" /> },
 ];
 
 type ViewTransitionDocument = Document & {
@@ -785,6 +800,9 @@ export default function App() {
   const [currentBaseWorkspace, setCurrentBaseWorkspace] = useState('');
   const [currentWorktreeBranch, setCurrentWorktreeBranch] = useState<string | null>(null);
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
+  const [defaultModelId, setDefaultModelId] = useState<string | null>(() => (
+    localStorage.getItem(DEFAULT_MODEL_STORAGE_KEY) || null
+  ));
   const [selectedReasoningEffort, setSelectedReasoningEffort] = useState<string | null>(null);
   const [selectedAgentMode, setSelectedAgentMode] = useState<AgentMode>('auto');
   const [isSuperAutopilotEnabled, setIsSuperAutopilotEnabled] = useState(false);
@@ -1379,12 +1397,18 @@ export default function App() {
     const res = await apiFetch('/api/models');
     const data: { models: ModelOption[] } = await res.json();
     const nextOptions = data.models ?? [];
+    const storedDefaultModelId = localStorage.getItem(DEFAULT_MODEL_STORAGE_KEY) || null;
+    const nextDefaultModelId =
+      storedDefaultModelId && (nextOptions.length === 0 || nextOptions.some((option) => option.id === storedDefaultModelId))
+        ? storedDefaultModelId
+        : null;
     setModelOptions(nextOptions);
+    setDefaultModelId(nextDefaultModelId);
     setSelectedModelId((prev) => {
       if (prev && nextOptions.some((option) => option.id === prev)) {
         return prev;
       }
-      return nextOptions[0]?.id ?? prev ?? null;
+      return nextDefaultModelId ?? nextOptions[0]?.id ?? prev ?? null;
     });
     return nextOptions;
   }, []);
@@ -1446,12 +1470,18 @@ export default function App() {
       .then((res) => res.json())
       .then((data: { models: ModelOption[] }) => {
         const nextOptions = data.models ?? [];
+        const storedDefaultModelId = localStorage.getItem(DEFAULT_MODEL_STORAGE_KEY) || null;
+        const nextDefaultModelId =
+          storedDefaultModelId && (nextOptions.length === 0 || nextOptions.some((option) => option.id === storedDefaultModelId))
+            ? storedDefaultModelId
+            : null;
         setModelOptions(nextOptions);
+        setDefaultModelId(nextDefaultModelId);
         setSelectedModelId((prev) => {
           if (prev && nextOptions.some((option) => option.id === prev)) {
             return prev;
           }
-          return nextOptions[0]?.id ?? prev ?? null;
+          return nextDefaultModelId ?? nextOptions[0]?.id ?? prev ?? null;
         });
       })
       .catch(console.error);
@@ -1616,6 +1646,10 @@ export default function App() {
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 60000);
+      const newSessionModelId =
+        defaultModelId && (modelOptions.length === 0 || modelOptions.some((option) => option.id === defaultModelId))
+          ? defaultModelId
+          : selectedModelId;
 
       const res = await apiFetch('/api/sessions', {
         method: 'POST',
@@ -1623,7 +1657,7 @@ export default function App() {
         body: JSON.stringify({
           workspace,
           initialize_git_repository: options?.initializeGitRepository ?? false,
-          model: selectedModelId,
+          model: newSessionModelId,
           reasoning_effort: selectedReasoningEffort,
           agent_type: resolveAgentModeForRequest(options?.agentMode ?? selectedAgentMode),
         }),
@@ -1655,7 +1689,7 @@ export default function App() {
     } finally {
       setIsSessionBooting(false);
     }
-  }, [applySessionPayload, loadSessionHistory, selectedAgentMode, selectedModelId, selectedReasoningEffort]);
+  }, [applySessionPayload, defaultModelId, loadSessionHistory, modelOptions, selectedAgentMode, selectedModelId, selectedReasoningEffort]);
 
   const refreshPlugins = useCallback(async (targetSessionId?: string | null) => {
     const endpoint = targetSessionId ? `/api/sessions/${targetSessionId}/plugins` : '/api/plugins';
@@ -2130,6 +2164,16 @@ export default function App() {
     return () => window.removeEventListener('popstate', handlePopState);
   }, [applyUrlState]);
 
+  const handleDefaultModelChange = useCallback((modelId: string) => {
+    if (defaultModelId === modelId) return;
+    localStorage.setItem(DEFAULT_MODEL_STORAGE_KEY, modelId);
+    setDefaultModelId(modelId);
+    if (!sessionId) {
+      setSelectedModelId(modelId);
+    }
+    appMessage.success('默认模型已更新');
+  }, [defaultModelId, sessionId]);
+
   const handleModelChange = useCallback(
     async (modelId: string) => {
       if (!sessionId) return;
@@ -2172,6 +2216,34 @@ export default function App() {
       }
     },
     [modelOptions, selectedReasoningEffort, sessionId],
+  );
+
+  const handleOpenProject = useCallback(
+    async (target: 'editor' | 'explorer', editor?: string, label?: string) => {
+      if (!sessionId) return;
+      try {
+        const res = await apiFetch(`/api/sessions/${sessionId}/open-workspace`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(target === 'editor' ? { target, editor } : { target }),
+        });
+        if (!res.ok) {
+          let message = '打开项目失败';
+          try {
+            const data = await res.json();
+            message = String(data.detail ?? data.error ?? message);
+          } catch {
+            message = (await res.text()) || message;
+          }
+          throw new Error(message);
+        }
+        appMessage.success(target === 'explorer' ? '已打开文件资源管理器' : `已在 ${label ?? editor} 打开项目`);
+      } catch (error) {
+        console.error(error);
+        appMessage.error(getErrorMessage(error, '打开项目失败'));
+      }
+    },
+    [sessionId],
   );
 
   const handleReasoningEffortChange = useCallback(
@@ -2900,11 +2972,15 @@ export default function App() {
             toolCallId: string,
             createToolCall: () => ToolCallRecord,
             updater: (toolCall: ToolCallRecord) => ToolCallRecord,
-            immediate = true
+            immediate = true,
+            stampFirstTokenLatency = false
           ) => {
             updateAssistantMessage(assistantId, (message) => {
+              const baseMessage = stampFirstTokenLatency
+                ? markFirstTokenLatency(message)
+                : message;
               let found = false;
-              const toolCalls = (message.toolCalls ?? []).map((tc) => {
+              const toolCalls = (baseMessage.toolCalls ?? []).map((tc) => {
                 if (tc.id !== toolCallId) return tc;
                 found = true;
                 return updater(tc);
@@ -2912,7 +2988,7 @@ export default function App() {
               const nextToolCalls = found ? toolCalls : [...toolCalls, updater(createToolCall())];
 
               let foundPart = false;
-              const parts = (message.parts ?? []).map((part) => {
+              const parts = (baseMessage.parts ?? []).map((part) => {
                 if (part.type !== 'tool_call' || part.toolCall.id !== toolCallId) {
                   return part;
                 }
@@ -2924,7 +3000,7 @@ export default function App() {
                 : [...parts, { type: 'tool_call' as const, toolCall: updater(createToolCall()) }];
 
               return {
-                ...message,
+                ...baseMessage,
                 toolCalls: nextToolCalls,
                 parts: nextParts
               };
@@ -3015,7 +3091,7 @@ export default function App() {
             if (eventName === 'thought_delta') {
               const delta = String(event.delta ?? '');
               updateAssistantMessage(messageId, (message) => ({
-                ...mergeThinkingDelta(message, delta),
+                ...mergeThinkingDelta(markFirstTokenLatency(message), delta),
                 ...metadata,
               }), false);
               return;
@@ -3024,7 +3100,7 @@ export default function App() {
             if (eventName === 'thought') {
               const thought = String(event.thought ?? '');
               updateAssistantMessage(messageId, (message) => ({
-                ...mergeThinkingSnapshot(message, thought),
+                ...mergeThinkingSnapshot(markFirstTokenLatency(message), thought),
                 ...metadata,
               }), true);
               return;
@@ -3059,7 +3135,10 @@ export default function App() {
             ) {
               const finalAnswer = String(event.finalAnswer ?? event.finalOutput ?? '');
               updateAssistantMessage(messageId, (message) => ({
-                ...replaceSubagentTextPart(message, finalAnswer || message.content),
+                ...replaceSubagentTextPart(
+                  markFirstTokenLatency(message),
+                  finalAnswer || message.content,
+                ),
                 ...metadata,
               }), true);
               return;
@@ -3110,6 +3189,8 @@ export default function App() {
                   arguments: args,
                   state: 'running',
                 }),
+                true,
+                true,
               );
               return;
             }
@@ -3218,7 +3299,7 @@ export default function App() {
             if (!assistantId) return;
             updateAssistantMessage(assistantId, (message) => {
               const delta = data.delta ?? '';
-              return mergeThinkingDelta(message, delta);
+              return mergeThinkingDelta(markFirstTokenLatency(message), delta);
             }, false);
           } else if (data.type === 'tool-input-available') {
             const assistantId = currentAssistantId;
@@ -3256,7 +3337,9 @@ export default function App() {
                 arguments: toolCallRecord.arguments,
                 streamedInput: undefined,
                 state: 'running'
-              })
+              }),
+              true,
+              true,
             );
             if (
               isVisibleStreamSession() &&
@@ -3289,7 +3372,9 @@ export default function App() {
                 name: toolName,
                 streamedInput: toolCall.streamedInput ?? '',
                 state: 'running'
-              })
+              }),
+              true,
+              true,
             );
           } else if (data.type === 'tool-input-delta') {
             const assistantId = currentAssistantId;
@@ -3317,7 +3402,8 @@ export default function App() {
                 streamedInput: `${toolCall.streamedInput ?? ''}${delta}`,
                 state: 'running'
               }),
-              true
+              true,
+              true,
             );
             toolDeltaCharsSincePaint += delta.length;
             toolDeltaEventsSincePaint += 1;
@@ -3576,7 +3662,7 @@ export default function App() {
             adoptAssistantId(assistantId);
             updateAssistantMessage(assistantId, (message) => {
               const delta = data.payload.delta ?? '';
-              return mergeThinkingDelta(message, delta);
+              return mergeThinkingDelta(markFirstTokenLatency(message), delta);
             }, false);
           } else if (data.type === 'thought') {
             const assistantId = data.payload.assistant_id || currentAssistantId;
@@ -3584,7 +3670,7 @@ export default function App() {
             adoptAssistantId(assistantId);
             updateAssistantMessage(assistantId, (message) => {
               const nextThought = String(data.payload.thought ?? '');
-              return mergeThinkingSnapshot(message, nextThought);
+              return mergeThinkingSnapshot(markFirstTokenLatency(message), nextThought);
             }, true);
           } else if (data.type === 'tool_call') {
             const assistantId = data.payload.assistant_id || currentAssistantId;
@@ -3596,7 +3682,7 @@ export default function App() {
               showStreamingPlanDraft(normalizePlanDraft(data.payload.arguments));
             }
             updateAssistantMessage(assistantId, (message) => ({
-              ...message,
+              ...markFirstTokenLatency(message),
               toolCalls: [...(message.toolCalls ?? []), toolCallRecord],
               parts: [...(message.parts ?? []), { type: 'tool_call' as const, toolCall: toolCallRecord }]
             }), true);
@@ -4453,6 +4539,38 @@ export default function App() {
               : selectedWorkspace}
           </span>
         </div>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 gap-1.5 rounded-full px-2.5 text-xs"
+              title="打开当前项目"
+            >
+              <FolderOpen className="h-3.5 w-3.5" />
+              打开
+              <ChevronDown className="h-3 w-3 text-muted-foreground" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-44">
+            {PROJECT_OPEN_TARGETS.map((target) => (
+              <DropdownMenuItem
+                key={target.command}
+                onClick={() => void handleOpenProject('editor', target.command, target.name)}
+              >
+                <span className="flex h-4 w-4 items-center justify-center">
+                  {target.icon}
+                </span>
+                {target.name}
+              </DropdownMenuItem>
+            ))}
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => void handleOpenProject('explorer')}>
+              <FolderOpen className="h-4 w-4" />
+              文件资源管理器
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
         <Button
           variant="ghost"
           size="sm"
@@ -4557,10 +4675,12 @@ export default function App() {
         composerFocusRevision={composerFocusRevision}
         isLoading={isLoading}
         model={selectedModelId}
+        defaultModelId={defaultModelId}
         reasoningEffort={selectedReasoningEffort}
         executionMode={currentSessionExecutionMode === 'worktree' ? 'worktree' : newSessionExecutionMode}
         modelOptions={modelOptions}
         fileTree={fileTree}
+        onDefaultModelChange={handleDefaultModelChange}
         onModelChange={handleModelChange}
         onReasoningEffortChange={handleReasoningEffortChange}
         onExecutionModeChange={(mode) => {

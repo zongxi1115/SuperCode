@@ -11,15 +11,13 @@ from fastapi.responses import JSONResponse
 
 from coding_agent.git_tools import init_git_repo
 from fastapi_app.api_models import CreateSessionRequest, SessionCleanupRequest
+from fastapi_app.internal_git_history import delete_workspace_session_history
 from fastapi_app.workspace_utils import build_default_open_files, pick_default_file
 
 
 @dataclass(frozen=True)
 class SessionRouteDeps:
-    session_factory: Callable[..., Any]
-    sessions_dict: dict[str, Any]
-    session_store: Any
-    require_session: Callable[[str], Any]
+    session_registry: Any
     normalize_workspace: Callable[[str | None], str]
     normalize_execution_mode: Callable[[str | None], str]
     normalize_agent_type: Callable[[str | None], str]
@@ -30,9 +28,6 @@ class SessionRouteDeps:
     interactive_command_session_factory: Callable[[str], Any]
     attach_agent_runtime_metadata: Callable[..., None]
     sync_session_runtime_state_for_agent: Callable[[Any], None]
-    persist_session_state: Callable[[Any], None]
-    stop_session_execution: Callable[[Any], list[dict[str, Any]]]
-    persisted_state_to_history_item: Callable[[Any], Any]
     list_workspace_options: Callable[[], list[dict[str, str]]]
     list_available_skill_summaries: Callable[[str], list[dict[str, Any]]]
     create_session_response_factory: Callable[..., Any]
@@ -87,18 +82,18 @@ def register_session_routes(
     deps: SessionRouteDeps,
 ) -> None:
     def close_runtime_session(session_id: str) -> None:
-        session = deps.sessions_dict.pop(session_id, None)
+        session = deps.session_registry.sessions.pop(session_id, None)
         if session is None:
             return
-        deps.stop_session_execution(session)
+        deps.session_registry.stop_session_execution(session)
         for runtime in session.terminal_runtimes.values():
             runtime.close()
         if session.interactive_command_session is not None:
             session.interactive_command_session.close()
 
     def cleanup_candidates(request: SessionCleanupRequest) -> tuple[list[Any], int]:
-        states = deps.session_store.list(limit=None)
-        active_ids = set(deps.sessions_dict.keys())
+        states = deps.session_registry.session_store.list(limit=None)
+        active_ids = set(deps.session_registry.sessions)
         selected_ids = {str(session_id).strip() for session_id in request.sessionIds if str(session_id).strip()}
         now_ms = int(time.time() * 1000)
         cutoff_ms: int | None = None
@@ -201,7 +196,7 @@ def register_session_routes(
             except Exception:
                 pass
 
-        session = deps.session_factory(
+        session = deps.session_registry.session_factory(
             session_id=session_id,
             model=model_name,
             reasoning_effort=resolved_reasoning_effort,
@@ -230,8 +225,8 @@ def register_session_routes(
                 deploy_connection_manager=session.deploy_connection_manager,
             )
             deps.sync_session_runtime_state_for_agent(session)
-        deps.sessions_dict[session_id] = session
-        deps.persist_session_state(session)
+        deps.session_registry.register(session)
+        deps.session_registry.persist_session_state(session)
 
         try:
             snapshot = await asyncio.wait_for(
@@ -248,11 +243,12 @@ def register_session_routes(
         offset: int = Query(0, ge=0),
     ) -> JSONResponse:
         def load_history_page() -> tuple[list[Any], int]:
-            return deps.session_store.list(limit=limit, offset=offset), deps.session_store.count()
+            store = deps.session_registry.session_store
+            return store.list(limit=limit, offset=offset), store.count()
 
         states, total = await asyncio.to_thread(load_history_page)
         history = [
-            deps.persisted_state_to_history_item(state).model_dump()
+            deps.session_registry.persisted_state_to_history_item(state).model_dump()
             for state in states
         ]
         return JSONResponse(
@@ -268,8 +264,8 @@ def register_session_routes(
     @app.get("/api/sessions/storage")
     async def get_session_storage_overview() -> JSONResponse:
         overview = await asyncio.to_thread(
-            deps.session_store.storage_overview,
-            set(deps.sessions_dict.keys()),
+            deps.session_registry.session_store.storage_overview,
+            set(deps.session_registry.sessions),
         )
         return JSONResponse(overview)
 
@@ -277,19 +273,27 @@ def register_session_routes(
     async def cleanup_sessions(request: SessionCleanupRequest) -> JSONResponse:
         candidates, protected_active = await asyncio.to_thread(cleanup_candidates, request)
         candidate_ids = [state.session_id for state in candidates]
-        summary = await asyncio.to_thread(deps.session_store.summarize_session_ids, candidate_ids)
+        summary = await asyncio.to_thread(
+            deps.session_registry.session_store.summarize_session_ids,
+            candidate_ids,
+        )
         candidate_items = [
             {
-                **deps.persisted_state_to_history_item(state).model_dump(),
-                "isActive": state.session_id in deps.sessions_dict,
+                **deps.session_registry.persisted_state_to_history_item(state).model_dump(),
+                "isActive": state.session_id in deps.session_registry.sessions,
             }
             for state in candidates[:200]
         ]
         deleted_ids: list[str] = []
         if not request.dryRun:
-            for session_id in candidate_ids:
+            for state in candidates:
+                session_id = state.session_id
                 close_runtime_session(session_id)
-                deps.session_store.delete(session_id)
+                try:
+                    delete_workspace_session_history(state.workspace, session_id)
+                except Exception:
+                    pass
+                deps.session_registry.session_store.delete(session_id)
                 deleted_ids.append(session_id)
         return JSONResponse(
             {
@@ -306,7 +310,7 @@ def register_session_routes(
 
     @app.get("/api/sessions/{session_id}")
     async def get_session_snapshot(session_id: str) -> JSONResponse:
-        session = deps.require_session(session_id)
+        session = deps.session_registry.require_session(session_id)
         try:
             snapshot = await asyncio.wait_for(asyncio.to_thread(session.snapshot), timeout=15)
         except asyncio.TimeoutError:
@@ -315,17 +319,32 @@ def register_session_routes(
 
     @app.delete("/api/sessions/{session_id}")
     async def delete_session(session_id: str) -> JSONResponse:
-        if session_id not in deps.sessions_dict:
-            if deps.session_store.load(session_id) is None:
+        active_session = deps.session_registry.sessions.get(session_id)
+        persisted_state = None
+        if active_session is None:
+            persisted_state = deps.session_registry.session_store.load(session_id)
+            if persisted_state is None:
                 raise HTTPException(status_code=404, detail="session 不存在")
+        workspace_for_cleanup = (
+            active_session.workspace
+            if active_session is not None
+            else persisted_state.workspace
+            if persisted_state is not None
+            else ""
+        )
         close_runtime_session(session_id)
-        deps.session_store.delete(session_id)
+        if workspace_for_cleanup:
+            try:
+                delete_workspace_session_history(workspace_for_cleanup, session_id)
+            except Exception:
+                pass
+        deps.session_registry.session_store.delete(session_id)
         return JSONResponse({"deleted": True, "sessionId": session_id})
 
     @app.post("/api/sessions/{session_id}/stop")
     async def stop_session(session_id: str) -> JSONResponse:
-        session = deps.require_session(session_id)
-        terminated = deps.stop_session_execution(session)
+        session = deps.session_registry.require_session(session_id)
+        terminated = deps.session_registry.stop_session_execution(session)
         remaining = (
             session.interactive_command_session.list_managed_processes(only_active=True)
             if session.interactive_command_session is not None
@@ -345,7 +364,7 @@ def register_session_routes(
         session_id: str,
         active_only: bool = Query(True),
     ) -> JSONResponse:
-        session = deps.require_session(session_id)
+        session = deps.session_registry.require_session(session_id)
         interactive_session = session.interactive_command_session
         if interactive_session is None:
             return JSONResponse({"processes": []})
@@ -354,7 +373,7 @@ def register_session_routes(
 
     @app.post("/api/sessions/{session_id}/processes/{terminal_id}/terminate")
     async def terminate_session_process(session_id: str, terminal_id: str) -> JSONResponse:
-        session = deps.require_session(session_id)
+        session = deps.session_registry.require_session(session_id)
         interactive_session = session.interactive_command_session
         if interactive_session is None:
             raise HTTPException(status_code=404, detail="当前会话没有受管进程")

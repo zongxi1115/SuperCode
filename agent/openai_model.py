@@ -13,11 +13,10 @@ from .llm_client import (
     OpenAICompatibleClient,
     UnsupportedToolCallingError,
 )
-from .schema import AgentState, StepRecord
+from .schema import AgentState
 from zonix.content import (
     content_blocks,
     content_text,
-    has_image_content,
     image_detail,
     image_source,
 )
@@ -121,10 +120,16 @@ class OpenAICompatibleModel(BaseChatModel):
 
     def __init__(self, client: OpenAICompatibleClient) -> None:
         self.client = client
-        self.provider_model = self._build_provider_model()
+        config = getattr(client, "config", None)
+        self.provider_model = self._build_provider_model(config)
         self._delegate_usage: ZonixUsage | None = None
+        model_name = str(getattr(config, "model", "compatible") or "compatible")
         super().__init__(
-            name=self.provider_model.name if self.provider_model is not None else f"supercode:{client.config.model}"
+            name=(
+                self.provider_model.name
+                if self.provider_model is not None
+                else f"supercode:{model_name}"
+            )
         )
 
     _STREAMABLE_TOOL_INPUT_SPECS: dict[str, tuple[str, str, str]] = {
@@ -161,17 +166,17 @@ class OpenAICompatibleModel(BaseChatModel):
 
         return await asyncio.to_thread(self._complete_sync, request, emit_sync, path)
 
-    def _build_provider_model(self) -> BaseChatModel | None:
-        provider = str(getattr(self.client.config, "provider", "") or "").strip().lower()
+    def _build_provider_model(self, config: Any) -> BaseChatModel | None:
+        provider = str(getattr(config, "provider", "") or "").strip().lower()
         if provider != "anthropic":
             return None
 
         from zonix.models import Anthropic
 
         return Anthropic(
-            model=self.client.config.model,
-            api_key=self.client.config.api_key,
-            base_url=_anthropic_base_url(self.client.config.base_url),
+            model=config.model,
+            api_key=config.api_key,
+            base_url=_anthropic_base_url(config.base_url),
         )
 
     def _complete_sync(
@@ -342,7 +347,6 @@ class OpenAICompatibleModel(BaseChatModel):
         """调用真实模型，决定下一步动作。"""
         native_messages = self._build_messages(
             request,
-            state,
             tool_definitions,
             response_mode="native_tools",
         )
@@ -441,7 +445,6 @@ class OpenAICompatibleModel(BaseChatModel):
 
         messages = self._build_messages(
             request,
-            state,
             tool_definitions,
             response_mode="legacy_json",
         )
@@ -520,9 +523,8 @@ class OpenAICompatibleModel(BaseChatModel):
     def _build_messages(
         self,
         request: ModelRequest,
-        state: AgentState,
         tool_definitions: dict[str, dict[str, Any]],
-        response_mode: str = "legacy_json",
+        response_mode: str,
     ) -> list[dict[str, object]]:
         messages = self._provider_messages_from_request(request)
         if response_mode == "legacy_json":
@@ -654,35 +656,14 @@ class OpenAICompatibleModel(BaseChatModel):
             )
         return tool_calls
 
-    def _build_system_prompt(
+    def _build_legacy_protocol_prompt(
         self,
         tool_definitions: dict[str, dict[str, Any]],
-        response_mode: str = "legacy_json",
     ) -> str:
-        """构造系统提示词。"""
-
         tool_lines = []
         for tool_name, metadata in tool_definitions.items():
             description = str(metadata.get("description", "")).strip()
             tool_lines.append(f"- {tool_name}: {description}")
-
-        if response_mode == "native_tools":
-            return "\n".join(
-                [
-                    "你是一个支持多轮对话的编码智能体大脑，负责决定下一步要调用哪个工具，或者直接给出最终答案。",
-                    "当前接口已启用原生 tool calling。",
-                    "如果需要调用工具，必须使用原生 tool calling，不要在文本内容里输出 JSON，不要解释将要调用什么。",
-                    "如果不需要调用工具，直接输出给用户的最终答复文本。",
-                    "可用工具如下：",
-                    *tool_lines,
-                    "规则：",
-                    "1. 多个互不依赖的只读探索动作可以一次返回多个 tool calls 并行执行。",
-                    "2. 涉及写文件、替换内容、删除文件或执行命令时，除非你非常确定互不影响，否则一次只调用一个工具。",
-                    "3. 调用工具时，参数名必须与工具参数定义保持一致。",
-                    "4. 如果还不了解项目结构，先调用目录或文件浏览类工具。",
-                    "5. 这是一个对话式助手，必须结合历史上下文回答用户的追问。",
-                ]
-            )
 
         return "\n".join(
             [
@@ -710,12 +691,6 @@ class OpenAICompatibleModel(BaseChatModel):
             ]
         )
 
-    def _build_legacy_protocol_prompt(
-        self,
-        tool_definitions: dict[str, dict[str, Any]],
-    ) -> str:
-        return self._build_system_prompt(tool_definitions, response_mode="legacy_json")
-
     def _build_native_tool_specs(
         self,
         tool_definitions: dict[str, dict[str, Any]],
@@ -742,63 +717,6 @@ class OpenAICompatibleModel(BaseChatModel):
             )
         return tool_specs
 
-    def _build_user_prompt(
-        self,
-        state: AgentState,
-        *,
-        conversation_text: str | None = None,
-        latest_user_message: str | None = None,
-    ) -> str:
-        """构造用户提示词。"""
-
-        step_records = state.data.get("step_records", [])
-        conversation_text = conversation_text or self._format_conversation(
-            state.conversation_messages
-        )
-        latest_user_message = latest_user_message or state.current_input
-        include_thoughts = bool(state.data.get("include_thoughts_in_context", False))
-        history_text = self._format_history(
-            step_records,
-            include_thoughts=include_thoughts,
-        )
-
-        return "\n".join(
-            [
-                f"会话总目标：{state.task}",
-                "",
-                "对话历史：",
-                conversation_text,
-                "",
-                f"用户本轮最新问题：{latest_user_message}",
-                "",
-                "当前这一轮已执行步骤：",
-                history_text,
-                "",
-                "请基于当前信息输出下一步决策 JSON。",
-            ]
-        )
-
-    def _split_request_messages(
-        self,
-        request: ModelRequest,
-        state: AgentState,
-    ) -> tuple[list[ZonixMessage], str]:
-        current_input = str(state.current_input or content_text(request.task)).strip()
-        conversation_messages = [
-            message
-            for message in request.messages
-            if message.role in {"user", "assistant"}
-            and (content_text(message.content).strip() or has_image_content(message.content))
-        ]
-        if (
-            conversation_messages
-            and conversation_messages[-1].role == "user"
-            and current_input
-            and content_text(conversation_messages[-1].content).strip() == current_input
-        ):
-            return conversation_messages[:-1], current_input
-        return conversation_messages, current_input
-
     def _message_reasoning_content(self, message: object) -> str:
         direct = str(getattr(message, "reasoning_content", "") or "").strip()
         if direct:
@@ -807,88 +725,6 @@ class OpenAICompatibleModel(BaseChatModel):
         if isinstance(data, dict):
             return str(data.get("reasoning_content") or "").strip()
         return ""
-
-    def _format_conversation(self, messages: list[object], limit: int = 12) -> str:
-        """格式化最近的多轮对话历史。"""
-
-        if not messages:
-            return "暂无对话历史。"
-
-        recent_messages = messages[-limit:]
-        lines: list[str] = []
-        for message in recent_messages:
-            role_name = "用户" if getattr(message, "role", "") == "user" else "助手"
-            message_text = content_text(getattr(message, "content", ""), include_images=True)
-            lines.append(f"{role_name}: {message_text}")
-        return "\n".join(lines)
-
-    def _format_history(
-        self,
-        step_records: list[StepRecord],
-        include_thoughts: bool = False,
-    ) -> str:
-        """把历史步骤压缩成适合喂给模型的文本。"""
-
-        if not step_records:
-            return "暂无历史步骤。"
-
-        recent_records = step_records[-8:]
-        if len(step_records) > 8:
-            lines: list[str] = [f"... (省略前面 {len(step_records) - 8} 步) ..."]
-        else:
-            lines: list[str] = []
-        for step in recent_records:
-            step_prefix = f"第 {step.turn_index} 轮 步骤 {step.index}"
-            if include_thoughts and step.thought:
-                lines.append(f"{step_prefix} 思考：{step.thought}")
-            if step.tool_call:
-                lines.append(
-                    f"{step_prefix} 工具调用：{step.tool_call.name} "
-                    f"{json.dumps(step.tool_call.arguments, ensure_ascii=False)}"
-                )
-            extra_tool_calls = step.tool_calls if step.tool_calls else []
-            if step.tool_call and extra_tool_calls:
-                extra_tool_calls = extra_tool_calls[1:]
-            if extra_tool_calls:
-                for tool_call in extra_tool_calls:
-                    lines.append(
-                        f"{step_prefix} 工具调用：{tool_call.name} "
-                        f"{json.dumps(tool_call.arguments, ensure_ascii=False)}"
-                    )
-
-            if step.tool_result:
-                lines.extend(self._format_tool_result_lines(step_prefix, step.tool_result))
-
-            extra_tool_results = step.tool_results if step.tool_results else []
-            if step.tool_result and extra_tool_results:
-                extra_tool_results = extra_tool_results[1:]
-            if extra_tool_results:
-                for tool_result in extra_tool_results:
-                    lines.extend(self._format_tool_result_lines(step_prefix, tool_result))
-            if step.final_answer:
-                lines.append(f"{step_prefix} 最终答复：{step.final_answer}")
-        return "\n".join(lines)
-
-    def _format_tool_result_lines(self, step_prefix: str, tool_result: Any) -> list[str]:
-        """格式化单个工具结果。"""
-
-        lines = [f"{step_prefix} 工具是否成功：{tool_result.success}"]
-        if tool_result.success:
-            lines.append(
-                f"{step_prefix} 工具输出："
-                f"{self._stringify_tool_output(tool_result.output)}"
-            )
-        else:
-            lines.append(f"{step_prefix} 工具错误：{tool_result.error_message}")
-        return lines
-
-    def _stringify_tool_output(self, value: object) -> str:
-        """把工具输出稳定转成文本，对过长内容进行截断。"""
-        text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-        text = text.strip()
-        if len(text) > 1000:
-            return f"{text[:1000]}\n... [已截断，输出过长]"
-        return text
 
     def _parse_json_output(self, raw_output: str) -> dict[str, object]:
         """解析模型返回的 JSON 文本。"""

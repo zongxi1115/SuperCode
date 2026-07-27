@@ -11,7 +11,7 @@ from coding_agent.file_tools import delete_file_in_workspace
 from coding_agent.git_tools import execute_git_commit, execute_git_tag
 from fastapi_app.app_config import APP_DATA_ROOT
 from fastapi_app.api_models import ConnectToolSubmitRequest, ToolConfirmationRequest, ToolInputSubmitRequest
-from fastapi_app.code_changes import current_agent_turn_index, record_code_change
+from fastapi_app.code_changes import current_agent_turn_index, ensure_code_change_baseline, record_code_change
 from fastapi_app.rag_index import schedule_workspace_rag_index
 from fastapi_app.session_history import (
     record_confirmation_result_for_agent,
@@ -258,6 +258,7 @@ def register_tool_interaction_routes(
         selected_file_cleared = False
         try:
             target = Path(normalize_relative_path(filename, session.workspace))
+            ensure_code_change_baseline(session)
             before_text = read_text_file(str(target), session.workspace)
             output = delete_file_in_workspace(filename, resolve_workspace_path(session.workspace))
             session.mark_file_tree_dirty(paths=[target])

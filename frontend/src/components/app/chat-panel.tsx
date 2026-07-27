@@ -162,6 +162,8 @@ import dragUploadImage from "@/assets/drag-upload.png";
 import {
   ChevronDown,
   ChevronRight,
+  ArrowDown as ArrowDownIcon,
+  ArrowUp as ArrowUpIcon,
   BarChart3Icon,
   DatabaseIcon,
   FileCodeIcon,
@@ -197,6 +199,7 @@ import {
   MemoryStick,
   Network,
   SparklesIcon,
+  Timer as TimerIcon,
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import type React from "react";
@@ -238,6 +241,7 @@ type ChatPanelProps = {
   composerFocusRevision?: number;
   isLoading: boolean;
   model: string | null;
+  defaultModelId: string | null;
   reasoningEffort: string | null;
   executionMode: SessionExecutionMode;
   modelOptions: ModelOption[];
@@ -267,6 +271,7 @@ type ChatPanelProps = {
   superAutopilotEnabled: boolean;
   onSuperAutopilotChange: (enabled: boolean) => void;
   onAgentModeChange: (mode: AgentMode) => void;
+  onDefaultModelChange: (modelId: string) => void;
   onModelChange: (modelId: string) => void;
   onReasoningEffortChange: (reasoningEffort: string) => void;
   onExecutionModeChange: (mode: SessionExecutionMode) => void;
@@ -1467,21 +1472,51 @@ function HtmlArtifactPreview({
   artifact: HtmlArtifact;
   isGenerating?: boolean;
 }) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
   const frameId = useId();
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const [height, setHeight] = useState(240);
+  const [shouldRenderFrame, setShouldRenderFrame] = useState(false);
   const usesLivePreview = Boolean(artifact.isPartial && isGenerating);
   const latestLiveHtmlRef = useRef(artifact.html);
   const liveSendTimerRef = useRef<number | null>(null);
   const lastLiveSentAtRef = useRef(0);
   const liveSrcDoc = useMemo(() => buildArtifactLiveSrcDoc(frameId), [frameId]);
   const finalSrcDoc = useMemo(
-    () => (usesLivePreview ? "" : buildArtifactSrcDoc(artifact.html, frameId)),
-    [artifact.html, frameId, usesLivePreview],
+    () =>
+      usesLivePreview || !shouldRenderFrame
+        ? ""
+        : buildArtifactSrcDoc(artifact.html, frameId),
+    [artifact.html, frameId, shouldRenderFrame, usesLivePreview],
   );
-  const srcDoc = usesLivePreview ? liveSrcDoc : finalSrcDoc;
+  const srcDoc = shouldRenderFrame
+    ? usesLivePreview
+      ? liveSrcDoc
+      : finalSrcDoc
+    : "";
 
   useEffect(() => {
+    const container = containerRef.current;
+    if (!container) {
+      return;
+    }
+    if (typeof IntersectionObserver === "undefined") {
+      setShouldRenderFrame(true);
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        setShouldRenderFrame(entry.isIntersecting);
+      },
+      { rootMargin: "900px 0px" },
+    );
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!shouldRenderFrame) return;
     const handleMessage = (event: MessageEvent) => {
       const data = event.data;
       if (!data || typeof data !== "object") return;
@@ -1492,7 +1527,7 @@ function HtmlArtifactPreview({
     };
     window.addEventListener("message", handleMessage);
     return () => window.removeEventListener("message", handleMessage);
-  }, [frameId]);
+  }, [frameId, shouldRenderFrame]);
 
   const postLiveHtml = useCallback(() => {
     liveSendTimerRef.current = null;
@@ -1530,10 +1565,10 @@ function HtmlArtifactPreview({
   );
 
   useEffect(() => {
-    if (!usesLivePreview) return;
+    if (!usesLivePreview || !shouldRenderFrame) return;
     latestLiveHtmlRef.current = artifact.html;
     scheduleLiveHtmlPost();
-  }, [artifact.html, scheduleLiveHtmlPost, usesLivePreview]);
+  }, [artifact.html, scheduleLiveHtmlPost, shouldRenderFrame, usesLivePreview]);
 
   useEffect(() => {
     return () => {
@@ -1545,22 +1580,32 @@ function HtmlArtifactPreview({
   }, []);
 
   return (
-    <div className="my-3 w-full relative">
-      <iframe
-        ref={iframeRef}
-        className="block w-full border-0"
-        sandbox="allow-scripts"
-        scrolling="no"
-        srcDoc={srcDoc}
-        style={{ height }}
-        title={artifact.title}
-        onLoad={() => {
-          if (!usesLivePreview) return;
-          latestLiveHtmlRef.current = artifact.html;
-          scheduleLiveHtmlPost(true);
-        }}
-      />
-      {usesLivePreview && (
+    <div ref={containerRef} className="my-3 w-full relative">
+      {shouldRenderFrame ? (
+        <iframe
+          ref={iframeRef}
+          className="block w-full border-0"
+          loading="lazy"
+          sandbox="allow-scripts"
+          scrolling="no"
+          srcDoc={srcDoc}
+          style={{ height }}
+          title={artifact.title}
+          onLoad={() => {
+            if (!usesLivePreview) return;
+            latestLiveHtmlRef.current = artifact.html;
+            scheduleLiveHtmlPost(true);
+          }}
+        />
+      ) : (
+        <div
+          className="flex w-full items-center justify-center rounded-md border bg-muted/20 text-xs text-muted-foreground"
+          style={{ height }}
+        >
+          {artifact.title || "HTML Artifact"}
+        </div>
+      )}
+      {usesLivePreview && shouldRenderFrame && (
         <div
           aria-hidden="true"
           className="artifact-live-preview-lock absolute inset-0 z-10"
@@ -1884,9 +1929,14 @@ function useStreamingCodeBlocks(
 
     scanBlocks();
 
-    const mo = new MutationObserver(() => {
-      scanBlocks();
-      requestAnimationFrame(() => {
+    let scanFrame = 0;
+    const scheduleScan = () => {
+      if (scanFrame) {
+        return;
+      }
+      scanFrame = requestAnimationFrame(() => {
+        scanFrame = 0;
+        scanBlocks();
         container
           .querySelectorAll<HTMLPreElement>(
             '[data-streamdown="code-block"] pre',
@@ -1898,14 +1948,20 @@ function useStreamingCodeBlocks(
             }
           });
       });
+    };
+
+    const mo = new MutationObserver(() => {
+      scheduleScan();
     });
     mo.observe(container, {
       childList: true,
       subtree: true,
-      characterData: true,
     });
 
     return () => {
+      if (scanFrame) {
+        cancelAnimationFrame(scanFrame);
+      }
       mo.disconnect();
       container
         .querySelectorAll<HTMLElement>(".streaming-code-badge")
@@ -4567,6 +4623,25 @@ const formatFirstTokenLatency = (latencyMs?: number) => {
   return `${(normalizedMs / 1000).toFixed(1)}s`;
 };
 
+const AssistantResponseMetaItem = ({
+  title,
+  icon,
+  children,
+}: {
+  title: string;
+  icon: React.ReactNode;
+  children: React.ReactNode;
+}) => (
+  <span
+    className="inline-flex h-4 items-center gap-1 rounded-sm text-muted-foreground/55"
+    title={title}
+    aria-label={title}
+  >
+    {icon}
+    <span>{children}</span>
+  </span>
+);
+
 const AssistantResponseMeta = memo(function AssistantResponseMeta({
   tokenUsage,
   firstTokenLatencyMs,
@@ -4584,10 +4659,25 @@ const AssistantResponseMeta = memo(function AssistantResponseMeta({
   }
 
   return (
-    <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] leading-none text-muted-foreground/55">
-      <span>上传 {formatTokenCount(tokenUsage?.inputTokens)} token</span>
-      <span>返回 {formatTokenCount(tokenUsage?.outputTokens)} token</span>
-      <span>首字延迟 {formatFirstTokenLatency(firstTokenLatencyMs)}</span>
+    <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] leading-none tabular-nums">
+      <AssistantResponseMetaItem
+        title="上传 token"
+        icon={<ArrowUpIcon className="size-3" aria-hidden="true" />}
+      >
+        {formatTokenCount(tokenUsage?.inputTokens)} token
+      </AssistantResponseMetaItem>
+      <AssistantResponseMetaItem
+        title="返回 token"
+        icon={<ArrowDownIcon className="size-3" aria-hidden="true" />}
+      >
+        {formatTokenCount(tokenUsage?.outputTokens)} token
+      </AssistantResponseMetaItem>
+      <AssistantResponseMetaItem
+        title="首字延迟"
+        icon={<TimerIcon className="size-3" aria-hidden="true" />}
+      >
+        {formatFirstTokenLatency(firstTokenLatencyMs)}
+      </AssistantResponseMetaItem>
     </div>
   );
 });
@@ -4780,6 +4870,22 @@ const MessageList = memo(function MessageList({
     },
     [getMessageToolCalls],
   );
+
+  const codeChangesByToolCallId = useMemo(() => {
+    const map = new Map<string, CodeChangeRecord[]>();
+    for (const change of codeChanges) {
+      if (!change.toolCallId) {
+        continue;
+      }
+      const existing = map.get(change.toolCallId);
+      if (existing) {
+        existing.push(change);
+      } else {
+        map.set(change.toolCallId, [change]);
+      }
+    }
+    return map;
+  }, [codeChanges]);
 
   const latestRunningToolId = useMemo(() => {
     for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
@@ -5542,9 +5648,12 @@ const MessageList = memo(function MessageList({
                   .id,
             ) ?? []),
         ]);
-        const msgCodeChanges = codeChanges.filter(
-          (c) => c.toolCallId && msgToolCallIds.has(c.toolCallId),
-        );
+        const msgCodeChanges =
+          msg.role === "assistant"
+            ? Array.from(msgToolCallIds).flatMap(
+                (toolCallId) => codeChangesByToolCallId.get(toolCallId) ?? [],
+              )
+            : [];
         const isEditingThisMsg = editingMsgId === msg.id;
         const isUser = msg.role === "user";
         const userAttachments =
@@ -5555,6 +5664,15 @@ const MessageList = memo(function MessageList({
             from={msg.role}
             className="group/msg"
             data-message-id={msg.id}
+            style={
+              isLast
+                ? undefined
+                : ({
+                    contentVisibility: "auto",
+                    containIntrinsicSize:
+                      msg.role === "user" ? "0 88px" : "0 360px",
+                  } as React.CSSProperties)
+            }
           >
             {isUser && isEditingThisMsg ? (
               <motion.div
@@ -6454,6 +6572,7 @@ export function ChatPanel({
   composerFocusRevision,
   isLoading,
   model,
+  defaultModelId,
   reasoningEffort,
   executionMode,
   modelOptions,
@@ -6473,6 +6592,7 @@ export function ChatPanel({
   superAutopilotEnabled,
   onSuperAutopilotChange,
   onAgentModeChange,
+  onDefaultModelChange,
   onModelChange,
   onReasoningEffortChange,
   onExecutionModeChange,
@@ -7058,10 +7178,13 @@ export function ChatPanel({
                         {modelOptions.map((m) => (
                           <ModelSelectorItem
                             key={m.id}
+                            favorite={defaultModelId === m.id}
+                            favoriteLabel={defaultModelId === m.id ? "默认模型" : "设为默认模型"}
                             onSelect={() => {
                               onModelChange(m.id);
                               setIsModelSelectorOpen(false);
                             }}
+                            onFavoriteSelect={() => onDefaultModelChange(m.id)}
                             className="min-h-12 gap-2 py-2"
                           >
                             <ModelSelectorLogo

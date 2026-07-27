@@ -5,8 +5,6 @@ import shutil
 import sqlite3
 import threading
 import time
-import uuid
-from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -14,7 +12,6 @@ from typing import Any
 
 LEGACY_SESSIONS_TABLE = "sessions_legacy_v1"
 SESSION_SCHEMA_VERSION = "session-schema-v2"
-MEMORY_MIGRATION_VERSION = "memory-from-settings-json-v1"
 MESSAGE_METADATA_KEYS = (
     "agentScope",
     "subagentId",
@@ -81,73 +78,32 @@ class PersistedSessionState:
     deploy_state: dict[str, Any] = field(default_factory=dict)
 
 
-@dataclass(slots=True)
-class MemoryItemRecord:
-    id: str
-    scope: str
-    workspace_key: str | None
-    content: str
-    enabled: bool
-    created_at: int
-    updated_at: int
-    source_session_id: str | None = None
-    source_preview: str | None = None
-
-    def to_payload(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "content": self.content,
-            "scope": self.scope,
-            "enabled": self.enabled,
-            "createdAt": self.created_at,
-            "updatedAt": self.updated_at,
-            "sourceSessionId": self.source_session_id,
-            "sourcePreview": self.source_preview,
-        }
-
-
-class SessionStateAdapter(ABC):
-    @abstractmethod
-    def save(self, state: PersistedSessionState) -> None:
-        raise NotImplementedError
-
-    @abstractmethod
-    def load(self, session_id: str) -> PersistedSessionState | None:
-        raise NotImplementedError
-
-    @abstractmethod
-    def list(self, *, limit: int | None = None, offset: int = 0) -> list[PersistedSessionState]:
-        raise NotImplementedError
-
-    @abstractmethod
-    def count(self) -> int:
-        raise NotImplementedError
-
-    @abstractmethod
-    def delete(self, session_id: str) -> None:
-        raise NotImplementedError
-
-
-class SQLiteSessionStateAdapter(SessionStateAdapter):
+class SQLiteSessionStore:
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._initialize_database()
-        self._migrate_settings_memory_if_needed()
 
     def save(self, state: PersistedSessionState) -> None:
         normalized_state = self._normalize_state(state)
         with self._lock, self._connect() as connection:
-            self._save_session_core(connection, normalized_state)
-            self._replace_session_open_files(connection, normalized_state)
-            self._replace_session_usage(connection, normalized_state)
-            self._replace_session_messages(connection, normalized_state)
-            self._replace_session_message_parts(connection, normalized_state)
-            self._replace_session_tool_calls(connection, normalized_state)
-            self._replace_session_code_changes(connection, normalized_state)
-            self._replace_session_plan_steps(connection, normalized_state)
-            self._replace_session_artifacts(connection, normalized_state)
+            self._save_state(connection, normalized_state)
+
+    def _save_state(
+        self,
+        connection: sqlite3.Connection,
+        state: PersistedSessionState,
+    ) -> None:
+        self._save_session_core(connection, state)
+        self._replace_session_open_files(connection, state)
+        self._replace_session_usage(connection, state)
+        self._replace_session_messages(connection, state)
+        self._replace_session_message_parts(connection, state)
+        self._replace_session_tool_calls(connection, state)
+        self._replace_session_code_changes(connection, state)
+        self._replace_session_plan_steps(connection, state)
+        self._replace_session_artifacts(connection, state)
 
     def load(self, session_id: str) -> PersistedSessionState | None:
         with self._lock, self._connect() as connection:
@@ -343,87 +299,6 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                 ignore_errors=True,
             )
 
-    def load_memory_settings(self) -> dict[str, Any]:
-        with self._lock, self._connect() as connection:
-            config_row = connection.execute(
-                "SELECT enabled, auto_learn FROM memory_config WHERE id = 1"
-            ).fetchone()
-            enabled = bool(config_row["enabled"]) if config_row is not None else True
-            auto_learn = bool(config_row["auto_learn"]) if config_row is not None else True
-            rows = connection.execute(
-                """
-                SELECT id, scope, workspace_key, content, enabled, created_at, updated_at,
-                       source_session_id, source_preview
-                FROM memory_items
-                ORDER BY updated_at ASC, created_at ASC, id ASC
-                """
-            ).fetchall()
-
-        global_items: list[dict[str, Any]] = []
-        workspaces: dict[str, list[dict[str, Any]]] = {}
-        for row in rows:
-            record = self._row_to_memory_item(row)
-            payload = record.to_payload()
-            if record.scope == "workspace":
-                workspace_key = str(record.workspace_key or "").strip()
-                if workspace_key:
-                    workspaces.setdefault(workspace_key, []).append(payload)
-            else:
-                global_items.append(payload)
-        return {
-            "enabled": enabled,
-            "autoLearn": auto_learn,
-            "global": global_items,
-            "workspaces": workspaces,
-        }
-
-    def save_memory_settings(
-        self,
-        *,
-        enabled: bool,
-        auto_learn: bool,
-        items: list[MemoryItemRecord] | None = None,
-    ) -> None:
-        with self._lock, self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO memory_config (id, enabled, auto_learn)
-                VALUES (1, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    enabled = excluded.enabled,
-                    auto_learn = excluded.auto_learn
-                """,
-                (1 if enabled else 0, 1 if auto_learn else 0),
-            )
-            if items is None:
-                return
-            connection.execute("DELETE FROM memory_items")
-            if not items:
-                return
-            connection.executemany(
-                """
-                INSERT INTO memory_items (
-                    id, scope, workspace_key, content, enabled, created_at, updated_at,
-                    source_session_id, source_preview
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    (
-                        item.id,
-                        item.scope,
-                        item.workspace_key,
-                        item.content,
-                        1 if item.enabled else 0,
-                        item.created_at,
-                        item.updated_at,
-                        item.source_session_id,
-                        item.source_preview,
-                    )
-                    for item in items
-                ],
-            )
-
     def _initialize_database(self) -> None:
         with self._lock, self._connect() as connection:
             self._ensure_meta_schema(connection)
@@ -447,6 +322,7 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
         self._create_runtime_tables(connection)
         self._ensure_session_message_columns(connection)
         self._ensure_session_tool_call_columns(connection)
+        self._ensure_session_code_change_columns(connection)
         self._ensure_indexes(connection)
 
     def _migrate_sessions_schema(self, connection: sqlite3.Connection) -> None:
@@ -474,7 +350,8 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
         self._ensure_runtime_schema(connection)
         if legacy_rows:
             for row in legacy_rows:
-                self.save(self._legacy_row_to_state(row))
+                state = self._normalize_state(self._legacy_row_to_state(row))
+                self._save_state(connection, state)
             connection.execute(f"DROP TABLE IF EXISTS {LEGACY_SESSIONS_TABLE}")
 
     def _create_runtime_tables(self, connection: sqlite3.Connection) -> None:
@@ -618,6 +495,10 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                 lines_deleted INTEGER NOT NULL DEFAULT 0,
                 summary TEXT NOT NULL DEFAULT '',
                 diff_preview TEXT NOT NULL DEFAULT '',
+                before_ref TEXT,
+                after_ref TEXT,
+                checkpoint_ref TEXT,
+                checkpoint_label TEXT,
                 timestamp INTEGER NOT NULL,
                 turn_index INTEGER,
                 step_index INTEGER,
@@ -657,30 +538,6 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
             )
             """
         )
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS memory_config (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                enabled INTEGER NOT NULL DEFAULT 1,
-                auto_learn INTEGER NOT NULL DEFAULT 1
-            )
-            """
-        )
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS memory_items (
-                id TEXT PRIMARY KEY,
-                scope TEXT NOT NULL,
-                workspace_key TEXT,
-                content TEXT NOT NULL,
-                enabled INTEGER NOT NULL DEFAULT 1,
-                created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL,
-                source_session_id TEXT,
-                source_preview TEXT
-            )
-            """
-        )
 
     def _ensure_session_message_columns(self, connection: sqlite3.Connection) -> None:
         existing_columns = {
@@ -700,6 +557,15 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
         if "metadata_json" not in existing_columns:
             connection.execute("ALTER TABLE session_tool_calls ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'")
 
+    def _ensure_session_code_change_columns(self, connection: sqlite3.Connection) -> None:
+        existing_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(session_code_changes)").fetchall()
+        }
+        for column_name in ("before_ref", "after_ref", "checkpoint_ref", "checkpoint_label"):
+            if column_name not in existing_columns:
+                connection.execute(f"ALTER TABLE session_code_changes ADD COLUMN {column_name} TEXT")
+
     def _ensure_indexes(self, connection: sqlite3.Connection) -> None:
         statements = [
             "CREATE INDEX IF NOT EXISTS idx_sessions_updated_at ON sessions(updated_at DESC)",
@@ -709,7 +575,6 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
             "CREATE INDEX IF NOT EXISTS idx_session_code_changes_order ON session_code_changes(session_id, change_index)",
             "CREATE INDEX IF NOT EXISTS idx_session_plan_steps_order ON session_plan_steps(session_id, position)",
             "CREATE INDEX IF NOT EXISTS idx_session_artifacts_kind ON session_artifacts(session_id, kind)",
-            "CREATE INDEX IF NOT EXISTS idx_memory_items_scope_workspace ON memory_items(scope, workspace_key, updated_at)",
         ]
         for statement in statements:
             connection.execute(statement)
@@ -824,68 +689,6 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                 }
             )
         return breakdown
-
-    def _migrate_settings_memory_if_needed(self) -> None:
-        settings_path = self.db_path.parent / "settings.json"
-        if not settings_path.exists():
-            return
-        with self._lock, self._connect() as connection:
-            if self._has_schema_migration(connection, MEMORY_MIGRATION_VERSION):
-                return
-            try:
-                payload = json.loads(settings_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                self._mark_schema_migration(connection, MEMORY_MIGRATION_VERSION)
-                return
-            if not isinstance(payload, dict):
-                self._mark_schema_migration(connection, MEMORY_MIGRATION_VERSION)
-                return
-            raw_memory = payload.get("memory")
-            if not isinstance(raw_memory, dict):
-                self._mark_schema_migration(connection, MEMORY_MIGRATION_VERSION)
-                return
-
-            enabled = bool(raw_memory.get("enabled", True))
-            auto_learn = bool(raw_memory.get("autoLearn", True))
-            items: list[MemoryItemRecord] = []
-            raw_global = raw_memory.get("global")
-            if isinstance(raw_global, list):
-                for raw_item in raw_global:
-                    item = self._raw_memory_item_to_record(
-                        raw_item,
-                        scope="global",
-                        workspace_key=None,
-                    )
-                    if item is not None:
-                        items.append(item)
-            raw_workspaces = raw_memory.get("workspaces")
-            if isinstance(raw_workspaces, dict):
-                for workspace_key, raw_items in raw_workspaces.items():
-                    if not isinstance(raw_items, list):
-                        continue
-                    for raw_item in raw_items:
-                        item = self._raw_memory_item_to_record(
-                            raw_item,
-                            scope="workspace",
-                            workspace_key=str(workspace_key or "").strip() or None,
-                        )
-                        if item is not None:
-                            items.append(item)
-            self.save_memory_settings(
-                enabled=enabled,
-                auto_learn=auto_learn,
-                items=items,
-            )
-            cleaned_payload = {**payload}
-            cleaned_payload.pop("memory", None)
-            try:
-                settings_path.write_text(
-                    json.dumps(cleaned_payload, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
-            except OSError:
-                pass
-            self._mark_schema_migration(connection, MEMORY_MIGRATION_VERSION)
 
     def _save_session_core(self, connection: sqlite3.Connection, state: PersistedSessionState) -> None:
         connection.execute(
@@ -1142,6 +945,10 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                     int(change.get("linesDeleted", change.get("lines_deleted")) or 0),
                     str(change.get("summary") or ""),
                     str(change.get("diffPreview", change.get("diff_preview")) or ""),
+                    str(change.get("beforeRef", change.get("before_ref")) or "") or None,
+                    str(change.get("afterRef", change.get("after_ref")) or "") or None,
+                    str(change.get("checkpointRef", change.get("checkpoint_ref")) or "") or None,
+                    str(change.get("checkpointLabel", change.get("checkpoint_label")) or "") or None,
                     int(change.get("timestamp") or state.updated_at),
                     self._coerce_optional_int(change.get("turnIndex", change.get("turn_index"))),
                     self._coerce_optional_int(change.get("stepIndex", change.get("step_index"))),
@@ -1153,9 +960,10 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                 """
                 INSERT INTO session_code_changes (
                     id, session_id, tool_call_id, assistant_id, path, absolute_path, action, source,
-                    lines_added, lines_deleted, summary, diff_preview, timestamp, turn_index, step_index, change_index
+                    lines_added, lines_deleted, summary, diff_preview, before_ref, after_ref,
+                    checkpoint_ref, checkpoint_label, timestamp, turn_index, step_index, change_index
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -1218,7 +1026,7 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
             if not change_id:
                 continue
             diff_preview = str(change.get("diffPreview", change.get("diff_preview")) or "")
-            full_diff = str(change.get("fullDiff", change.get("full_diff")) or diff_preview)
+            full_diff = str(change.get("fullDiff", change.get("full_diff")) or "")
             if not full_diff:
                 continue
             diff_path = diffs_dir / f"{change_id}.patch"
@@ -1541,7 +1349,8 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
         rows = connection.execute(
             """
             SELECT id, tool_call_id, assistant_id, path, absolute_path, action, source,
-                   lines_added, lines_deleted, summary, diff_preview, timestamp, turn_index, step_index
+                   lines_added, lines_deleted, summary, diff_preview, before_ref, after_ref,
+                   checkpoint_ref, checkpoint_label, timestamp, turn_index, step_index
             FROM session_code_changes
             WHERE session_id = ?
             ORDER BY change_index ASC, timestamp ASC, id ASC
@@ -1567,11 +1376,20 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
                 payload["assistantId"] = row["assistant_id"]
             if row["absolute_path"] is not None:
                 payload["absolutePath"] = row["absolute_path"]
+            if row["before_ref"] is not None:
+                payload["beforeRef"] = row["before_ref"]
+            if row["after_ref"] is not None:
+                payload["afterRef"] = row["after_ref"]
+            if row["checkpoint_ref"] is not None:
+                payload["checkpointRef"] = row["checkpoint_ref"]
+            if row["checkpoint_label"] is not None:
+                payload["checkpointLabel"] = row["checkpoint_label"]
             if row["turn_index"] is not None:
                 payload["turnIndex"] = int(row["turn_index"])
             if row["step_index"] is not None:
                 payload["stepIndex"] = int(row["step_index"])
-            payload["fullDiff"] = full_diff_by_change_id.get(payload["id"], payload["diffPreview"])
+            if payload["id"] in full_diff_by_change_id:
+                payload["fullDiff"] = full_diff_by_change_id[payload["id"]]
             payloads.append(payload)
         return payloads
 
@@ -1695,48 +1513,6 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
             if str(merged.get("status") or "").strip() == "" and task_state.get("status") is not None:
                 merged["status"] = task_state.get("status")
         return merged
-
-    def _raw_memory_item_to_record(
-        self,
-        raw_item: object,
-        *,
-        scope: str,
-        workspace_key: str | None,
-    ) -> MemoryItemRecord | None:
-        if not isinstance(raw_item, dict):
-            return None
-        content = str(raw_item.get("content") or "").strip()
-        if not content:
-            return None
-        now = (
-            self._coerce_optional_int(raw_item.get("updatedAt"))
-            or self._coerce_optional_int(raw_item.get("createdAt"))
-            or 1
-        )
-        return MemoryItemRecord(
-            id=str(raw_item.get("id") or uuid.uuid4().hex),
-            scope="workspace" if scope == "workspace" else "global",
-            workspace_key=workspace_key,
-            content=content,
-            enabled=bool(raw_item.get("enabled", True)),
-            created_at=self._coerce_optional_int(raw_item.get("createdAt")) or now,
-            updated_at=self._coerce_optional_int(raw_item.get("updatedAt")) or now,
-            source_session_id=str(raw_item.get("sourceSessionId") or "") or None,
-            source_preview=str(raw_item.get("sourcePreview") or "") or None,
-        )
-
-    def _row_to_memory_item(self, row: sqlite3.Row) -> MemoryItemRecord:
-        return MemoryItemRecord(
-            id=str(row["id"]),
-            scope=str(row["scope"]),
-            workspace_key=row["workspace_key"],
-            content=str(row["content"]),
-            enabled=bool(row["enabled"]),
-            created_at=int(row["created_at"]),
-            updated_at=int(row["updated_at"]),
-            source_session_id=row["source_session_id"],
-            source_preview=row["source_preview"],
-        )
 
     def _normalize_state(self, state: PersistedSessionState) -> PersistedSessionState:
         normalized_messages = [
@@ -1889,7 +1665,11 @@ class SQLiteSessionStateAdapter(SessionStateAdapter):
         normalized["summary"] = str(change.get("summary") or "")
         normalized["source"] = str(change.get("source") or "agent")
         normalized["diffPreview"] = str(change.get("diffPreview", change.get("diff_preview")) or "")
-        normalized["fullDiff"] = str(change.get("fullDiff", change.get("full_diff")) or normalized["diffPreview"])
+        normalized["fullDiff"] = str(change.get("fullDiff", change.get("full_diff")) or "")
+        normalized["beforeRef"] = str(change.get("beforeRef", change.get("before_ref")) or "")
+        normalized["afterRef"] = str(change.get("afterRef", change.get("after_ref")) or "")
+        normalized["checkpointRef"] = str(change.get("checkpointRef", change.get("checkpoint_ref")) or "")
+        normalized["checkpointLabel"] = str(change.get("checkpointLabel", change.get("checkpoint_label")) or "")
         if "assistant_id" in normalized and "assistantId" not in normalized:
             normalized["assistantId"] = normalized.get("assistant_id")
         if "tool_call_id" in normalized and "toolCallId" not in normalized:

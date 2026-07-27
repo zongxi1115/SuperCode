@@ -87,7 +87,7 @@ class CodingPromptModel(OpenAICompatibleModel):
                 "5. 普通答疑可以直接输出最终文本；需要查看或修改项目时再调用工具。",
                 "6. 普通短命令优先使用 `run_command(content, timeout)`；timeout 是硬边界，超时会终止进程树。",
                 "7. 只有明确需要长期运行、等待用户介入、持续观察输出或交互输入时，才使用 `start_task(content, timeout, task_id?)`。返回的 `task_id` 后续必须沿用。",
-                "8. 如果 start_task/task_wait 返回 `awaiting_input=true`，调用 `task_input`；如果仍在运行但不等输入，按需要调用 `task_wait`；需要停止时调用 `task_stop`。旧工具 execute/excecute/terminal_input/terminal_wait 仅作兼容，不作为首选。",
+                "8. 如果 start_task/task_wait 返回 `awaiting_input=true`，调用 `task_input`；如果仍在运行但不等输入，按需要调用 `task_wait`；需要停止时调用 `task_stop`。",
                 "9. 如果用户目标已经完成，必须直接输出最终答复，不要为了“继续”而调用无必要工具。",
                 "10. 已成功完成的工具调用会出现在内部工具调用记录里，不要重复同一工具调用；刚刚 write_file 创建的新文件内容以调用参数为准，不要立刻 read_file 回读。",
                 "11. 当回复内容引用了 search_web 或 fetch_url_content 返回的来源时，必须在引用处使用 [[url]] 标注来源，url 填写工具返回的原始链接。例如：「该 API 支持流式响应[[https://docs.example.com/streaming]]」。不要对未经过工具验证的信息使用此标注。",
@@ -124,7 +124,7 @@ class CodingPromptModel(OpenAICompatibleModel):
                 "6. 普通答疑可以直接 final；需要查看或修改项目时再调用工具。",
                 "7. 普通短命令优先使用 `run_command(content, timeout)`；timeout 是硬边界，超时会终止进程树。",
                 "8. 只有明确需要长期运行、等待用户介入、持续观察输出或交互输入时，才使用 `start_task(content, timeout, task_id?)`。返回的 `task_id` 后续必须沿用。",
-                "9. 如果 start_task/task_wait 返回 `awaiting_input=true`，调用 `task_input`；如果仍在运行但不等输入，按需要调用 `task_wait`；需要停止时调用 `task_stop`。旧工具 execute/excecute/terminal_input/terminal_wait 仅作兼容，不作为首选。",
+                "9. 如果 start_task/task_wait 返回 `awaiting_input=true`，调用 `task_input`；如果仍在运行但不等输入，按需要调用 `task_wait`；需要停止时调用 `task_stop`。",
                 "10. 如果用户目标已经完成，必须 action=final，不要为了“继续”而调用无必要工具。",
                 "11. 已成功完成的工具调用会出现在内部工具调用记录里，不要重复同一工具调用；刚刚 write_file 创建的新文件内容以调用参数为准，不要立刻 read_file 回读。",
                 "12. 你会在上下文里看到 [技能目录]，必要时应主动使用其中相关 skill 的描述与约束，不要等用户先显式 @ skill。",
@@ -256,24 +256,18 @@ class CodingPromptModel(OpenAICompatibleModel):
             if content.startswith("[内部工具轨迹摘要]"):
                 continue
             model_message: dict[str, object] = {"role": role, "content": content}
-            reasoning_content = self._message_reasoning_content(message)
-            if role == "assistant" and reasoning_content:
-                model_message["reasoning_content"] = reasoning_content
             model_messages.append(model_message)
         return model_messages
 
     def _build_tool_records_context(self, state: AgentState) -> str:
-        raw_records = state.data.get("tool_records", [])
-        records = raw_records if isinstance(raw_records, list) else []
-        raw_external_records = state.data.get("external_records", [])
-        external_records = raw_external_records if isinstance(raw_external_records, list) else []
-        current_turn_index = state.data.get("turn_index")
+        records = state.tool_records
+        external_records = state.external_records
+        current_turn_index = state.turn_index
         historical_records = [
             record
             for record in records
             if not (
                 isinstance(record, dict)
-                and current_turn_index is not None
                 and record.get("turn_index") == current_turn_index
             )
         ]
@@ -362,15 +356,13 @@ class CodingPromptModel(OpenAICompatibleModel):
         return "\n".join(lines)
 
     def _build_planning_records_context(self, state: AgentState) -> str:
-        raw_records = state.data.get("planning_records", [])
-        records = raw_records if isinstance(raw_records, list) else []
-        current_turn_index = state.data.get("turn_index")
+        records = state.planning_records
+        current_turn_index = state.turn_index
         historical_records = [
             record
             for record in records
             if not (
                 isinstance(record, dict)
-                and current_turn_index is not None
                 and record.get("turn_index") == current_turn_index
             )
         ]
@@ -445,13 +437,11 @@ class CodingPromptModel(OpenAICompatibleModel):
         return f"{text[:TOOL_RECORD_VALUE_LIMIT].rstrip()}... [truncated]"
 
     def _build_current_turn_history(self, state: AgentState) -> str:
-        turn_index = state.data.get("turn_index")
-        if turn_index is None:
+        turn_index = state.turn_index
+        if turn_index <= 0:
             return ""
 
-        step_records = state.data.get("step_records", [])
-        if not isinstance(step_records, list):
-            return ""
+        step_records = state.step_records
 
         current_turn_steps = [
             step
@@ -472,13 +462,11 @@ class CodingPromptModel(OpenAICompatibleModel):
         )
 
     def _build_current_turn_native_messages(self, state: AgentState) -> list[dict[str, object]]:
-        turn_index = state.data.get("turn_index")
-        if turn_index is None:
+        turn_index = state.turn_index
+        if turn_index <= 0:
             return []
 
-        step_records = state.data.get("step_records", [])
-        if not isinstance(step_records, list):
-            return []
+        step_records = state.step_records
 
         current_turn_steps = [
             step

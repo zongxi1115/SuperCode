@@ -635,7 +635,7 @@ def extract_model_pricing(model_payload: object) -> dict[str, str | int | float 
         return {}
     result: dict[str, str | int | float | bool] = {}
     for key, value in pricing.items():
-        if isinstance(key, str) and isinstance(value, str | int | float | bool):
+        if isinstance(key, str) and isinstance(value, (str, int, float, bool)):
             result[key] = value
     return result
 
@@ -834,7 +834,7 @@ def _coerce_string_list(
                 next_items.extend(item.split(separator))
             items = next_items
         return _unique_strings(item.strip() for item in items if item.strip())
-    if not isinstance(value, list | tuple | set):
+    if not isinstance(value, (list, tuple, set)):
         return []
     return _unique_strings(str(item).strip() for item in value if str(item).strip())
 

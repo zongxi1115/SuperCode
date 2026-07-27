@@ -126,19 +126,19 @@ Open **http://localhost:8888** and start coding.
 Use the agent engine programmatically:
 
 ```python
-from agent import Agent, AgentLLMConfig, ChatSession, OpenAICompatibleClient
-from coding_agent import CodingPromptModel, build_coding_tools
+from agent import AgentLLMConfig, OpenAICompatibleClient
+from coding_agent import build_coding_agent
+from fastapi_app.runtime.zonix_runner import ZonixChatSession
 
 config = AgentLLMConfig.from_env(".env")
 client = OpenAICompatibleClient(config)
 
-agent = Agent(
-    model=CodingPromptModel(client),
-    tools=build_coding_tools(),
+agent = build_coding_agent(
+    client,
     workspace="path/to/project",
 )
 
-session = ChatSession(agent=agent)
+session = ZonixChatSession(agent=agent)
 response = session.ask("Refactor the auth module")
 print(response.final_output)
 ```
@@ -177,9 +177,11 @@ Built-in skills include: `code-review`, `frontend-design`, `security-audit`, `sy
 | `grep_file` | Regex search across files |
 | `write_file` | Create or overwrite a file |
 | `replace_file` | Safe chunk-based file editing |
-| `execute` | Run shell command with timeout |
-| `terminal_input` | Send input to running terminal |
-| `terminal_wait` | Wait for terminal output |
+| `run_command` | Run a short shell command with a hard timeout |
+| `start_task` | Start a long-running or interactive command |
+| `task_input` | Send input to a running task |
+| `task_wait` | Wait for more task output |
+| `task_stop` | Stop a running task |
 
 Read-only tools run **in parallel** when possible — no waiting for sequential file reads.
 
@@ -187,7 +189,8 @@ Read-only tools run **in parallel** when possible — no waiting for sequential 
 
 ```
 SuperCode/
-├── agent/              # Core agent framework (runtime loop, events, tool registry)
+├── agent/              # Provider client, model adapter, and UI event/state records
+├── zonix/              # Shared agent, workflow, team, tool, and execution runtime
 ├── coding_agent/       # Coding agent — file ops, shell, git tools
 ├── plan_agent/         # Planning agent — task decomposition, checklists
 ├── deploy_agent/       # Deploy agent — SSH, testing, packaging

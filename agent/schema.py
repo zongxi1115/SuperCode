@@ -75,7 +75,30 @@ class AgentState:
     current_input: str = ""
     conversation_messages: list[ConversationMessage] = field(default_factory=list)
     tool_results: list[ToolResult] = field(default_factory=list)
+    step_records: list[StepRecord] = field(default_factory=list)
+    tool_records: list[dict[str, Any]] = field(default_factory=list)
+    planning_records: list[dict[str, Any]] = field(default_factory=list)
+    external_records: list[str] = field(default_factory=list)
+    turn_index: int = 0
+    include_thoughts_in_context: bool = False
     data: dict[str, Any] = field(default_factory=dict)
+
+    def start_turn(self, *, continue_existing_turn: bool, include_thoughts: bool) -> int:
+        if not continue_existing_turn:
+            self.turn_index += 1
+        self.include_thoughts_in_context = include_thoughts
+        self.tool_results.clear()
+        return self.turn_index
+
+    def first_step_index(self, *, continue_existing_turn: bool) -> int:
+        if not continue_existing_turn:
+            return 1
+        indices = [
+            step.index
+            for step in self.step_records
+            if step.turn_index == self.turn_index
+        ]
+        return max(indices, default=0) + 1
 
     def add_tool_result(self, result: ToolResult) -> None:
         """把工具结果追加到状态中。"""

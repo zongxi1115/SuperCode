@@ -3,6 +3,7 @@ import unittest
 from agent.llm_client import CompletionResponse, CompletionToolCall, UnsupportedToolCallingError
 from agent.openai_model import OpenAICompatibleModel
 from agent.schema import AgentState
+from zonix.models.base import ModelRequest
 
 
 class ParseJsonOutputTests(unittest.TestCase):
@@ -246,7 +247,13 @@ function AdminPage() {
         self.assertEqual(step.thought, "Need to inspect the file first.")
         self.assertEqual(
             step.normalized_tool_calls(),
-            [{"tool_name": "read_file", "tool_arguments": {"filename": "README.md"}}],
+            [
+                {
+                    "tool_call_id": "call_1",
+                    "tool_name": "read_file",
+                    "tool_arguments": {"filename": "README.md"},
+                }
+            ],
         )
 
 
@@ -335,13 +342,15 @@ class _NativeStreamingToolClient:
 class NextStepModeTests(unittest.TestCase):
     def test_next_step_prefers_native_tool_calling(self) -> None:
         model = OpenAICompatibleModel(client=_NativeClient())
+        state = AgentState(task="task", current_input="readme")
 
-        step = model.next_step(
-            state=AgentState(task="task", current_input="readme"),
+        step = model._next_provider_step(
+            request=ModelRequest(messages=[], task=state.current_input),
+            state=state,
             tool_definitions={
                 "read_file": {
                     "description": "读取文件",
-                    "parameters_schema": {
+                    "input_schema": {
                         "type": "object",
                         "properties": {"filename": {"type": "string"}},
                         "required": ["filename"],
@@ -355,10 +364,12 @@ class NextStepModeTests(unittest.TestCase):
 
     def test_next_step_falls_back_to_legacy_json_when_tools_unsupported(self) -> None:
         model = OpenAICompatibleModel(client=_LegacyFallbackClient())
+        state = AgentState(task="task", current_input="readme")
 
-        step = model.next_step(
-            state=AgentState(task="task", current_input="readme"),
-            tool_definitions={"read_file": {"description": "读取文件", "parameters_schema": None}},
+        step = model._next_provider_step(
+            request=ModelRequest(messages=[], task=state.current_input),
+            state=state,
+            tool_definitions={"read_file": {"description": "读取文件", "input_schema": None}},
         )
 
         self.assertEqual(step.action, "tool")
@@ -366,10 +377,12 @@ class NextStepModeTests(unittest.TestCase):
 
     def test_next_step_falls_back_to_legacy_json_when_native_response_is_empty(self) -> None:
         model = OpenAICompatibleModel(client=_EmptyNativeThenLegacyClient())
+        state = AgentState(task="task", current_input="hello")
 
-        step = model.next_step(
-            state=AgentState(task="task", current_input="hello"),
-            tool_definitions={"read_file": {"description": "读取文件", "parameters_schema": None}},
+        step = model._next_provider_step(
+            request=ModelRequest(messages=[], task=state.current_input),
+            state=state,
+            tool_definitions={"read_file": {"description": "读取文件", "input_schema": None}},
         )
 
         self.assertEqual(step.action, "final")
@@ -378,10 +391,12 @@ class NextStepModeTests(unittest.TestCase):
     def test_native_streaming_callback_does_not_crash(self) -> None:
         model = OpenAICompatibleModel(client=_NativeStreamingClient())
         updates = []
+        state = AgentState(task="task", current_input="readme")
 
-        step = model.next_step(
-            state=AgentState(task="task", current_input="readme"),
-            tool_definitions={"read_file": {"description": "读取文件", "parameters_schema": None}},
+        step = model._next_provider_step(
+            request=ModelRequest(messages=[], task=state.current_input),
+            state=state,
+            tool_definitions={"read_file": {"description": "读取文件", "input_schema": None}},
             on_stream=updates.append,
         )
 
@@ -394,10 +409,12 @@ class NextStepModeTests(unittest.TestCase):
     def test_native_streaming_tool_calls_do_not_emit_final_text_updates(self) -> None:
         model = OpenAICompatibleModel(client=_NativeStreamingToolClient())
         updates = []
+        state = AgentState(task="task", current_input="patch app")
 
-        step = model.next_step(
-            state=AgentState(task="task", current_input="patch app"),
-            tool_definitions={"apply_patch": {"description": "修改文件", "parameters_schema": None}},
+        step = model._next_provider_step(
+            request=ModelRequest(messages=[], task=state.current_input),
+            state=state,
+            tool_definitions={"apply_patch": {"description": "修改文件", "input_schema": None}},
             on_stream=updates.append,
         )
 

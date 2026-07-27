@@ -61,33 +61,11 @@ class OpenAICompatibleClient:
         self.config = config
         self.last_usage: dict[str, int] | None = None
 
-    def chat(self, system_prompt: str, user_prompt: str) -> str:
-        return self.chat_messages(
-            [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ]
-        )
-
     def chat_messages(self, messages: list[dict[str, object]]) -> str:
         response = self.chat_completion_messages(messages)
         if not response.text:
             raise RuntimeError("模型接口没有返回可用文本内容。")
         return response.text
-
-    def chat_stream(
-        self,
-        system_prompt: str,
-        user_prompt: str,
-        on_delta: Callable[[str], None] | None = None,
-    ) -> str:
-        return self.chat_stream_messages(
-            [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            on_delta=on_delta,
-        )
 
     def chat_stream_messages(
         self,

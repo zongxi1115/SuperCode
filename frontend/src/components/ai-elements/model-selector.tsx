@@ -21,6 +21,7 @@ import {
   HoverCardTrigger,
 } from "@/components/ui/hover-card";
 import { cn } from "@/lib/utils";
+import { StarIcon } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
 import { useState } from "react";
 
@@ -102,23 +103,64 @@ export type ModelSelectorItemProps = ComponentProps<typeof CommandItem> & {
     contextWindow?: string | number;
     description?: string;
   };
+  favorite?: boolean;
+  favoriteLabel?: string;
+  onFavoriteSelect?: () => void;
 };
 
-export const ModelSelectorItem = ({ hoverPreview, ...props }: ModelSelectorItemProps) => {
+export const ModelSelectorItem = ({
+  children,
+  className,
+  favorite = false,
+  favoriteLabel,
+  hoverPreview,
+  onFavoriteSelect,
+  ...props
+}: ModelSelectorItemProps) => {
   const [open, setOpen] = useState(false);
 
+  const item = (
+    <CommandItem
+      {...props}
+      className={cn(onFavoriteSelect && "group/model-selector-item pr-1", className)}
+      onMouseEnter={hoverPreview ? () => setOpen(true) : props.onMouseEnter}
+      onMouseLeave={hoverPreview ? () => setOpen(false) : props.onMouseLeave}
+    >
+      {children}
+      {onFavoriteSelect && (
+        <button
+          type="button"
+          aria-label={favoriteLabel ?? (favorite ? "默认模型" : "设为默认模型")}
+          aria-pressed={favorite}
+          title={favoriteLabel ?? (favorite ? "默认模型" : "设为默认模型")}
+          className={cn(
+            "ml-auto flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/60 transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+            favorite && "text-amber-500 hover:text-amber-500"
+          )}
+          onMouseDown={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+          }}
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onFavoriteSelect();
+          }}
+        >
+          <StarIcon className={cn("size-4 text-current", favorite && "fill-current text-amber-500")} />
+        </button>
+      )}
+    </CommandItem>
+  );
+
   if (!hoverPreview) {
-    return <CommandItem {...props} />;
+    return item;
   }
 
   return (
     <HoverCard open={open} onOpenChange={setOpen} openDelay={200}>
       <HoverCardTrigger asChild>
-        <CommandItem
-          {...props}
-          onMouseEnter={() => setOpen(true)}
-          onMouseLeave={() => setOpen(false)}
-        />
+        {item}
       </HoverCardTrigger>
       <HoverCardContent
         side="right"

@@ -37,6 +37,8 @@ import type {
 import { createHighlighter } from "shiki";
 
 const ENABLE_SHIKI_HIGHLIGHTING = true;
+const MAX_HIGHLIGHTED_CODE_LENGTH = 60_000;
+const MAX_TOKEN_CACHE_ENTRIES = 80;
 
 const isItalic = (fontStyle: number | undefined) => fontStyle && fontStyle & 1;
 const isBold = (fontStyle: number | undefined) => fontStyle && fontStyle & 2;
@@ -200,12 +202,23 @@ const createRawTokens = (code: string): TokenizedCode => ({
   ),
 });
 
+const rememberTokenizedCode = (key: string, value: TokenizedCode) => {
+  tokensCache.set(key, value);
+  if (tokensCache.size <= MAX_TOKEN_CACHE_ENTRIES) {
+    return;
+  }
+  const oldestKey = tokensCache.keys().next().value;
+  if (oldestKey) {
+    tokensCache.delete(oldestKey);
+  }
+};
+
 export const highlightCode = (
   code: string,
   language: BundledLanguage,
   callback?: (result: TokenizedCode) => void
 ): TokenizedCode | null => {
-  if (!ENABLE_SHIKI_HIGHLIGHTING) {
+  if (!ENABLE_SHIKI_HIGHLIGHTING || code.length > MAX_HIGHLIGHTED_CODE_LENGTH) {
     const rawTokens = createRawTokens(code);
     callback?.(rawTokens);
     return rawTokens;
@@ -244,7 +257,7 @@ export const highlightCode = (
         tokens: result.tokens,
       };
 
-      tokensCache.set(tokensCacheKey, tokenized);
+      rememberTokenizedCode(tokensCacheKey, tokenized);
 
       const subs = subscribers.get(tokensCacheKey);
       if (subs) {

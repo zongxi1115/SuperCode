@@ -7,14 +7,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from agent import (
-    Agent,
+from agent import (  # noqa: E402
     AgentEvent,
     AgentLLMConfig,
-    ChatSession,
     OpenAICompatibleClient,
 )
-from coding_agent import CodingPromptModel, build_coding_tools
+from coding_agent import build_coding_agent  # noqa: E402
+from fastapi_app.runtime.zonix_runner import ZonixChatSession  # noqa: E402
 
 
 def render_live_event(event: AgentEvent) -> None:
@@ -78,12 +77,11 @@ def main() -> None:
         return
 
     client = OpenAICompatibleClient(config)
-    agent = Agent(
-        model=CodingPromptModel(client),
-        tools=build_coding_tools(),
+    agent = build_coding_agent(
+        client,
         workspace=workspace,
     )
-    session = ChatSession(
+    session = ZonixChatSession(
         agent=agent,
         task=(
             "你是一个可以多轮对话的编码智能体。"
@@ -119,7 +117,8 @@ def main() -> None:
 
         if user_input == "/history":
             print("=== 当前上下文 ===")
-            print(session.history_as_text())
+            for message in session.state.conversation_messages:
+                print(f"{message.role}> {message.content}")
             print()
             continue
 

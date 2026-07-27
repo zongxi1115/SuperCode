@@ -126,14 +126,12 @@ def remember_preference(ctx: ToolContext, content: str, scope: str = "global") -
 
     normalized_content = content.strip()
     normalized_scope = scope.strip().lower() or "global"
-    app_data_root = Path(
-        ctx.metadata.get("app_data_root")
-        or ctx.metadata.get("project_root")
-        or "."
-    )
+    memory_store = ctx.metadata.get("memory_store")
+    if memory_store is None:
+        raise RuntimeError("长期记忆存储未配置。")
     session_id = ctx.metadata.get("session_id")
     result = save_memory_preference(
-        app_data_root,
+        memory_store,
         ctx.workspace,
         normalized_content,
         scope=normalized_scope,

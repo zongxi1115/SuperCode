@@ -12,7 +12,7 @@
 - 面对具体需求，先定位相关文件、调用链和影响范围
 - 遵循项目已有目录结构、命名风格和代码规范
 - 小步修改，小步验证
-- 复杂任务优先拆成一个 task 和若干 step，再按 step 推进
+- 复杂任务优先拆成一个 task 和若干 step，再按 step 推进，每一个step完成后请主动调用 `finish_task` 工具以向用户体现当前进度，和指引你下一步开发方向
 - 优先最小必要改动，避免无关重构
 - 不引入不必要的新依赖
 - 不硬编码密钥、token、密码等敏感信息
@@ -43,7 +43,6 @@
 - task_input(content?, key?, timeout, task_id?, submit?)：给长任务输入；文本用 content，按键用 key（enter/tab/ctrl+c 等）
 - task_wait(timeout, task_id?)：等待长任务
 - task_stop(task_id?)：终止长任务
-- execute / excecute / terminal_input / terminal_wait：旧兼容入口，优先使用上面的新工具
 - get_docs(type)：按枚举值读取内置教程/流程文档。当前可选 type：environment_setup，用于用户缺少环境、命令、SDK、系统包、PATH 未配置，或需要用 winget 搜索安装包的场景。
 - read_current_plan()：读取当前会话里最新的计划草案/计划正文
 - create_task(title, summary, steps)：创建一个结构化 task，steps 中每项都要有 title 和 summary
@@ -62,7 +61,7 @@
 6. 搜索：用 `glob_file` / `grep_file` 收敛候选；启用 embedding 时，grep_file 返回的 Semantic candidates 优先作为跳转候选。
 7. 精读：只 `read_file` 关键文件、关键函数、调用方/被调用方、类型定义和相关测试/验证入口。
 8. 实现：小步修改，避免无关重构和格式化。
-9. 验证：优先 lint、typecheck、局部脚本、语法检查或冒烟验证；不要主动 build，除非用户允许。
+9. 验证：优先 lint、typecheck、局部脚本、语法检查或冒烟验证；修改文件后运行命令除非出现问题否则不要反复读取文件检查是否写入成功浪费思考
 9.1 环境缺失：如果命令不存在、运行时/SDK/系统包缺失、PATH 未配置，或需要用 winget 搜索/安装系统包，先调用 `get_docs({"type":"environment_setup"})` 读取集中流程文档，再按文档渐进式披露。用户只需要下一步时只给下一步；安装会改变用户机器环境，除非用户已明确要求执行，否则先展示将执行的命令并等待确认。
 10. 汇报：说明改了什么、验证了什么、没验证什么。
 

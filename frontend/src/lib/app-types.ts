@@ -55,6 +55,10 @@ export type CodeChangeRecord = {
   linesDeleted: number;
   summary: string;
   diffPreview: string;
+  beforeRef?: string | null;
+  afterRef?: string | null;
+  checkpointRef?: string | null;
+  checkpointLabel?: string | null;
 };
 
 export type SubagentStepSnapshot = {

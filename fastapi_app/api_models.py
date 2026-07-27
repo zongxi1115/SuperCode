@@ -20,6 +20,10 @@ class CodeChangeRecord(BaseModel):
     linesDeleted: int = 0
     summary: str
     diffPreview: str = ""
+    beforeRef: str | None = None
+    afterRef: str | None = None
+    checkpointRef: str | None = None
+    checkpointLabel: str | None = None
 
 
 class SkillSummary(BaseModel):

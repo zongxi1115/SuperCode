@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from fastapi_app.api_models import SessionHistoryItem
 from fastapi_app.session_store import PersistedSessionState
+
+
+logger = logging.getLogger(__name__)
 
 
 def session_has_persistable_history(session: Any) -> bool:
@@ -32,13 +36,12 @@ def persist_session_state(session: Any, session_store: Any) -> None:
         try:
             session_store.delete(session.session_id)
         except Exception:
-            pass
+            logger.exception("删除空会话持久化记录失败: %s", session.session_id)
         return
     try:
         session_store.save(session_to_persisted_state(session))
     except Exception:
-        # Persistence must not interrupt the streaming path.
-        pass
+        logger.exception("保存会话状态失败: %s", session.session_id)
 
 
 def set_session_generating(session: Any, is_generating: bool) -> None:

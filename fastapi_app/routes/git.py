@@ -16,7 +16,7 @@ from fastapi_app.workspace_utils import resolve_workspace_path
 
 @dataclass(frozen=True)
 class GitRouteDeps:
-    require_session: Callable[[str], Any]
+    session_registry: Any
     hidden_windows_process_kwargs: Callable[[], dict[str, Any]]
 
 
@@ -47,7 +47,7 @@ def register_git_routes(
 ) -> None:
     @app.post("/api/sessions/{session_id}/git/init")
     async def git_init(session_id: str) -> JSONResponse:
-        session = deps.require_session(session_id)
+        session = deps.session_registry.require_session(session_id)
         workspace = resolve_workspace_path(session.workspace)
         try:
             output = await asyncio.to_thread(init_git_repo, workspace)
@@ -59,7 +59,7 @@ def register_git_routes(
 
     @app.get("/api/sessions/{session_id}/git/log")
     async def git_log(session_id: str, count: int = Query(20)) -> JSONResponse:
-        session = deps.require_session(session_id)
+        session = deps.session_registry.require_session(session_id)
         workspace = resolve_workspace_path(session.workspace)
         if not (workspace / ".git").exists():
             return JSONResponse({"commits": [], "isRepo": False})
@@ -116,7 +116,7 @@ def register_git_routes(
 
     @app.post("/api/sessions/{session_id}/git/commit")
     async def git_commit(session_id: str, request: GitCommitRequest) -> JSONResponse:
-        session = deps.require_session(session_id)
+        session = deps.session_registry.require_session(session_id)
         workspace = resolve_workspace_path(session.workspace)
         message = request.message.strip()
         if not message:
@@ -131,7 +131,7 @@ def register_git_routes(
 
     @app.post("/api/sessions/{session_id}/git/tag")
     async def git_tag(session_id: str, request: GitTagRequest) -> JSONResponse:
-        session = deps.require_session(session_id)
+        session = deps.session_registry.require_session(session_id)
         workspace = resolve_workspace_path(session.workspace)
         tag_name = request.tag.strip()
         if not tag_name:
@@ -146,7 +146,7 @@ def register_git_routes(
 
     @app.get("/api/sessions/{session_id}/git/tags")
     async def git_tags(session_id: str) -> JSONResponse:
-        session = deps.require_session(session_id)
+        session = deps.session_registry.require_session(session_id)
         workspace = resolve_workspace_path(session.workspace)
         if not (workspace / ".git").exists():
             return JSONResponse({"tags": [], "isRepo": False})
@@ -171,7 +171,7 @@ def register_git_routes(
 
     @app.get("/api/sessions/{session_id}/git/status")
     async def git_status(session_id: str) -> JSONResponse:
-        session = deps.require_session(session_id)
+        session = deps.session_registry.require_session(session_id)
         workspace = resolve_workspace_path(session.workspace)
         if not (workspace / ".git").exists():
             return JSONResponse({"isRepo": False, "changedFiles": [], "branch": ""})

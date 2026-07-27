@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from agent.llm_client import OpenAICompatibleClient
+from supercode_agent import attach_runtime_metadata
 from zonix import Agent, agent as build_zonix_agent
 
 from .model import ChatPromptModel
@@ -24,6 +25,4 @@ def build_chat_agent(
     for prompt in model.build_prompt_chain():
         if prompt:
             agent.prompt(prompt)
-    agent.workspace = Path(workspace).resolve()
-    agent.tool_context_metadata = dict(metadata or {})
-    return agent
+    return attach_runtime_metadata(agent, workspace=workspace, metadata=metadata)

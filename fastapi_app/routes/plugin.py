@@ -17,7 +17,7 @@ from fastapi_app.project_docs_store import (
 
 @dataclass(frozen=True)
 class PluginRouteDeps:
-    require_session: Callable[[str], Any]
+    session_registry: Any
     get_loaded_plugin_ids: Callable[[Any], set[str]]
     set_loaded_plugin_ids: Callable[[Any, set[str]], None]
     rebuild_chat_session_for_agent_type: Callable[[Any, str], None]
@@ -48,7 +48,7 @@ def register_plugin_routes(
 
     @app.get("/api/sessions/{session_id}/plugins")
     async def get_session_plugins(session_id: str) -> JSONResponse:
-        session = deps.require_session(session_id)
+        session = deps.session_registry.require_session(session_id)
         plugins = [
             _plugin_payload_for_session(session, plugin, deps=deps)
             for plugin in list_builtin_plugins()
@@ -57,7 +57,7 @@ def register_plugin_routes(
 
     @app.post("/api/sessions/{session_id}/plugins/{plugin_id}/load")
     async def load_session_plugin(session_id: str, plugin_id: str) -> JSONResponse:
-        session = deps.require_session(session_id)
+        session = deps.session_registry.require_session(session_id)
         plugin = get_builtin_plugin(plugin_id)
         if plugin is None:
             raise HTTPException(status_code=404, detail="插件不存在")
@@ -70,7 +70,7 @@ def register_plugin_routes(
 
     @app.post("/api/sessions/{session_id}/plugins/{plugin_id}/unload")
     async def unload_session_plugin(session_id: str, plugin_id: str) -> JSONResponse:
-        session = deps.require_session(session_id)
+        session = deps.session_registry.require_session(session_id)
         plugin = get_builtin_plugin(plugin_id)
         if plugin is None:
             raise HTTPException(status_code=404, detail="插件不存在")
@@ -83,14 +83,14 @@ def register_plugin_routes(
 
     @app.get("/api/sessions/{session_id}/project-docs")
     async def get_project_docs(session_id: str) -> JSONResponse:
-        session = deps.require_session(session_id)
+        session = deps.session_registry.require_session(session_id)
         payload = read_project_docs(session.workspace)
         session.touch()
         return JSONResponse(payload)
 
     @app.put("/api/sessions/{session_id}/project-docs")
     async def save_project_docs(session_id: str, body: dict[str, Any] | None = Body(None)) -> JSONResponse:
-        session = deps.require_session(session_id)
+        session = deps.session_registry.require_session(session_id)
         markdown = str((body or {}).get("markdown") or "")
         payload = write_project_docs(session.workspace, markdown)
         session.touch()
@@ -98,14 +98,14 @@ def register_plugin_routes(
 
     @app.get("/api/sessions/{session_id}/project-docs/documents")
     async def list_session_project_docs(session_id: str) -> JSONResponse:
-        session = deps.require_session(session_id)
+        session = deps.session_registry.require_session(session_id)
         payload = list_project_docs(session.workspace)
         session.touch()
         return JSONResponse(payload)
 
     @app.post("/api/sessions/{session_id}/project-docs/documents")
     async def create_session_project_doc(session_id: str, body: dict[str, Any] | None = Body(None)) -> JSONResponse:
-        session = deps.require_session(session_id)
+        session = deps.session_registry.require_session(session_id)
         title = str((body or {}).get("title") or "")
         payload = create_project_doc(session.workspace, title)
         session.touch()
@@ -113,7 +113,7 @@ def register_plugin_routes(
 
     @app.get("/api/sessions/{session_id}/project-docs/{document_id}")
     async def get_session_project_doc(session_id: str, document_id: str) -> JSONResponse:
-        session = deps.require_session(session_id)
+        session = deps.session_registry.require_session(session_id)
         payload = read_project_docs(session.workspace, document_id)
         session.touch()
         return JSONResponse(payload)
@@ -124,7 +124,7 @@ def register_plugin_routes(
         document_id: str,
         body: dict[str, Any] | None = Body(None),
     ) -> JSONResponse:
-        session = deps.require_session(session_id)
+        session = deps.session_registry.require_session(session_id)
         markdown = str((body or {}).get("markdown") or "")
         payload = write_project_docs(session.workspace, markdown, document_id)
         session.touch()

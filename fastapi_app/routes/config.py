@@ -45,7 +45,8 @@ from fastapi_app.workspace_utils import resolve_workspace_path
 @dataclass(frozen=True)
 class ConfigRouteDeps:
     app_data_root: Any
-    require_session: Callable[[str], Any]
+    memory_store: Any
+    session_registry: Any
     resolve_model_option: Callable[[str | None, str | None], dict[str, str]]
     resolve_model_reference_id: Callable[[str | None, str | None], str | None]
     normalize_reasoning_effort: Callable[[str | None], str | None]
@@ -182,7 +183,7 @@ def register_config_routes(
 
         settings = load_settings(deps.app_data_root)
         settings = _with_legacy_tinyfish_defaults(settings, deps.app_data_root)
-        settings["memory"] = load_memory_settings(deps.app_data_root)
+        settings["memory"] = load_memory_settings(deps.memory_store)
         return JSONResponse(settings)
 
     @app.put("/api/settings")
@@ -196,7 +197,7 @@ def register_config_routes(
         base_payload.pop("memory", None)
         merged = save_settings(deps.app_data_root, base_payload)
         merged["memory"] = save_memory_settings(
-            deps.app_data_root,
+            deps.memory_store,
             enabled=bool(memory_payload.get("enabled", True)),
             auto_learn=bool(memory_payload.get("autoLearn", True)),
             global_items=memory_payload.get("global", []) if isinstance(memory_payload.get("global"), list) else [],
@@ -221,7 +222,7 @@ def register_config_routes(
 
     @app.put("/api/sessions/{session_id}/model")
     async def switch_session_model(session_id: str, request: SwitchModelRequest) -> JSONResponse:
-        session = deps.require_session(session_id)
+        session = deps.session_registry.require_session(session_id)
         reusable_mcp_tools, previous_mcp_tools_loaded = _existing_mcp_tools(session)
         model_option = deps.resolve_model_option(request.model, request.env_file)
         model_ref = model_option["envFile"]
@@ -247,6 +248,7 @@ def register_config_routes(
             "include_thoughts_in_context": config.include_thoughts_in_context,
             "project_root": str(ROOT),
             "app_data_root": str(deps.app_data_root),
+            "memory_store": deps.memory_store,
             "llm_client": client,
             "mcp_tools_loaded": session.agent_type == "chat" or previous_mcp_tools_loaded,
         }

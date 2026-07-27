@@ -424,7 +424,7 @@ class InteractiveCommandSession:
             if existing_command is not None and existing_command.is_alive():
                 raise RuntimeError(
                     f"终端 {resolved_terminal_id} 已在运行，请改用新的 terminal_id，"
-                    "或使用 terminal_input / terminal_wait 继续交互。"
+                    "或使用 task_input / task_wait 继续交互。"
                 )
             self.completed_commands.pop(resolved_terminal_id, None)
 
@@ -926,8 +926,8 @@ class InteractiveCommandSession:
             return None
         return {
             "type": "text",
-            "tool": "terminal_input",
-            "terminal_id": active_command.terminal_id,
+            "tool": "task_input",
+            "task_id": active_command.terminal_id,
             "prompt": input_prompt,
             "command": active_command.command,
         }
@@ -1109,20 +1109,6 @@ def run_command(
     return _run_one_shot_command(command, parsed_timeout, Path(ctx.workspace or "."))
 
 
-def execute(
-    ctx: ToolContext,
-    content: str,
-    timeout: int,
-    terminal_id: str = "",
-) -> dict[str, object]:
-    """兼容旧工具名：执行短命令。timeout 是硬边界；长任务请用 start_task。"""
-
-    parsed_terminal_id = _parse_terminal_id(terminal_id)
-    if parsed_terminal_id is not None:
-        raise ValueError("execute 不再接续活动任务；请改用 task_input 或 task_wait。")
-    return run_command(ctx, content=content, timeout=timeout)
-
-
 def start_task(
     ctx: ToolContext,
     content: str,
@@ -1176,7 +1162,7 @@ def _resolve_terminal_input(
     return resolved_content, _parse_bool_argument(submit)
 
 
-def terminal_input(
+def _send_task_input(
     ctx: ToolContext,
     timeout: int,
     content: str = "",
@@ -1215,7 +1201,7 @@ def terminal_input(
     )
 
 
-def terminal_wait(
+def _wait_for_task(
     ctx: ToolContext,
     timeout: int,
     terminal_id: str = "",
@@ -1244,7 +1230,7 @@ def task_input(
 ) -> dict[str, object]:
     """向 start_task 创建的长任务发送输入或按键。"""
 
-    return terminal_input(
+    return _send_task_input(
         ctx,
         timeout=timeout,
         content=content,
@@ -1261,7 +1247,7 @@ def task_wait(
 ) -> dict[str, object]:
     """等待 start_task 创建的长任务，并返回新增输出或最终结果。"""
 
-    return terminal_wait(ctx, timeout=timeout, terminal_id=task_id)
+    return _wait_for_task(ctx, timeout=timeout, terminal_id=task_id)
 
 
 def task_stop(
@@ -1292,15 +1278,4 @@ def task_stop(
     result = interactive_session.terminate_command(parsed_task_id)
     result["task_id"] = result.get("terminalId") or parsed_task_id
     return result
-
-
-def excecute(
-    ctx: ToolContext,
-    content: str,
-    timeout: int,
-    terminal_id: str = "",
-) -> dict[str, object]:
-    """兼容旧拼写，与 execute 同义。"""
-
-    return execute(ctx, content=content, timeout=timeout, terminal_id=terminal_id)
 

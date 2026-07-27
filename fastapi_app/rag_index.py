@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import re
 import sqlite3
@@ -744,12 +745,10 @@ def _workspace_key(workspace: Path) -> str:
 
 
 def _require_sqlite_vec() -> None:
-    try:
-        import sqlite_vec  # type: ignore
-    except ImportError as exc:
+    if importlib.util.find_spec("sqlite_vec") is None:
         raise RagIndexUnavailable(
             "缺少 sqlite-vec 依赖，请在 conda base 环境安装 fastapi_app/requirements.txt。"
-        ) from exc
+        )
 
 
 def _load_sqlite_vec(connection: sqlite3.Connection) -> None:

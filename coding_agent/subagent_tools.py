@@ -346,7 +346,7 @@ class CodeExplorationDelegator:
         seen: set[str] = set()
         for step in steps:
             for tool_call in self._step_tool_calls(step):
-                if tool_call.name not in {"execute", "excecute"}:
+                if tool_call.name not in {"run_command", "start_task"}:
                     continue
                 command = str(
                     tool_call.arguments.get("content")

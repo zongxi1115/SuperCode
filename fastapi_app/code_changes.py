@@ -1,21 +1,34 @@
 from __future__ import annotations
 
-import difflib
-import time
-import uuid
 from pathlib import Path
 from typing import Any
 
 from fastapi import HTTPException
 
+from fastapi_app.internal_git_history import (
+    create_workspace_checkpoint,
+    ensure_workspace_history_baseline,
+)
 from fastapi_app.workspace_utils import (
     normalize_relative_path,
-    read_text_file,
     resolve_workspace_path,
 )
 
 MAX_CODE_CHANGE_RECORDS = 300
-MAX_CODE_CHANGE_DIFF_LINES = 80
+MUTATING_TOOL_NAMES = {
+    "write_file",
+    "replace_file",
+    "apply_patch",
+    "delete_file",
+    "generate_image",
+    "write_project_docs",
+    "run_command",
+    "execute",
+    "start_task",
+    "task_input",
+    "task_wait",
+    "task_stop",
+}
 
 
 def relative_workspace_path(path: str | Path, workspace: str) -> str:
@@ -31,6 +44,10 @@ def count_text_lines(text: str | None) -> int:
     if not text:
         return 0
     return len(text.splitlines())
+
+
+def is_mutating_tool(tool_name: str) -> bool:
+    return tool_name in MUTATING_TOOL_NAMES
 
 
 def extract_apply_patch_paths(patch_text: str) -> list[str]:
@@ -53,44 +70,51 @@ def capture_code_change_before_snapshots(
     tool_name: str,
     tool_arguments: dict[str, Any],
 ) -> dict[str, str]:
-    raw_targets: list[str] = []
-    if tool_name in {"replace_file", "delete_file"}:
-        filename = str(tool_arguments.get("filename") or "").strip()
-        if filename:
-            raw_targets.append(filename)
-    elif tool_name == "apply_patch":
-        filename = str(tool_arguments.get("filename") or "").strip()
-        if filename:
-            raw_targets.append(filename)
-
-    snapshots: dict[str, str] = {}
-    for raw_target in raw_targets:
-        try:
-            target = Path(normalize_relative_path(raw_target, session.workspace))
-        except HTTPException:
-            continue
-        relative_path = relative_workspace_path(target, session.workspace)
-        snapshots[relative_path] = read_text_file(str(target), session.workspace)
-    return snapshots
+    if is_mutating_tool(tool_name):
+        ensure_code_change_baseline(session)
+    return {}
 
 
-def build_code_diff_preview(relative_path: str, before_text: str, after_text: str) -> tuple[str, str, int, int]:
-    diff_lines = list(
-        difflib.unified_diff(
-            before_text.splitlines(),
-            after_text.splitlines(),
-            fromfile=f"a/{relative_path}",
-            tofile=f"b/{relative_path}",
-            lineterm="",
+def ensure_code_change_baseline(session: Any) -> None:
+    try:
+        ensure_workspace_history_baseline(session)
+    except Exception:
+        # Change tracking should never block the user's actual file operation.
+        return
+
+
+def _append_checkpoint_records(session: Any, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not records:
+        return []
+    session.code_changes = [*session.code_changes, *records][-MAX_CODE_CHANGE_RECORDS:]
+    return records
+
+
+def record_workspace_checkpoint(
+    session: Any,
+    *,
+    source: str = "agent",
+    label: str = "变更",
+    tool_call_id: str | None = None,
+    assistant_id: str | None = None,
+    turn_index: int | None = None,
+    step_index: int | None = None,
+) -> list[dict[str, Any]]:
+    try:
+        checkpoint = create_workspace_checkpoint(
+            session,
+            source=source,
+            label=label,
+            tool_call_id=tool_call_id,
+            assistant_id=assistant_id,
+            turn_index=turn_index,
+            step_index=step_index,
         )
-    )
-    added = sum(1 for line in diff_lines if line.startswith("+") and not line.startswith("+++"))
-    deleted = sum(1 for line in diff_lines if line.startswith("-") and not line.startswith("---"))
-    full_diff = "\n".join(diff_lines)
-    preview_lines = diff_lines[:MAX_CODE_CHANGE_DIFF_LINES]
-    if len(diff_lines) > MAX_CODE_CHANGE_DIFF_LINES:
-        preview_lines.append(f"... truncated {len(diff_lines) - MAX_CODE_CHANGE_DIFF_LINES} diff lines")
-    return "\n".join(preview_lines), full_diff, added, deleted
+    except Exception:
+        return []
+    if checkpoint is None:
+        return []
+    return _append_checkpoint_records(session, checkpoint.records)
 
 
 def record_code_change(
@@ -112,48 +136,31 @@ def record_code_change(
 
     absolute_path = Path(path).expanduser().resolve()
     relative_path = relative_workspace_path(absolute_path, session.workspace)
-    diff_preview, full_diff, added, deleted = build_code_diff_preview(relative_path, before_text, after_text)
-    if action == "added":
-        added = count_text_lines(after_text)
-        deleted = 0
-    elif action == "deleted":
-        added = 0
-        deleted = count_text_lines(before_text)
-
     if summary is None:
         action_label = {"added": "新增", "modified": "修改", "deleted": "删除"}.get(action, "变更")
         summary = f"{action_label} {relative_path}"
 
-    record = {
-        "id": uuid.uuid4().hex,
-        "action": action,
-        "path": relative_path,
-        "absolutePath": str(absolute_path),
-        "source": source,
-        "toolCallId": tool_call_id,
-        "assistantId": assistant_id,
-        "turnIndex": turn_index,
-        "stepIndex": step_index,
-        "timestamp": int(time.time() * 1000),
-        "linesAdded": added,
-        "linesDeleted": deleted,
-        "summary": summary,
-        "diffPreview": diff_preview,
-        "fullDiff": full_diff,
-    }
-    session.code_changes = [*session.code_changes, record][-MAX_CODE_CHANGE_RECORDS:]
-    return record
+    records = record_workspace_checkpoint(
+        session,
+        source=source,
+        label=summary,
+        tool_call_id=tool_call_id,
+        assistant_id=assistant_id,
+        turn_index=turn_index,
+        step_index=step_index,
+    )
+    for record in records:
+        if str(record.get("path") or "") == relative_path:
+            return record
+    return records[0] if records else None
 
 
 def current_agent_turn_index(session: Any) -> int | None:
     state = getattr(session.chat_session, "state", None)
-    data = getattr(state, "data", None)
-    if not isinstance(data, dict):
+    if state is None:
         return None
-    try:
-        return int(data.get("turn_index"))
-    except (TypeError, ValueError):
-        return None
+    turn_index = getattr(state, "turn_index", 0)
+    return turn_index if isinstance(turn_index, int) and turn_index > 0 else None
 
 
 def code_change_records_from_tool_result(
@@ -167,96 +174,31 @@ def code_change_records_from_tool_result(
     step_index: int | None,
     before_snapshots: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    before_snapshots = before_snapshots or {}
-    if tool_name == "write_file":
-        filename = str(tool_arguments.get("filename") or "").strip()
-        if not filename:
-            return []
-        target = Path(normalize_relative_path(filename, session.workspace))
-        after_text = read_text_file(str(target), session.workspace)
-        record = record_code_change(
-            session,
-            action="added",
-            path=target,
-            before_text="",
-            after_text=after_text,
-            source="agent",
-            tool_call_id=tool_call_id,
-            assistant_id=assistant_id,
-            turn_index=current_agent_turn_index(session),
-            step_index=step_index,
-        )
-        return [record] if record is not None else []
-
-    if tool_name == "replace_file":
-        filename = str(tool_arguments.get("filename") or "").strip()
-        if not filename:
-            return []
-        target = Path(normalize_relative_path(filename, session.workspace))
-        relative_path = relative_workspace_path(target, session.workspace)
-        before_text = before_snapshots.get(relative_path, str(tool_arguments.get("old_content") or ""))
-        after_text = read_text_file(str(target), session.workspace)
-        record = record_code_change(
-            session,
-            action="modified",
-            path=target,
-            before_text=before_text,
-            after_text=after_text,
-            source="agent",
-            tool_call_id=tool_call_id,
-            assistant_id=assistant_id,
-            turn_index=current_agent_turn_index(session),
-            step_index=step_index,
-        )
-        return [record] if record is not None else []
-
-    if tool_name == "apply_patch" and isinstance(output, dict):
-        files = output.get("files")
-        if not isinstance(files, list) or not files:
-            return []
-        records: list[dict[str, Any]] = []
-        for raw_file in files:
-            target = Path(normalize_relative_path(str(raw_file), session.workspace))
-            relative_path = relative_workspace_path(target, session.workspace)
-            after_text = read_text_file(str(target), session.workspace)
-            record = record_code_change(
-                session,
-                action="modified",
-                path=target,
-                before_text=before_snapshots.get(relative_path, ""),
-                after_text=after_text,
-                source="agent",
-                tool_call_id=tool_call_id,
-                assistant_id=assistant_id,
-                turn_index=current_agent_turn_index(session),
-                step_index=step_index,
-                summary=f"应用补丁 {relative_path}",
-            )
-            if record is not None:
-                records.append(record)
-        return records
-
-    if tool_name == "delete_file":
-        filename = str(tool_arguments.get("filename") or "").strip()
-        if not filename:
-            return []
-        target = Path(normalize_relative_path(filename, session.workspace))
-        relative_path = relative_workspace_path(target, session.workspace)
-        record = record_code_change(
-            session,
-            action="deleted",
-            path=target,
-            before_text=before_snapshots.get(relative_path, ""),
-            after_text="",
-            source="agent",
-            tool_call_id=tool_call_id,
-            assistant_id=assistant_id,
-            turn_index=current_agent_turn_index(session),
-            step_index=step_index,
-        )
-        return [record] if record is not None else []
-
-    return []
+    if not is_mutating_tool(tool_name):
+        return []
+    label = {
+        "write_file": "AI 写入",
+        "replace_file": "AI 替换",
+        "apply_patch": "AI 补丁",
+        "delete_file": "AI 删除",
+        "generate_image": "AI 生成资源",
+        "write_project_docs": "AI 更新文档",
+        "run_command": "命令执行",
+        "execute": "命令执行",
+        "start_task": "任务执行",
+        "task_input": "任务输入",
+        "task_wait": "任务等待",
+        "task_stop": "任务停止",
+    }.get(tool_name, "AI 变更")
+    return record_workspace_checkpoint(
+        session,
+        source="agent",
+        label=label,
+        tool_call_id=tool_call_id,
+        assistant_id=assistant_id,
+        turn_index=current_agent_turn_index(session),
+        step_index=step_index,
+    )
 
 
 def file_tree_changed_paths_from_tool_result(

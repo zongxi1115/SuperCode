@@ -1,14 +1,301 @@
 from __future__ import annotations
 
 import difflib
+import json
 import re
+import sqlite3
+import threading
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from fastapi_app.session_store import MemoryItemRecord
 MAX_MEMORY_ITEMS_PER_SCOPE = 80
+MEMORY_MIGRATION_VERSION = "memory-from-settings-json-v1"
+
+
+@dataclass(slots=True)
+class MemoryItemRecord:
+    id: str
+    scope: str
+    workspace_key: str | None
+    content: str
+    enabled: bool
+    created_at: int
+    updated_at: int
+    source_session_id: str | None = None
+    source_preview: str | None = None
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "content": self.content,
+            "scope": self.scope,
+            "enabled": self.enabled,
+            "createdAt": self.created_at,
+            "updatedAt": self.updated_at,
+            "sourceSessionId": self.source_session_id,
+            "sourcePreview": self.source_preview,
+        }
+
+
+class SQLiteMemoryStore:
+    def __init__(self, db_path: str | Path) -> None:
+        self.db_path = Path(db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
+        with self._lock, self._connect() as connection:
+            self._initialize_schema(connection)
+            self._migrate_settings_json(connection)
+
+    def load(self) -> dict[str, Any]:
+        with self._lock, self._connect() as connection:
+            config_row = connection.execute(
+                "SELECT enabled, auto_learn FROM memory_config WHERE id = 1"
+            ).fetchone()
+            enabled = bool(config_row["enabled"]) if config_row is not None else True
+            auto_learn = bool(config_row["auto_learn"]) if config_row is not None else True
+            rows = connection.execute(
+                """
+                SELECT id, scope, workspace_key, content, enabled, created_at, updated_at,
+                       source_session_id, source_preview
+                FROM memory_items
+                ORDER BY updated_at ASC, created_at ASC, id ASC
+                """
+            ).fetchall()
+
+        global_items: list[dict[str, Any]] = []
+        workspaces: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            record = self._row_to_record(row)
+            if record.scope == "workspace" and record.workspace_key:
+                workspaces.setdefault(record.workspace_key, []).append(record.to_payload())
+            else:
+                global_items.append(record.to_payload())
+        return {
+            "enabled": enabled,
+            "autoLearn": auto_learn,
+            "global": global_items,
+            "workspaces": workspaces,
+        }
+
+    def save(
+        self,
+        *,
+        enabled: bool,
+        auto_learn: bool,
+        items: list[MemoryItemRecord] | None = None,
+    ) -> None:
+        with self._lock, self._connect() as connection:
+            self._save(connection, enabled=enabled, auto_learn=auto_learn, items=items)
+
+    def _save(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        enabled: bool,
+        auto_learn: bool,
+        items: list[MemoryItemRecord] | None,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO memory_config (id, enabled, auto_learn)
+            VALUES (1, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                enabled = excluded.enabled,
+                auto_learn = excluded.auto_learn
+            """,
+            (1 if enabled else 0, 1 if auto_learn else 0),
+        )
+        if items is None:
+            return
+        connection.execute("DELETE FROM memory_items")
+        if items:
+            connection.executemany(
+                """
+                INSERT INTO memory_items (
+                    id, scope, workspace_key, content, enabled, created_at, updated_at,
+                    source_session_id, source_preview
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        item.id,
+                        item.scope,
+                        item.workspace_key,
+                        item.content,
+                        1 if item.enabled else 0,
+                        item.created_at,
+                        item.updated_at,
+                        item.source_session_id,
+                        item.source_preview,
+                    )
+                    for item in items
+                ],
+            )
+
+    def _initialize_schema(self, connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                key TEXT PRIMARY KEY,
+                applied_at INTEGER NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS memory_config (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                enabled INTEGER NOT NULL DEFAULT 1,
+                auto_learn INTEGER NOT NULL DEFAULT 1
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS memory_items (
+                id TEXT PRIMARY KEY,
+                scope TEXT NOT NULL,
+                workspace_key TEXT,
+                content TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                source_session_id TEXT,
+                source_preview TEXT
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_memory_items_scope_workspace
+            ON memory_items(scope, workspace_key, updated_at)
+            """
+        )
+
+    def _migrate_settings_json(self, connection: sqlite3.Connection) -> None:
+        migrated = connection.execute(
+            "SELECT 1 FROM schema_migrations WHERE key = ?",
+            (MEMORY_MIGRATION_VERSION,),
+        ).fetchone()
+        if migrated is not None:
+            return
+
+        settings_path = self.db_path.parent / "settings.json"
+        if not settings_path.exists():
+            return
+        try:
+            payload = json.loads(settings_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            self._mark_migrated(connection)
+            return
+        raw_memory = payload.get("memory") if isinstance(payload, dict) else None
+        if not isinstance(raw_memory, dict):
+            self._mark_migrated(connection)
+            return
+
+        items: list[MemoryItemRecord] = []
+        raw_global = raw_memory.get("global")
+        if isinstance(raw_global, list):
+            for raw_item in raw_global:
+                item = self._legacy_item(raw_item, scope="global", workspace_key=None)
+                if item is not None:
+                    items.append(item)
+        raw_workspaces = raw_memory.get("workspaces")
+        if isinstance(raw_workspaces, dict):
+            for workspace_key, raw_items in raw_workspaces.items():
+                if not isinstance(raw_items, list):
+                    continue
+                normalized_key = str(workspace_key or "").strip() or None
+                for raw_item in raw_items:
+                    item = self._legacy_item(
+                        raw_item,
+                        scope="workspace",
+                        workspace_key=normalized_key,
+                    )
+                    if item is not None:
+                        items.append(item)
+
+        self._save(
+            connection,
+            enabled=bool(raw_memory.get("enabled", True)),
+            auto_learn=bool(raw_memory.get("autoLearn", True)),
+            items=items,
+        )
+        cleaned_payload = dict(payload)
+        cleaned_payload.pop("memory", None)
+        settings_path.write_text(
+            json.dumps(cleaned_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        self._mark_migrated(connection)
+
+    def _legacy_item(
+        self,
+        raw_item: object,
+        *,
+        scope: str,
+        workspace_key: str | None,
+    ) -> MemoryItemRecord | None:
+        if not isinstance(raw_item, dict):
+            return None
+        content = str(raw_item.get("content") or "").strip()
+        if not content:
+            return None
+        created_at = self._optional_int(raw_item.get("createdAt"))
+        updated_at = self._optional_int(raw_item.get("updatedAt"))
+        timestamp = updated_at or created_at or 1
+        return MemoryItemRecord(
+            id=str(raw_item.get("id") or uuid.uuid4().hex),
+            scope=scope,
+            workspace_key=workspace_key,
+            content=content,
+            enabled=bool(raw_item.get("enabled", True)),
+            created_at=created_at or timestamp,
+            updated_at=updated_at or timestamp,
+            source_session_id=str(raw_item.get("sourceSessionId") or "") or None,
+            source_preview=str(raw_item.get("sourcePreview") or "") or None,
+        )
+
+    def _mark_migrated(self, connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (key, applied_at)
+            VALUES (?, strftime('%s','now') * 1000)
+            ON CONFLICT(key) DO NOTHING
+            """,
+            (MEMORY_MIGRATION_VERSION,),
+        )
+
+    def _row_to_record(self, row: sqlite3.Row) -> MemoryItemRecord:
+        return MemoryItemRecord(
+            id=str(row["id"]),
+            scope=str(row["scope"]),
+            workspace_key=row["workspace_key"],
+            content=str(row["content"]),
+            enabled=bool(row["enabled"]),
+            created_at=int(row["created_at"]),
+            updated_at=int(row["updated_at"]),
+            source_session_id=row["source_session_id"],
+            source_preview=row["source_preview"],
+        )
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.db_path, timeout=30)
+        connection.row_factory = sqlite3.Row
+        return connection
+
+    @staticmethod
+    def _optional_int(value: object) -> int | None:
+        if value is None or value == "":
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
 
 
 def normalize_memory_workspace_key(workspace: str | Path) -> str:
@@ -32,10 +319,8 @@ def _enabled_memory_items(items: object) -> list[dict[str, Any]]:
     return enabled_items
 
 
-def load_memory_settings(app_root: Path) -> dict[str, Any]:
-    from fastapi_app.main import _session_store
-
-    payload = _session_store.load_memory_settings()
+def load_memory_settings(memory_store: SQLiteMemoryStore) -> dict[str, Any]:
+    payload = memory_store.load()
     return {
         "enabled": True,
         "autoLearn": True,
@@ -46,15 +331,13 @@ def load_memory_settings(app_root: Path) -> dict[str, Any]:
 
 
 def save_memory_settings(
-    app_root: Path,
+    memory_store: SQLiteMemoryStore,
     *,
     enabled: bool,
     auto_learn: bool,
     global_items: list[dict[str, Any]],
     workspace_items: dict[str, list[dict[str, Any]]],
 ) -> dict[str, Any]:
-    from fastapi_app.main import _session_store
-
     items: list[MemoryItemRecord] = []
     for raw_item in global_items:
         item = _payload_to_memory_item(raw_item, scope="global", workspace_key=None)
@@ -72,16 +355,19 @@ def save_memory_settings(
             )
             if item is not None:
                 items.append(item)
-    _session_store.save_memory_settings(
+    memory_store.save(
         enabled=enabled,
         auto_learn=auto_learn,
         items=items,
     )
-    return load_memory_settings(app_root)
+    return load_memory_settings(memory_store)
 
 
-def build_long_term_memory_context(app_root: Path, workspace: str | Path) -> str:
-    memory = load_memory_settings(app_root)
+def build_long_term_memory_context(
+    memory_store: SQLiteMemoryStore,
+    workspace: str | Path,
+) -> str:
+    memory = load_memory_settings(memory_store)
     if not isinstance(memory, dict) or not memory.get("enabled", True):
         return ""
 
@@ -207,7 +493,7 @@ def _upsert_memory_item(
 
 
 def remember_preference(
-    app_root: Path,
+    memory_store: SQLiteMemoryStore,
     workspace: str | Path,
     content: str,
     *,
@@ -223,27 +509,29 @@ def remember_preference(
         raise ValueError("记忆内容太长，请压缩到 500 字以内。")
 
     normalized_scope = "workspace" if scope == "workspace" else "global"
-    memory = load_memory_settings(app_root)
-    if not isinstance(memory, dict):
-        raise ValueError("记忆设置不可用。")
+    memory = load_memory_settings(memory_store)
     if not memory.get("enabled", True):
         return {"saved": False, "reason": "memory_disabled"}
     if require_auto_learn_enabled and not memory.get("autoLearn", True):
         return {"saved": False, "reason": "auto_learn_disabled"}
 
-    global_items = [
-        _payload_to_memory_item(item, scope="global", workspace_key=None)
-        for item in memory.get("global", [])
-        if _payload_to_memory_item(item, scope="global", workspace_key=None) is not None
-    ]
+    global_items: list[MemoryItemRecord] = []
+    for raw_item in memory.get("global", []):
+        item = _payload_to_memory_item(raw_item, scope="global", workspace_key=None)
+        if item is not None:
+            global_items.append(item)
     workspace_key = normalize_memory_workspace_key(workspace)
     workspace_payloads = memory.get("workspaces", {})
     raw_workspace_items = workspace_payloads.get(workspace_key, []) if isinstance(workspace_payloads, dict) else []
-    workspace_items = [
-        _payload_to_memory_item(item, scope="workspace", workspace_key=workspace_key)
-        for item in raw_workspace_items
-        if _payload_to_memory_item(item, scope="workspace", workspace_key=workspace_key) is not None
-    ]
+    workspace_items: list[MemoryItemRecord] = []
+    for raw_item in raw_workspace_items:
+        item = _payload_to_memory_item(
+            raw_item,
+            scope="workspace",
+            workspace_key=workspace_key,
+        )
+        if item is not None:
+            workspace_items.append(item)
 
     target_items = workspace_items if normalized_scope == "workspace" else global_items
     created, item = _upsert_memory_item(
@@ -259,7 +547,7 @@ def remember_preference(
     next_workspace_payloads = dict(workspace_payloads) if isinstance(workspace_payloads, dict) else {}
     next_workspace_payloads[workspace_key] = [item.to_payload() for item in workspace_items]
     save_memory_settings(
-        app_root,
+        memory_store,
         enabled=bool(memory.get("enabled", True)),
         auto_learn=bool(memory.get("autoLearn", True)),
         global_items=[item.to_payload() for item in global_items],

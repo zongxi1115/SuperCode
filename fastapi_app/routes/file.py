@@ -6,12 +6,12 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
-from fastapi_app.code_changes import record_code_change, relative_workspace_path
+from fastapi_app.code_changes import ensure_code_change_baseline, record_code_change, relative_workspace_path
 from fastapi_app.app_config import APP_DATA_ROOT
 from fastapi_app.rag_index import schedule_workspace_rag_index
 from fastapi_app.ui_message_stream import sse_data
@@ -20,6 +20,7 @@ from fastapi_app.workspace_utils import normalize_relative_path, read_text_file,
 SUPPORTED_EDITOR_COMMANDS = {
     "code",
     "code-insiders",
+    "cursor",
     "zed",
     "devenv",
     "subl",
@@ -224,7 +225,7 @@ PREVIEW_SELECT_BRIDGE_SCRIPT = r"""
 
 @dataclass(frozen=True)
 class FileRouteDeps:
-    require_session: Callable[[str], Any]
+    session_registry: Any
 
 
 def resolve_workspace_target(
@@ -233,7 +234,7 @@ def resolve_workspace_target(
     *,
     deps: FileRouteDeps,
 ) -> tuple[Any, Path, str]:
-    session = deps.require_session(session_id)
+    session = deps.session_registry.require_session(session_id)
     resolved_path = normalize_relative_path(path, session.workspace)
     target = Path(resolved_path).expanduser().resolve()
     workspace_root = resolve_workspace_path(session.workspace)
@@ -256,7 +257,7 @@ def launch_editor_process(*, editor: str, target: Path) -> list[str]:
         command = [executable, "/Edit", str(target)]
 
     popen_kwargs: dict[str, Any] = {
-        "cwd": str(target.parent),
+        "cwd": str(target if target.is_dir() else target.parent),
         "stdin": subprocess.DEVNULL,
         "stdout": subprocess.DEVNULL,
         "stderr": subprocess.DEVNULL,
@@ -279,6 +280,42 @@ def launch_editor_process(*, editor: str, target: Path) -> list[str]:
     return command
 
 
+def launch_file_manager_process(target: Path) -> list[str]:
+    if sys.platform == "win32":
+        executable = shutil.which("explorer") or "explorer"
+        command = [executable, str(target)]
+    elif sys.platform == "darwin":
+        executable = shutil.which("open")
+        if not executable:
+            raise HTTPException(status_code=404, detail="未找到 open 命令")
+        command = [executable, str(target)]
+    else:
+        executable = shutil.which("xdg-open") or shutil.which("gio")
+        if not executable:
+            raise HTTPException(status_code=404, detail="未找到 xdg-open 或 gio 命令")
+        command = [executable, str(target)] if Path(executable).name != "gio" else [executable, "open", str(target)]
+
+    popen_kwargs: dict[str, Any] = {
+        "cwd": str(target),
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if sys.platform == "win32":
+        popen_kwargs["creationflags"] = (
+            getattr(subprocess, "DETACHED_PROCESS", 0)
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        )
+    else:
+        popen_kwargs["start_new_session"] = True
+
+    try:
+        subprocess.Popen(command, **popen_kwargs)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"打开文件资源管理器失败：{exc}") from exc
+    return command
+
+
 def register_file_routes(
     app: FastAPI,
     *,
@@ -289,7 +326,7 @@ def register_file_routes(
         session_id: str = Query(...),
         path: str = Query(...),
     ) -> JSONResponse:
-        session = deps.require_session(session_id)
+        session = deps.session_registry.require_session(session_id)
         session.selected_file_path = normalize_relative_path(path, session.workspace)
 
         filename = Path(session.selected_file_path).name
@@ -348,10 +385,52 @@ def register_file_routes(
             }
         )
 
+    @app.post("/api/sessions/{session_id}/open-workspace")
+    async def open_workspace(
+        session_id: str,
+        body: dict[str, Any] | None = Body(None),
+    ) -> JSONResponse:
+        payload = body if isinstance(body, dict) else {}
+        target_kind = str(payload.get("target") or "editor").strip()
+        editor = str(payload.get("editor") or "").strip()
+        session = deps.session_registry.require_session(session_id)
+        workspace_root = resolve_workspace_path(session.workspace)
+        if not workspace_root.exists():
+            raise HTTPException(status_code=404, detail="工作区不存在")
+        if not workspace_root.is_dir():
+            raise HTTPException(status_code=400, detail="工作区不是目录")
+
+        if target_kind == "explorer":
+            command = launch_file_manager_process(workspace_root)
+            return JSONResponse(
+                {
+                    "launched": True,
+                    "target": target_kind,
+                    "absolutePath": str(workspace_root),
+                    "command": command,
+                }
+            )
+
+        if target_kind != "editor":
+            raise HTTPException(status_code=400, detail=f"不支持的打开目标：{target_kind}")
+        if not editor:
+            raise HTTPException(status_code=400, detail="缺少 editor")
+
+        command = launch_editor_process(editor=editor, target=workspace_root)
+        return JSONResponse(
+            {
+                "launched": True,
+                "target": target_kind,
+                "absolutePath": str(workspace_root),
+                "editor": editor,
+                "command": command,
+            }
+        )
+
     @app.get("/api/sessions/{session_id}/preview")
     @app.get("/api/sessions/{session_id}/preview/{preview_path:path}")
     async def preview_session_file(session_id: str, preview_path: str = "") -> FileResponse:
-        session = deps.require_session(session_id)
+        session = deps.session_registry.require_session(session_id)
         target = resolve_preview_path(preview_path, session.workspace)
         return FileResponse(target)
 
@@ -385,7 +464,7 @@ def register_file_routes(
         force: bool = Query(False),
         path: str | None = Query(None),
     ) -> JSONResponse:
-        session = deps.require_session(session_id)
+        session = deps.session_registry.require_session(session_id)
         if path is not None and str(path).strip():
             try:
                 directory = await asyncio.wait_for(
@@ -418,7 +497,7 @@ def register_file_routes(
         session_id: str,
         since: int = Query(0),
     ) -> StreamingResponse:
-        session = deps.require_session(session_id)
+        session = deps.session_registry.require_session(session_id)
 
         async def event_generator():
             queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
@@ -460,6 +539,7 @@ def register_file_routes(
         try:
             existed_before_save = target.exists()
             before_text = read_text_file(str(target), session.workspace) if existed_before_save else ""
+            ensure_code_change_baseline(session)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
             session.mark_file_tree_dirty(paths=[target])

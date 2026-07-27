@@ -598,7 +598,11 @@ def build_agent_runtime_state(session: Any, app_root: Path) -> dict[str, Any]:
     }
 
 
-def sync_session_runtime_state_for_agent(session: Any, app_root: Path) -> None:
+def sync_session_runtime_state_for_agent(
+    session: Any,
+    app_root: Path,
+    memory_store: Any,
+) -> None:
     if session.chat_session is None:
         return
     state = getattr(session.chat_session, "state", None)
@@ -607,7 +611,7 @@ def sync_session_runtime_state_for_agent(session: Any, app_root: Path) -> None:
         return
     data["runtime_state"] = build_agent_runtime_state(session, app_root)
     data["available_skills"] = list_available_skill_summaries(session.workspace)
-    data["long_term_memory"] = build_long_term_memory_context(app_root, session.workspace)
+    data["long_term_memory"] = build_long_term_memory_context(memory_store, session.workspace)
 
 
 def set_session_phase(session: Any, phase: str) -> None:

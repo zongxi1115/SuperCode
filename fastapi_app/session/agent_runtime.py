@@ -36,6 +36,7 @@ from fastapi_app.runtime.session import (
     update_plan_state as update_plan_state_impl,
 )
 from fastapi_app.session_history import seed_chat_session_history
+from fastapi_app.storage import MEMORY_STORE
 from fastapi_app.workspace_utils import resolve_workspace_path
 from zonix import Agent
 
@@ -49,7 +50,7 @@ def build_agent_runtime_state(session: Any) -> dict[str, Any]:
 
 
 def sync_session_runtime_state_for_agent(session: Any) -> None:
-    sync_session_runtime_state_for_agent_impl(session, APP_DATA_ROOT)
+    sync_session_runtime_state_for_agent_impl(session, APP_DATA_ROOT, MEMORY_STORE)
 
 
 def normalize_plan_state(value: object) -> dict[str, Any]:
@@ -131,6 +132,7 @@ def attach_agent_runtime_metadata(
     agent.tool_context_metadata["backend_base_url"] = BACKEND_BASE_URL
     agent.tool_context_metadata["project_root"] = str(ROOT)
     agent.tool_context_metadata["app_data_root"] = str(APP_DATA_ROOT)
+    agent.tool_context_metadata["memory_store"] = MEMORY_STORE
     if include_thoughts_in_context is not None:
         agent.tool_context_metadata["include_thoughts_in_context"] = include_thoughts_in_context
     if interactive_command_session is not None:
@@ -166,6 +168,7 @@ def build_chat_session(
             "include_thoughts_in_context": config.include_thoughts_in_context,
             "project_root": str(ROOT),
             "app_data_root": str(APP_DATA_ROOT),
+            "memory_store": MEMORY_STORE,
             "llm_client": client,
             "mcp_tools_loaded": agent_type == "chat" or load_mcp_tools,
         }

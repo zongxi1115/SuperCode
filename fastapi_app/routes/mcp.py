@@ -38,7 +38,7 @@ def register_mcp_routes(app: FastAPI, *, deps: MCPRouteDeps) -> None:
 
     @app.put("/api/mcp/servers")
     async def update_mcp_servers(payload: MCPServersPayload) -> JSONResponse:
-        servers = save_mcp_servers(
+        save_mcp_servers(
             deps.app_data_root,
             [server.model_dump(exclude_none=True) for server in payload.servers],
         )

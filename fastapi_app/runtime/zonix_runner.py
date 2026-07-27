@@ -7,9 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from agent import events
 from agent.schema import AgentEvent, AgentResponse, AgentState, ConversationMessage, StepRecord, ToolCall, ToolResult
-from agent.state import AgentStateView
 from zonix import (
     Agent as ZonixAgent,
     ErrorEvent,
@@ -142,12 +140,11 @@ class ZonixChatSession:
         return "\n\n".join(thoughts)
 
     def _append_tool_records(self, response: AgentResponse) -> None:
-        state_view = AgentStateView(self.state)
-        next_records = list(state_view.tool_records)
+        next_records = list(self.state.tool_records)
         for step in response.steps:
             next_records.extend(self._records_from_step(step))
         if next_records:
-            self.state.data["tool_records"] = next_records[-MAX_STORED_TOOL_RECORDS:]
+            self.state.tool_records = next_records[-MAX_STORED_TOOL_RECORDS:]
 
     def _records_from_step(self, step: StepRecord) -> list[dict[str, object]]:
         tool_calls = step.tool_calls or ([step.tool_call] if step.tool_call is not None else [])
@@ -199,14 +196,13 @@ class ZonixChatSession:
         }
 
     def _append_planning_records(self, response: AgentResponse) -> None:
-        state_view = AgentStateView(self.state)
-        next_records = list(state_view.planning_records)
+        next_records = list(self.state.planning_records)
         for step in response.steps:
             record = self._planning_record(step)
             if record is not None:
                 next_records.append(record)
         if next_records:
-            self.state.data["planning_records"] = next_records[-MAX_STORED_PLANNING_RECORDS:]
+            self.state.planning_records = next_records[-MAX_STORED_PLANNING_RECORDS:]
 
     def _planning_record(self, step: StepRecord) -> dict[str, object] | None:
         thought = " ".join(step.thought.split()).strip()
@@ -258,7 +254,12 @@ class ZonixAgentRunner:
             continue_existing_turn=continue_existing_turn,
             on_event=on_event,
         )
-        recorder.emit(events.turn_started(state.current_input))
+        recorder.emit(
+            AgentEvent(
+                type="turn_started",
+                message=f"开始处理本轮请求：{state.current_input}",
+            )
+        )
         if continue_existing_turn:
             task_content = "请基于上面的工具调用结果继续完成当前任务，不要重复已经成功完成的工具调用。"
         else:
@@ -292,15 +293,13 @@ class ZonixEventRecorder:
         self.state = state
         self.metadata = metadata
         self.on_event = on_event
-        self.state_view = AgentStateView(state)
-        self.history_steps = self.state_view.step_records
-        self.turn_index = self.state_view.start_turn(
+        self.history_steps = state.step_records
+        self.turn_index = state.start_turn(
             continue_existing_turn=continue_existing_turn,
             include_thoughts=bool(metadata.get("include_thoughts_in_context")),
         )
-        self.next_step_index = self.state_view.first_step_index(
-            self.turn_index,
-            continue_existing_turn=continue_existing_turn,
+        self.next_step_index = state.first_step_index(
+            continue_existing_turn=continue_existing_turn
         )
         self.steps: list[StepRecord] = []
         self.pending_step: _PendingStep | None = None
@@ -361,7 +360,15 @@ class ZonixEventRecorder:
         self.thought_by_step[step_index] = thought
         if self.pending_step is not None:
             self.pending_step.thought = thought
-        self.emit(events.thought_delta(step_index, thought, delta))
+        self.emit(
+            AgentEvent(
+                type="thought_delta",
+                step_index=step_index,
+                message=f"第 {step_index} 步正在流式输出思考。",
+                thought=thought,
+                delta=delta,
+            )
+        )
 
     def _record_text_delta(self, delta: str) -> None:
         if not delta:
@@ -369,33 +376,43 @@ class ZonixEventRecorder:
         step_index = self._current_step_index()
         self.current_text += delta
         self.emit(
-            events.final_answer_delta(
-                step_index,
-                self.thought_by_step.get(step_index),
-                self.current_text,
-                delta,
+            AgentEvent(
+                type="final_answer_delta",
+                step_index=step_index,
+                message=f"第 {step_index} 步正在流式输出最终答复。",
+                thought=self.thought_by_step.get(step_index),
+                final_answer=self.current_text,
+                delta=delta,
             )
         )
 
     def _record_tool_input_start(self, event: ToolInputStart) -> None:
         self.tool_names_by_id[event.call_id] = event.tool
+        step_index = self._current_step_index()
+        tool_call = ToolCall(id=event.call_id, name=event.tool, arguments={})
         self.emit(
-            events.tool_input_started(
-                self._current_step_index(),
-                ToolCall(id=event.call_id, name=event.tool, arguments={}),
+            AgentEvent(
+                type="tool_input_started",
+                step_index=step_index,
+                message=f"第 {step_index} 步开始流式生成工具 {event.tool} 的输入。",
+                tool_call=tool_call,
             )
         )
 
     def _record_tool_input_delta(self, event: ToolInputDelta) -> None:
+        step_index = self._current_step_index()
+        tool_call = ToolCall(
+            id=event.call_id,
+            name=self.tool_names_by_id.get(event.call_id, ""),
+            arguments={},
+        )
         self.emit(
-            events.tool_input_delta(
-                self._current_step_index(),
-                ToolCall(
-                    id=event.call_id,
-                    name=self.tool_names_by_id.get(event.call_id, ""),
-                    arguments={},
-                ),
-                event.delta,
+            AgentEvent(
+                type="tool_input_delta",
+                step_index=step_index,
+                message=f"第 {step_index} 步正在流式生成工具 {tool_call.name} 的输入。",
+                tool_call=tool_call,
+                delta=event.delta,
             )
         )
 
@@ -410,12 +427,18 @@ class ZonixEventRecorder:
         self.tool_calls_by_id[event.call_id] = tool_call
         if not any(existing.id == event.call_id for existing in pending.tool_calls):
             pending.tool_calls.append(tool_call)
+        parallel = len(pending.tool_calls) > 1
         self.emit(
-            events.tool_call_started(
+            AgentEvent(
+                type="tool_call",
                 step_index=pending.index,
-                step_thought=pending.thought,
+                message=(
+                    f"第 {pending.index} 步准备并行调用工具 {tool_call.name}。"
+                    if parallel
+                    else f"第 {pending.index} 步准备调用工具 {tool_call.name}。"
+                ),
+                thought=pending.thought,
                 tool_call=tool_call,
-                parallel=len(pending.tool_calls) > 1,
             )
         )
 
@@ -434,7 +457,15 @@ class ZonixEventRecorder:
         tool_result = _tool_result_from_output(tool_call, event.output)
         self.state.add_tool_result(tool_result)
         pending.tool_results.append(tool_result)
-        self.emit(events.tool_result_ready(pending.index, tool_call, tool_result))
+        self.emit(
+            AgentEvent(
+                type="tool_result",
+                step_index=pending.index,
+                message=f"第 {pending.index} 步工具 {tool_call.name} 已返回结果。",
+                tool_call=tool_call,
+                tool_result=tool_result,
+            )
+        )
         if _requires_user_confirmation(tool_result):
             self.paused = True
         if len(pending.tool_results) >= len(pending.tool_calls):
@@ -446,7 +477,14 @@ class ZonixEventRecorder:
             return
         thought = self.thought_by_step.get(pending.index, pending.thought)
         if thought:
-            self.emit(events.thought(pending.index, thought))
+            self.emit(
+                AgentEvent(
+                    type="thought",
+                    step_index=pending.index,
+                    message=f"第 {pending.index} 步正在思考。",
+                    thought=thought,
+                )
+            )
         step_record = StepRecord(
             turn_index=pending.turn_index,
             index=pending.index,
@@ -475,7 +513,14 @@ class ZonixEventRecorder:
         step_index = self.next_step_index
         usage_payload = _usage_payload(usage)
         if any(usage_payload.values()):
-            self.emit(events.usage(step_index, usage_payload))
+            self.emit(
+                AgentEvent(
+                    type="usage",
+                    step_index=step_index,
+                    message=f"第 {step_index} 步已更新模型 usage。",
+                    usage=usage_payload,
+                )
+            )
         thought = self.thought_by_step.get(step_index, "")
         step_record = StepRecord(
             turn_index=self.turn_index,
@@ -485,8 +530,23 @@ class ZonixEventRecorder:
         )
         self.steps.append(step_record)
         self.history_steps.append(step_record)
-        self.emit(events.final(step_index, thought, final_output))
-        self.emit(events.turn_finished(step_index, final_output))
+        self.emit(
+            AgentEvent(
+                type="final",
+                step_index=step_index,
+                message="本轮已得到最终答案。",
+                thought=thought,
+                final_answer=final_output,
+            )
+        )
+        self.emit(
+            AgentEvent(
+                type="turn_finished",
+                step_index=step_index,
+                message="本轮处理完成。",
+                final_answer=final_output,
+            )
+        )
         self.finished = True
 
 
@@ -591,19 +651,9 @@ def _zonix_tool_result_content(tool_result: ToolResult) -> str:
     return output if isinstance(output, str) else json.dumps(output, ensure_ascii=False)
 
 
-def _current_turn_tool_messages_from_state(state: AgentState) -> list[ZonixMessage]:
-    turn_index = state.data.get("turn_index")
-    if turn_index is None:
-        return []
-    raw_steps = state.data.get("step_records", [])
-    if not isinstance(raw_steps, list):
-        return []
-
+def _tool_messages_from_steps(steps: list[StepRecord]) -> list[ZonixMessage]:
     messages: list[ZonixMessage] = []
-    for step in raw_steps:
-        if not isinstance(step, StepRecord) or step.turn_index != turn_index:
-            continue
-
+    for step in steps:
         tool_calls = step.tool_calls or ([step.tool_call] if step.tool_call is not None else [])
         tool_calls = [tool_call for tool_call in tool_calls if tool_call is not None]
         if not tool_calls:
@@ -660,6 +710,13 @@ def _current_turn_tool_messages_from_state(state: AgentState) -> list[ZonixMessa
     return messages
 
 
+def _tool_steps_by_turn_from_state(state: AgentState) -> dict[int, list[StepRecord]]:
+    steps_by_turn: dict[int, list[StepRecord]] = {}
+    for step in state.step_records:
+        steps_by_turn.setdefault(step.turn_index, []).append(step)
+    return steps_by_turn
+
+
 def _zonix_message_history_from_state(
     state: AgentState,
     *,
@@ -667,34 +724,57 @@ def _zonix_message_history_from_state(
     omit_current_input: bool = True,
 ) -> list[ZonixMessage]:
     current_input = state.current_input.strip()
+    current_turn_index = state.turn_index or None
+    steps_by_turn = _tool_steps_by_turn_from_state(state)
+    emitted_tool_turns: set[int] = set()
+    conversation_turn_index = 0
     messages: list[ZonixMessage] = []
+
+    def append_tool_messages_for_turn(turn_index: int) -> None:
+        if turn_index in emitted_tool_turns:
+            return
+        if current_turn_index is not None and turn_index > current_turn_index:
+            return
+        if current_turn_index is not None and turn_index == current_turn_index and not include_current_turn_tools:
+            return
+        turn_steps = steps_by_turn.get(turn_index, [])
+        if not turn_steps:
+            return
+        messages.extend(_tool_messages_from_steps(turn_steps))
+        emitted_tool_turns.add(turn_index)
+
     for message in state.conversation_messages:
         role = str(getattr(message, "role", "")).strip()
         content = str(getattr(message, "content", "") or "").strip()
         attachments = _normalize_image_attachments(getattr(message, "attachments", None))
         if role not in {"user", "assistant"} or (not content and not attachments):
             continue
-        data: dict[str, Any] = {}
-        reasoning_content = str(getattr(message, "reasoning_content", "") or "").strip()
-        if role == "assistant" and reasoning_content:
-            data["reasoning_content"] = reasoning_content
+        if role == "user":
+            conversation_turn_index += 1
+
+        should_omit_message = (
+            omit_current_input
+            and role == "user"
+            and current_turn_index is not None
+            and conversation_turn_index == current_turn_index
+            and current_input
+            and content_text(_zonix_content_from_text_and_attachments(content, attachments)).strip() == current_input
+        )
+        if should_omit_message:
+            continue
+
         messages.append(
             ZonixMessage(
                 role=role,
                 content=_zonix_content_from_text_and_attachments(content, attachments),
-                data=data,
             )
         )
-    if (
-        omit_current_input and
-        messages
-        and messages[-1].role == "user"
-        and current_input
-        and content_text(messages[-1].content).strip() == current_input
-    ):
-        messages = messages[:-1]
-    if include_current_turn_tools:
-        messages.extend(_current_turn_tool_messages_from_state(state))
+
+        if role == "user":
+            append_tool_messages_for_turn(conversation_turn_index)
+
+    for turn_index in sorted(steps_by_turn):
+        append_tool_messages_for_turn(turn_index)
     return messages
 
 

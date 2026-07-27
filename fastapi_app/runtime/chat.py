@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import unquote_to_bytes
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 
 from agent import AgentEvent
@@ -25,8 +25,8 @@ from fastapi_app.code_changes import (
     capture_code_change_before_snapshots,
     code_change_records_from_tool_result,
     current_agent_turn_index,
+    ensure_code_change_baseline,
     file_tree_changed_paths_from_tool_result,
-    record_code_change,
 )
 from fastapi_app.session_history import (
     append_assistant_part_delta,
@@ -40,6 +40,7 @@ from fastapi_app.session_history import (
     record_confirmation_result_for_agent,
     replace_assistant_text_part,
     seed_chat_session_history,
+    stamp_assistant_first_token_latency,
     sync_assistant_message_fields,
     update_assistant_history_message,
     update_assistant_tool_call,
@@ -70,6 +71,10 @@ UI_MESSAGE_STREAM_HEADERS = {
 }
 
 MAX_CHAT_ATTACHMENTS = 8
+
+
+class SessionExecutionCancelled(RuntimeError):
+    """Raised inside the model event chain to stop the active session run."""
 
 
 def _data_url_media_type(data_url: str) -> str:
@@ -189,16 +194,14 @@ def _normalize_chat_attachments(request: ChatStreamRequest) -> list[dict[str, An
 @dataclass(frozen=True)
 class ChatRuntimeDeps:
     app_data_root: Path
-    require_session: Callable[[str], Any]
+    session_registry: Any
     normalize_execution_mode: Callable[[str | None], str]
     move_session_to_worktree: Callable[[Any], None]
     normalize_agent_type: Callable[[str | None], str]
     route_session_for_user_message: Callable[..., None]
     update_plan_state: Callable[..., None]
-    stop_session_execution: Callable[[Any], Any]
     reset_phase_for_new_turn: Callable[[Any], None]
     sync_session_runtime_state_for_agent: Callable[[Any], None]
-    set_session_generating: Callable[[Any, bool], None]
     build_session_state_payload: Callable[[Any], dict[str, Any]]
     merge_session_token_usage: Callable[[Any, dict[str, int] | None], None]
     set_session_phase: Callable[[Any, str], None]
@@ -246,7 +249,7 @@ async def run_agent_stream(
             visible_user_message,
             attachments=attachments,
         )
-    deps.set_session_generating(session, True)
+    deps.session_registry.set_session_generating(session, True)
 
     await queue.put(
         {
@@ -534,7 +537,10 @@ async def run_agent_stream(
                     next_parts.append(part)
             if not replaced:
                 next_parts.append({"type": "tool_call", "toolCall": tool_record})
-            return {**message, "parts": next_parts}
+            next_message = {**message, "parts": next_parts}
+            if str(tool_record.get("state") or "") == "running" and tool_record.get("output") is None:
+                return stamp_assistant_first_token_latency(next_message)
+            return next_message
 
         _sync_subagent_message(event_payload, _updater)
 
@@ -724,7 +730,7 @@ async def run_agent_stream(
         nonlocal streamed_assistant_text, assistant_stream_started
 
         if session.cancel_event.is_set():
-            return
+            raise SessionExecutionCancelled("会话已取消")
         _stamp_assistant_turn_index()
 
         if event.type == "thought_delta" and event.delta:
@@ -959,24 +965,12 @@ async def run_agent_stream(
                     if filename:
                         try:
                             target = Path(normalize_relative_path(filename, session.workspace))
-                            before_text = read_text_file(str(target), session.workspace)
+                            ensure_code_change_baseline(session)
                             output = delete_file_in_workspace(filename, resolve_workspace_path(session.workspace))
                             session.mark_file_tree_dirty(paths=[target])
                             file_tree_marked_for_tool_result = True
                             if session.selected_file_path == normalize_relative_path(filename, session.workspace):
                                 session.selected_file_path = None
-                            record_code_change(
-                                session,
-                                action="deleted",
-                                path=target,
-                                before_text=before_text,
-                                after_text="",
-                                source="agent",
-                                tool_call_id=tool_id,
-                                assistant_id=assistant_id or None,
-                                turn_index=current_agent_turn_index(session),
-                                step_index=event.step_index,
-                            )
                         except Exception:
                             pass
                     record_confirmation_result_for_agent(session, f"[自动确认] delete_file 已自动执行：{filename}")
@@ -1008,11 +1002,8 @@ async def run_agent_stream(
             )
             if event.tool_result.name in {
                 "execute",
-                "excecute",
                 "run_command",
                 "start_task",
-                "terminal_input",
-                "terminal_wait",
                 "task_input",
                 "task_wait",
                 "task_stop",
@@ -1030,6 +1021,7 @@ async def run_agent_stream(
                         output=output,
                     )
                     session.mark_file_tree_dirty(paths=changed_paths or None)
+                    file_tree_marked_for_tool_result = True
             if event.tool_result.name == "open_browser" and preview_url is not None:
                 session.preview_url = preview_url
             tool_state = (
@@ -1090,7 +1082,7 @@ async def run_agent_stream(
                     )
                     or None,
                 }
-                if tool_name in {"execute", "excecute", "run_command"}:
+                if tool_name in {"execute", "run_command"}:
                     deploy_updates["last_exit_code"] = exit_code
                     if exit_code is not None and exit_code != 0:
                         deploy_updates["last_error"] = f"命令退出码为 {exit_code}"
@@ -1120,7 +1112,7 @@ async def run_agent_stream(
                         deps.set_session_phase(session, "exploring")
                     elif tool_name == "transfer_files":
                         deps.set_session_phase(session, "connected")
-                    elif tool_name in {"execute", "excecute", "run_command"}:
+                    elif tool_name in {"execute", "run_command"}:
                         deps.set_session_phase(session, "failed" if exit_code not in (None, 0) else "verifying")
                     elif tool_name == "connect":
                         deps.set_session_phase(session, "connected")
@@ -1187,6 +1179,14 @@ async def run_agent_stream(
                     step_index=event.step_index,
                     before_snapshots=before_snapshots,
                 )
+                if code_change_records and not file_tree_marked_for_tool_result:
+                    changed_paths = [
+                        Path(normalize_relative_path(str(record.get("path") or ""), session.workspace))
+                        for record in code_change_records
+                        if str(record.get("path") or "").strip()
+                    ]
+                    session.mark_file_tree_dirty(paths=changed_paths or None)
+                    file_tree_marked_for_tool_result = True
                 for record in code_change_records:
                     loop.call_soon_threadsafe(
                         queue.put_nowait,
@@ -1284,6 +1284,22 @@ async def run_agent_stream(
                 on_event,
                 attachments,
             )
+    except SessionExecutionCancelled:
+        if session.agent_type == "deploy":
+            deps.reset_phase_for_new_turn(session)
+            deps.update_deploy_state(
+                session,
+                pending_tool_id=None,
+                pending_tool_name=None,
+                pending_input_kind=None,
+                last_message="用户已停止当前任务。",
+            )
+        elif session.agent_type == "plan":
+            deps.reset_phase_for_new_turn(session)
+        deps.session_registry.set_session_generating(session, False)
+        await queue.put(_session_state_event())
+        await queue.put(None)
+        return
     except Exception as exc:  # noqa: BLE001 - 流式接口需要兜底，避免 SSE 半路中断
         _mark_latest_tool_failed(str(exc))
         if session.agent_type == "deploy":
@@ -1341,7 +1357,7 @@ async def run_agent_stream(
         replace_assistant_text_part(session, assistant_id, persisted_failure_content.strip())
         if session.chat_session is not None:
             seed_chat_session_history(session.chat_session, session.history_messages, session.history_tools)
-        deps.set_session_generating(session, False)
+        deps.session_registry.set_session_generating(session, False)
         await queue.put({"type": "assistant_done", "payload": {"id": assistant_id}})
         await queue.put(None)
         return
@@ -1368,7 +1384,7 @@ async def run_agent_stream(
             )
         elif session.agent_type == "plan":
             deps.reset_phase_for_new_turn(session)
-        deps.set_session_generating(session, False)
+        deps.session_registry.set_session_generating(session, False)
         await queue.put(_session_state_event())
         await queue.put(None)
         return
@@ -1432,7 +1448,43 @@ async def run_agent_stream(
 
     await queue.put({"type": "assistant_done", "payload": {"id": assistant_id}})
     await queue.put(None)
-    deps.set_session_generating(session, False)
+    deps.session_registry.set_session_generating(session, False)
+
+
+async def _stream_ui_messages(
+    queue: asyncio.Queue[dict[str, Any] | None],
+    producer: asyncio.Task[None],
+    session: Any,
+    deps: ChatRuntimeDeps,
+):
+    adapter = UIMessageStreamAdapter()
+    finished = False
+    try:
+        while True:
+            event = await queue.get()
+            if event is None:
+                break
+            for part in adapter.convert(event):
+                if part.get("type") == "finish":
+                    finished = True
+                yield sse_data(part)
+                if part.get("type") == "tool-input-delta":
+                    await asyncio.sleep(0.01)
+
+        if not finished:
+            for part in adapter.finish_if_needed():
+                yield sse_data(part)
+        yield sse_data("[DONE]")
+    except asyncio.CancelledError:
+        deps.session_registry.stop_session_execution(session)
+        raise
+    finally:
+        if producer.done():
+            await producer
+        else:
+            producer.cancel()
+            with suppress(asyncio.CancelledError):
+                await producer
 
 
 async def run_demo_stream(
@@ -1442,7 +1494,7 @@ async def run_demo_stream(
     deps: ChatRuntimeDeps,
 ) -> None:
     assistant_id = uuid.uuid4().hex
-    deps.set_session_generating(session, True)
+    deps.session_registry.set_session_generating(session, True)
     await queue.put(
         {
             "type": "assistant_started",
@@ -1517,6 +1569,10 @@ async def run_demo_stream(
     ]
 
     for event_type, payload in demo_events:
+        if session.cancel_event.is_set():
+            deps.session_registry.set_session_generating(session, False)
+            await queue.put(None)
+            return
         if event_type == "thought":
             thought_text = str(payload["thought"])
             session.thoughts.append(thought_text)
@@ -1593,7 +1649,7 @@ async def run_demo_stream(
     await queue.put({"type": "plan_steps", "payload": {"steps": session.plan_steps}})
     await queue.put({"type": "assistant_done", "payload": {"id": assistant_id}})
     await queue.put(None)
-    deps.set_session_generating(session, False)
+    deps.session_registry.set_session_generating(session, False)
 
 
 def register_chat_routes(
@@ -1602,11 +1658,8 @@ def register_chat_routes(
     deps: ChatRuntimeDeps,
 ) -> None:
     @app.post("/api/chat/stream")
-    async def chat_stream(
-        request: ChatStreamRequest,
-        protocol: str = Query("ui-message"),
-    ) -> StreamingResponse:
-        session = deps.require_session(request.session_id)
+    async def chat_stream(request: ChatStreamRequest) -> StreamingResponse:
+        session = deps.session_registry.require_session(request.session_id)
         session.cancel_event.clear()
         requested_execution_mode = deps.normalize_execution_mode(request.execution_mode)
         if requested_execution_mode == "worktree" and session.execution_mode != "worktree":
@@ -1650,8 +1703,6 @@ def register_chat_routes(
 
         async def event_generator():
             queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
-            ui_adapter = UIMessageStreamAdapter()
-            ui_finished = False
             user_message_id = uuid.uuid4().hex
             await queue.put(
                 {
@@ -1687,44 +1738,8 @@ def register_chat_routes(
                 )
             )
 
-            try:
-                while True:
-                    event = await queue.get()
-                    if event is None:
-                        break
-                    if protocol == "legacy":
-                        yield sse_data(event)
-                        continue
-
-                    for part in ui_adapter.convert(event):
-                        if part.get("type") == "finish":
-                            ui_finished = True
-                        yield sse_data(part)
-                        if part.get("type") == "tool-input-delta":
-                            await asyncio.sleep(0.01)
-
-                if protocol != "legacy" and not ui_finished:
-                    for part in ui_adapter.finish_if_needed():
-                        yield sse_data(part)
-                if protocol != "legacy":
-                    yield sse_data("[DONE]")
-            except asyncio.CancelledError:
-                deps.stop_session_execution(session)
-                raise
-            finally:
-                if producer.done():
-                    await producer
-                else:
-                    producer.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await producer
-
-        if protocol == "legacy":
-            return StreamingResponse(
-                event_generator(),
-                media_type="text/event-stream",
-                headers=STREAM_RESPONSE_HEADERS,
-            )
+            async for chunk in _stream_ui_messages(queue, producer, session, deps):
+                yield chunk
 
         return StreamingResponse(
             event_generator(),
@@ -1733,11 +1748,8 @@ def register_chat_routes(
         )
 
     @app.post("/api/chat/continue")
-    async def chat_continue(
-        request: ContinueChatStreamRequest,
-        protocol: str = Query("ui-message"),
-    ) -> StreamingResponse:
-        session = deps.require_session(request.session_id)
+    async def chat_continue(request: ContinueChatStreamRequest) -> StreamingResponse:
+        session = deps.session_registry.require_session(request.session_id)
         if session.chat_session is None:
             raise HTTPException(status_code=409, detail="当前会话不支持 continue")
         session.cancel_event.clear()
@@ -1747,51 +1759,11 @@ def register_chat_routes(
 
         async def event_generator():
             queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
-            ui_adapter = UIMessageStreamAdapter()
-            ui_finished = False
-
             producer = asyncio.create_task(
                 run_agent_stream(session, None, queue, deps, assistant_id=assistant_id, resume_existing_turn=True)
             )
-
-            try:
-                while True:
-                    event = await queue.get()
-                    if event is None:
-                        break
-                    if protocol == "legacy":
-                        yield sse_data(event)
-                        continue
-
-                    for part in ui_adapter.convert(event):
-                        if part.get("type") == "finish":
-                            ui_finished = True
-                        yield sse_data(part)
-                        if part.get("type") == "tool-input-delta":
-                            await asyncio.sleep(0.01)
-
-                if protocol != "legacy" and not ui_finished:
-                    for part in ui_adapter.finish_if_needed():
-                        yield sse_data(part)
-                if protocol != "legacy":
-                    yield sse_data("[DONE]")
-            except asyncio.CancelledError:
-                deps.stop_session_execution(session)
-                raise
-            finally:
-                if producer.done():
-                    await producer
-                else:
-                    producer.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await producer
-
-        if protocol == "legacy":
-            return StreamingResponse(
-                event_generator(),
-                media_type="text/event-stream",
-                headers=STREAM_RESPONSE_HEADERS,
-            )
+            async for chunk in _stream_ui_messages(queue, producer, session, deps):
+                yield chunk
 
         return StreamingResponse(
             event_generator(),

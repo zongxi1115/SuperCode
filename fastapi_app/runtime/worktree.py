@@ -26,20 +26,17 @@ class WorktreeSessionLocation:
 
 @dataclass(frozen=True)
 class WorktreeRuntimeDeps:
+    session_registry: Any
     hidden_windows_process_kwargs: Callable[[], dict[str, Any]]
     build_chat_session: Callable[..., tuple[Any, str, str | None, str | None, str | None, int | None]]
     rebuild_chat_session_for_agent_type: Callable[[Any, str], None]
     attach_agent_runtime_metadata: Callable[..., None]
     refresh_session_runtime_state: Callable[[Any], None]
     sync_session_runtime_state_for_agent: Callable[[Any], None]
-    persist_session_state: Callable[[Any], None]
-    stop_session_execution: Callable[[Any], list[dict[str, Any]]]
     set_session_phase: Callable[[Any, str], None]
     invalidate_session_context_usage: Callable[[Any], None]
     interactive_command_session_factory: Callable[[str], Any]
     default_browser_preview_url: str
-    session_factory: Callable[..., Any]
-    register_session: Callable[[Any], None]
 
 
 def normalize_execution_mode(raw_mode: str | None) -> str:
@@ -168,7 +165,7 @@ def move_session_to_worktree(session: Any, *, deps: WorktreeRuntimeDeps) -> None
     )
     deploy_connection_manager = clone_deploy_connection_manager(session, location.workspace)
 
-    deps.stop_session_execution(session)
+    deps.session_registry.stop_session_execution(session)
     for runtime in session.terminal_runtimes.values():
         runtime.close()
     if session.interactive_command_session is not None:
@@ -253,7 +250,7 @@ def rebuild_chat_session_for_existing_history(
         else set(),
     )
     interactive_command_session = deps.interactive_command_session_factory(workspace)
-    session = deps.session_factory(
+    session = deps.session_registry.session_factory(
         session_id=session_id,
         model=model_name if chat_session is not None else "Demo",
         reasoning_effort=resolved_reasoning_effort if chat_session is not None else reasoning_effort,
@@ -350,8 +347,8 @@ def fork_session_from_current(session: Any, *, deps: WorktreeRuntimeDeps) -> Any
     forked_session.updated_at = forked_session.created_at
     deps.refresh_session_runtime_state(forked_session)
     deps.sync_session_runtime_state_for_agent(forked_session)
-    deps.register_session(forked_session)
-    deps.persist_session_state(forked_session)
+    deps.session_registry.register(forked_session)
+    deps.session_registry.persist_session_state(forked_session)
     return forked_session
 
 
