@@ -54,7 +54,7 @@ type MentionAttrs = {
   kind: MentionKind;
 };
 
-const COMPOSER_MIN_HEIGHT = 80;
+const COMPOSER_MIN_HEIGHT = 52;
 const COMPOSER_MAX_HEIGHT = 220;
 
 const MENTION_KIND_ICON_COLORS: Record<MentionKind, string> = {
@@ -515,7 +515,7 @@ export function ChatComposerEditor({
         },
         attributes: {
           class:
-            "min-h-[80px] whitespace-pre-wrap break-words bg-transparent px-1 py-1.5 text-sm leading-6 text-foreground outline-none [word-break:break-word]",
+            "min-h-[52px] whitespace-pre-wrap break-words bg-transparent px-1.5 py-1 text-[13.5px] leading-6 text-foreground outline-none [word-break:break-word]",
         },
       },
       onCreate({ editor: createdEditor }) {
@@ -617,8 +617,8 @@ export function ChatComposerEditor({
   return (
     <div ref={anchorRef} className="relative">
       {!value && (
-        <div className="pointer-events-none absolute inset-x-1 top-1.5 text-sm leading-6 text-muted-foreground">
-          告诉我想实现什么，输入 @ 可快速引用技能、工作区、文件或页面元素...
+        <div className="pointer-events-none absolute inset-x-1.5 top-1 select-none text-[13.5px] leading-6 text-muted-foreground/75 dark:text-zinc-400">
+          Ask anything, @ to mention, / for actions...
         </div>
       )}
 

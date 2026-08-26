@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
 import { ChatPanel } from '@/components/app/chat-panel';
 import { EditorPanel, type CodeSelectionContext, type PlanData } from '@/components/app/editor-panel';
 import type { Annotation } from '@/components/app/plan-rich-text-editor';
@@ -64,7 +64,7 @@ import {
 } from '@/lib/plan-draft';
 import { apiFetch, apiUrl, openExternalUrl } from '@/lib/api-client';
 
-import { Info, Minus, Moon, PanelRightOpen, PanelRightClose, Settings2, Square, Sun, X } from 'lucide-react';
+import { Check, ChevronDown, Copy, FileCode, Folder, Info, Minus, Moon, PanelRightOpen, PanelRightClose, Settings2, Square, Sun, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { message as appMessage } from '@/components/ui/message';
@@ -763,6 +763,7 @@ export default function App() {
   const [isRightPanelCollapsed, setIsRightPanelCollapsed] = useState(!initialUrlState.isEditorOpen);
   const [sidebarWidth, setSidebarWidth] = useState(280);
   const [isSidebarResizing, setIsSidebarResizing] = useState(false);
+  const [isPathCopied, setIsPathCopied] = useState(false);
   const [isGitPanelOpen, setIsGitPanelOpen] = useState(initialUrlState.isGitPanelOpen);
   const [isContextOpen, setIsContextOpen] = useState(initialUrlState.isContextOpen);
   const [isContextLoading, setIsContextLoading] = useState(false);
@@ -1372,6 +1373,26 @@ export default function App() {
     const lastSession = getLastSession();
     return lastSession?.workspace ?? '';
   });
+
+  const fullActivePath = useMemo(() => {
+    if (!selectedWorkspace) return '';
+    if (!selectedFilePath) return selectedWorkspace;
+    if (selectedFilePath.startsWith('/') || selectedFilePath.includes(':')) {
+      return selectedFilePath;
+    }
+    const cleanWs = selectedWorkspace.replace(/\\/g, '/');
+    const cleanFile = selectedFilePath.replace(/\\/g, '/');
+    return `${cleanWs}/${cleanFile}`;
+  }, [selectedWorkspace, selectedFilePath]);
+
+  const displayBreadcrumb = useMemo(() => {
+    const wsName = getPathLeaf(selectedWorkspace) || selectedWorkspace;
+    if (!selectedFilePath) {
+      return selectedWorkspace;
+    }
+    const cleanFile = selectedFilePath.replace(/\\/g, '/');
+    return `${wsName} › ${cleanFile}`;
+  }, [selectedWorkspace, selectedFilePath]);
 
   const loadModels = useCallback(async () => {
     const res = await apiFetch('/api/models');
@@ -4357,71 +4378,145 @@ export default function App() {
       ) : (
     <div className="flex flex-col h-screen bg-background text-foreground font-sans w-full overflow-hidden text-[var(--app-body-font-size)] leading-[var(--app-body-line-height)]">
       <header
-        className="relative flex items-center h-10 px-3 border-b bg-muted/30 flex-shrink-0 gap-2"
+        className="relative flex items-center justify-between h-10 px-3 border-b bg-background/90 backdrop-blur-md border-black/[0.08] dark:border-white/[0.08] flex-shrink-0 select-none z-10"
         {...(window.__TAURI__ ? { 'data-tauri-drag-region': '' } : {})}
       >
-        <div className="flex items-center gap-2 select-none">
-          <img src="/supercode-logo.svg" alt="SuperCode" className="h-5 w-5 rounded-[4px]" />
-          <span className="text-sm font-bold tracking-tight">Super Code</span>
+        <div className="flex items-center gap-2 select-none shrink-0">
+          <img src="/supercode-logo.svg" alt="SuperCode" className="h-5 w-5 rounded-[5px] shadow-2xs" />
+          <span className="text-[13px] font-semibold tracking-tight text-foreground/90">SuperCode</span>
         </div>
-        <div className="flex-1 min-w-0" />
-        <div className="absolute left-1/2 -translate-x-1/2 flex max-w-[420px] items-center gap-2 text-[11px] text-muted-foreground">
-          {currentSessionExecutionMode === 'worktree' ? (
-            <span className="shrink-0 rounded border border-primary/20 bg-primary/10 px-1.5 py-0.5 text-primary">
-              Worktree{currentWorktreeBranch ? ` · ${currentWorktreeBranch.replace('supercode/session-', '')}` : ''}
+
+        {/* VS Code 风格居中命令/路径中心（Command Center & Breadcrumb） */}
+        <div className="absolute left-1/2 -translate-x-1/2 flex items-center max-w-[560px] w-full min-w-[280px] h-7.5 px-2.5 rounded-lg bg-black/[0.03] dark:bg-white/[0.05] border border-black/[0.08] dark:border-white/[0.08] text-xs transition-all shadow-2xs group hover:bg-black/[0.05] dark:hover:bg-white/[0.07]">
+          <button
+            type="button"
+            onClick={handleSelectOtherProject}
+            className="flex items-center gap-1.5 min-w-0 flex-1 text-left cursor-pointer overflow-hidden py-1"
+            title={`完整路径: ${fullActivePath}\n点击切换工作区`}
+          >
+            {selectedFilePath ? (
+              <FileCode className="w-3.5 h-3.5 text-muted-foreground/70 shrink-0" />
+            ) : (
+              <Folder className="w-3.5 h-3.5 text-muted-foreground/70 shrink-0" />
+            )}
+
+            {currentSessionExecutionMode === 'worktree' && (
+              <span className="shrink-0 rounded px-1.5 py-0.2 text-[9px] font-mono border border-blue-500/25 bg-blue-500/10 text-blue-600 dark:text-blue-400">
+                Worktree{currentWorktreeBranch ? ` · ${currentWorktreeBranch.replace('supercode/session-', '')}` : ''}
+              </span>
+            )}
+
+            <span className="truncate min-w-0 flex-1 font-mono text-[11px] text-foreground/80 group-hover:text-foreground transition-colors">
+              {displayBreadcrumb}
             </span>
-          ) : null}
-          <span className="truncate" title={selectedWorkspace}>
-            {currentSessionExecutionMode === 'worktree'
-              ? `${getPathLeaf(currentBaseWorkspace)} -> ${selectedWorkspace}`
-              : selectedWorkspace}
-          </span>
+          </button>
+
+          {/* 快速复制完整路径按钮 */}
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              navigator.clipboard.writeText(fullActivePath).then(() => {
+                setIsPathCopied(true);
+                appMessage.success(`已复制完整路径: ${fullActivePath}`);
+                setTimeout(() => setIsPathCopied(false), 2000);
+              }).catch(() => {
+                appMessage.error('复制路径失败');
+              });
+            }}
+            className="shrink-0 p-1 ml-1 rounded-md text-muted-foreground/50 hover:text-foreground hover:bg-black/[0.06] dark:hover:bg-white/[0.1] transition-all"
+            title={isPathCopied ? '已复制' : `复制完整路径 (${fullActivePath})`}
+          >
+            {isPathCopied ? (
+              <Check className="w-3.5 h-3.5 text-emerald-500" />
+            ) : (
+              <Copy className="w-3.5 h-3.5" />
+            )}
+          </button>
         </div>
-        <Button
-          variant="ghost"
-          size="sm"
-          className="h-7 gap-2 rounded-full px-3 text-xs"
-          onClick={() => {
-            void loadModelConfigs()
-              .catch((error) => {
-                console.error(error);
-                appMessage.error(getErrorMessage(error, '加载设置失败'));
-              })
-              .finally(() => setIsModelConfigOpen(true));
-          }}
-          title="模型与供应商设置"
-        >
-          <Settings2 className="w-3.5 h-3.5" />
-          设置
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-7 w-7 rounded-full"
-          onClick={handleThemeToggle}
-          title={isDarkMode ? '切换到浅色模式' : '切换到深色模式'}
-        >
-          {isDarkMode ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
-        </Button>
-        <Button variant="ghost" size="icon" className="h-7 w-7 rounded-full" onClick={() => setIsAboutOpen(true)} title="关于">
-          <Info className="w-4 h-4" />
-        </Button>
-        <Button variant="ghost" size="icon" onClick={toggleRightPanel} className="h-7 w-7 ml-2" title={isRightPanelCollapsed ? '展开右侧面板' : '收起右侧面板'}>
-          {isRightPanelCollapsed ? <PanelRightOpen className="w-4 h-4" /> : <PanelRightClose className="w-4 h-4" />}
-        </Button>
-        {window.__TAURI__ && (
-          <div className="flex items-center ml-1">
-            <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md" title="最小化" onClick={() => window.__TAURI__?.core?.invoke('plugin:window|minimize').catch(() => {})}>
-              <Minus className="w-3.5 h-3.5" />
-            </Button>
-            <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md" title="最大化" onClick={() => window.__TAURI__?.core?.invoke('plugin:window|toggle_maximize').catch(() => {})}>
-              <Square className="w-3 h-3" />
-            </Button>
-            <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md hover:bg-destructive/80 hover:text-destructive-foreground" title="关闭" onClick={() => window.__TAURI__?.core?.invoke('plugin:window|close').catch(() => {})}>
-              <X className="w-4 h-4" />
-            </Button>
-          </div>
-        )}
+
+        {/* 右侧工具操作区 */}
+        <div className="flex items-center gap-1">
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7.5 gap-1.5 rounded-lg px-2.5 text-xs text-muted-foreground hover:text-foreground hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+            onClick={() => {
+              void loadModelConfigs()
+                .catch((error) => {
+                  console.error(error);
+                  appMessage.error(getErrorMessage(error, '加载设置失败'));
+                })
+                .finally(() => setIsModelConfigOpen(true));
+            }}
+            title="模型与供应商设置"
+          >
+            <Settings2 className="w-3.5 h-3.5" />
+            <span>设置</span>
+          </Button>
+
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7.5 w-7.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+            onClick={handleThemeToggle}
+            title={isDarkMode ? '切换到浅色模式' : '切换到深色模式'}
+          >
+            {isDarkMode ? <Sun className="w-3.5 h-3.5" /> : <Moon className="w-3.5 h-3.5" />}
+          </Button>
+
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7.5 w-7.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+            onClick={() => setIsAboutOpen(true)}
+            title="关于"
+          >
+            <Info className="w-3.5 h-3.5" />
+          </Button>
+
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={toggleRightPanel}
+            className="h-7.5 w-7.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+            title={isRightPanelCollapsed ? '展开编辑器/右侧面板' : '收起编辑器/右侧面板'}
+          >
+            {isRightPanelCollapsed ? <PanelRightOpen className="w-3.5 h-3.5" /> : <PanelRightClose className="w-3.5 h-3.5" />}
+          </Button>
+
+          {window.__TAURI__ && (
+            <div className="flex items-center ml-1.5 pl-1.5 border-l border-black/[0.08] dark:border-white/[0.08] gap-0.5">
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 rounded-md text-muted-foreground hover:text-foreground hover:bg-black/[0.05] dark:hover:bg-white/[0.06]"
+                title="最小化"
+                onClick={() => window.__TAURI__?.core?.invoke('plugin:window|minimize').catch(() => {})}
+              >
+                <Minus className="w-3.5 h-3.5" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 rounded-md text-muted-foreground hover:text-foreground hover:bg-black/[0.05] dark:hover:bg-white/[0.06]"
+                title="最大化"
+                onClick={() => window.__TAURI__?.core?.invoke('plugin:window|toggle_maximize').catch(() => {})}
+              >
+                <Square className="w-3 h-3" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 rounded-md text-muted-foreground hover:bg-destructive hover:text-destructive-foreground transition-colors"
+                title="关闭"
+                onClick={() => window.__TAURI__?.core?.invoke('plugin:window|close').catch(() => {})}
+              >
+                <X className="w-3.5 h-3.5" />
+              </Button>
+            </div>
+          )}
+        </div>
       </header>
       <div className="flex flex-1 min-h-0">
       <Sidebar

@@ -158,6 +158,7 @@ import type {
 } from "@/lib/app-types";
 import dragUploadImage from "@/assets/drag-upload.png";
 import {
+  ArrowRight,
   ChevronDown,
   ChevronRight,
   BarChart3Icon,
@@ -6331,28 +6332,66 @@ export function ChatPanel({
     isLoading,
   ]);
 
+  const hasInputContent = Boolean(
+    sessionId &&
+      (input.trim() ||
+        elementAttachments.length > 0 ||
+        attachmentFiles.length > 0),
+  );
+
   const composer = (
-    <div className="shrink-0 border-t bg-background">
+    <div className="shrink-0 bg-background/95 pb-3 pt-1 px-4">
       <div className={cn("mx-auto w-full", CHAT_CONTENT_MAX_WIDTH)}>
         <PlanToggle
           planSteps={planSteps}
           isStreaming={isLoading}
           onClose={onClosePlanSteps}
         />
-        <div className="p-3 pt-2">
-          <div className="flex flex-col rounded-lg border bg-muted/30 p-2 shadow-sm focus-within:ring-1 focus-within:ring-ring">
-            {attachmentFiles.length > 0 && (
-              <div className="flex flex-wrap gap-1.5 pb-2">
+
+        {/* Top subtle breadcrumb */}
+        <div className="flex items-center justify-between px-1 pb-1.5 text-xs text-muted-foreground/80 dark:text-zinc-400 select-none">
+          <div className="flex items-center gap-1.5">
+            <span className="flex items-center gap-1 hover:text-foreground dark:hover:text-zinc-200 transition-colors cursor-pointer text-[11.5px] font-medium">
+              <FolderOpenIcon className="size-3 text-muted-foreground/90 dark:text-zinc-400" />
+              <span>SuperCode</span>
+            </span>
+            <span className="text-muted-foreground/40 dark:text-zinc-600">/</span>
+            <span className="flex items-center gap-1 hover:text-foreground dark:hover:text-zinc-200 transition-colors cursor-pointer text-[11.5px]">
+              <GitBranch className="size-3 text-muted-foreground/90 dark:text-zinc-400" />
+              <span>main</span>
+            </span>
+          </div>
+        </div>
+
+        {/* Main sleek card container */}
+        <div
+          className={cn(
+            "group/composer relative flex flex-col rounded-xl border transition-all duration-150",
+            "bg-muted/40 dark:bg-[#1a1a1e] p-3",
+            "border-border dark:border-white/[0.14]",
+            isFocused
+              ? "border-primary/50 dark:border-white/30 shadow-xs"
+              : "hover:border-border dark:hover:border-white/[0.22]",
+          )}
+        >
+          {attachmentFiles.length > 0 && (
+            <div className="flex flex-wrap gap-1.5 pb-2">
+              <AnimatePresence mode="popLayout">
                 {attachmentFiles.map((file) => {
                   const isImage = file.mediaType?.startsWith("image/");
                   const fileIcon = getFileIcon(file.filename);
                   return (
-                    <div
+                    <motion.div
                       key={file.id}
-                      className="group relative flex items-center gap-2 rounded-md border border-border/50 bg-background/50 px-2 py-1 transition-colors hover:bg-accent/30"
+                      layout
+                      initial={{ opacity: 0, scale: 0.9, y: 4 }}
+                      animate={{ opacity: 1, scale: 1, y: 0 }}
+                      exit={{ opacity: 0, scale: 0.85, y: -4 }}
+                      transition={{ duration: 0.15 }}
+                      className="group relative flex items-center gap-2 rounded-md border border-border/70 bg-background/80 dark:bg-white/[0.06] px-2 py-1 transition-colors hover:bg-accent/60"
                     >
                       {isImage ? (
-                        <div className="size-6 shrink-0 overflow-hidden rounded-sm bg-muted">
+                        <div className="size-5 shrink-0 overflow-hidden rounded bg-muted">
                           <img
                             src={file.url}
                             alt={file.filename}
@@ -6360,9 +6399,9 @@ export function ChatPanel({
                           />
                         </div>
                       ) : (
-                        <div className="flex size-6 shrink-0 items-center justify-center rounded-sm bg-muted">
+                        <div className="flex size-5 shrink-0 items-center justify-center rounded bg-muted">
                           {fileIcon ? (
-                            <span style={{ color: fileIcon.color }} className="text-sm leading-none">{fileIcon.icon}</span>
+                            <span style={{ color: fileIcon.color }} className="text-xs leading-none">{fileIcon.icon}</span>
                           ) : (
                             <FileTextIcon className="size-3 text-muted-foreground" />
                           )}
@@ -6374,24 +6413,31 @@ export function ChatPanel({
                       <button
                         type="button"
                         onClick={() => handleRemoveAttachment(file.id)}
-                        className="flex size-4 shrink-0 items-center justify-center rounded-full opacity-0 transition-opacity group-hover:opacity-100 hover:bg-destructive/10"
+                        className="flex size-3.5 shrink-0 items-center justify-center rounded-full opacity-0 transition-opacity group-hover:opacity-100 hover:bg-destructive/15 text-muted-foreground hover:text-destructive"
                       >
-                        <XIcon className="size-2.5 text-muted-foreground hover:text-destructive" />
+                        <XIcon className="size-2.5" />
                       </button>
-                    </div>
+                    </motion.div>
                   );
                 })}
-              </div>
-            )}
+              </AnimatePresence>
+            </div>
+          )}
 
-            {elementAttachments.length > 0 && (
-              <div className="pb-2 flex flex-wrap gap-1.5">
+          {elementAttachments.length > 0 && (
+            <div className="pb-2 flex flex-wrap gap-1.5">
+              <AnimatePresence mode="popLayout">
                 {elementAttachments.map((el) => (
-                  <div
+                  <motion.div
                     key={el.id}
-                    className="group relative flex h-16 items-center gap-1.5 rounded-md border border-border px-1.5 py-1 transition-all hover:bg-accent/50"
+                    layout
+                    initial={{ opacity: 0, scale: 0.9, y: 4 }}
+                    animate={{ opacity: 1, scale: 1, y: 0 }}
+                    exit={{ opacity: 0, scale: 0.85, y: -4 }}
+                    transition={{ duration: 0.15 }}
+                    className="group relative flex h-14 items-center gap-1.5 rounded-lg border border-border/70 bg-background/80 dark:bg-white/[0.06] px-1.5 py-1 transition-colors hover:bg-accent/60"
                   >
-                    <div className="size-12 shrink-0 overflow-hidden rounded bg-white">
+                    <div className="size-11 shrink-0 overflow-hidden rounded bg-white">
                       <iframe
                         srcDoc={el.html}
                         title={el.selector}
@@ -6400,12 +6446,12 @@ export function ChatPanel({
                         style={{ width: "400%", height: "400%" }}
                       />
                     </div>
-                    <div className="flex flex-col gap-0.5 min-w-0 max-w-[140px]">
+                    <div className="flex flex-col gap-0.5 min-w-0 max-w-[130px]">
                       <span className="truncate text-[10px] font-mono text-muted-foreground leading-tight">
                         {el.selector}
                       </span>
                       {el.sourceUrl && (
-                        <span className="truncate text-[9px] text-muted-foreground/60 leading-tight">
+                        <span className="truncate text-[9px] text-muted-foreground/80 leading-tight">
                           {el.sourceUrl.replace(/^https?:\/\//, "")}
                         </span>
                       )}
@@ -6413,240 +6459,254 @@ export function ChatPanel({
                     <button
                       type="button"
                       onClick={() => onRemoveElementAttachment?.(el.id)}
-                      className="absolute -top-1.5 -right-1.5 flex size-4 shrink-0 items-center justify-center rounded-full bg-background border shadow-sm opacity-0 transition-opacity group-hover:opacity-100 hover:bg-destructive/10"
+                      className="absolute -top-1.5 -right-1.5 flex size-4 shrink-0 items-center justify-center rounded-full bg-background border shadow-xs opacity-0 transition-opacity group-hover:opacity-100 hover:bg-destructive/15 text-muted-foreground hover:text-destructive"
                     >
-                      <XIcon className="size-2.5 text-muted-foreground hover:text-destructive" />
+                      <XIcon className="size-2.5" />
                     </button>
-                  </div>
+                  </motion.div>
                 ))}
-              </div>
-            )}
-
-            <div
-              ref={composerRef}
-              className="relative"
-              onFocusCapture={() => setIsFocused(true)}
-              onBlurCapture={(event) => {
-                if (
-                  event.relatedTarget instanceof Node &&
-                  event.currentTarget.contains(event.relatedTarget)
-                ) {
-                  return;
-                }
-                setIsFocused(false);
-              }}
-            >
-              <ChatComposerEditor
-                value={input}
-                suggestions={mentionSuggestions}
-                focusRevision={composerFocusRevision}
-                onChange={onInputChange}
-                onSubmit={mainMessages.length === 0 ? handleEmptySend : submitMessage}
-                onFiles={handleAddFiles}
-              />
+              </AnimatePresence>
             </div>
-            <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2 border-t border-border/50 pt-2">
-              <div className="flex min-w-0 flex-wrap items-center gap-1">
-                <label
-                  className={cn(
-                    buttonVariants({ size: "icon-sm", variant: "ghost" }),
-                    "relative cursor-pointer overflow-hidden focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/50",
-                  )}
+          )}
+
+          <div
+            ref={composerRef}
+            className="relative"
+            onFocusCapture={() => setIsFocused(true)}
+            onBlurCapture={(event) => {
+              if (
+                event.relatedTarget instanceof Node &&
+                event.currentTarget.contains(event.relatedTarget)
+              ) {
+                return;
+              }
+              setIsFocused(false);
+            }}
+          >
+            <ChatComposerEditor
+              value={input}
+              suggestions={mentionSuggestions}
+              focusRevision={composerFocusRevision}
+              onChange={onInputChange}
+              onSubmit={mainMessages.length === 0 ? handleEmptySend : submitMessage}
+              onFiles={handleAddFiles}
+            />
+          </div>
+
+          {/* Minimalist Flat Bottom Bar */}
+          <div className="mt-2.5 flex items-center justify-between gap-2 border-t border-border/60 dark:border-white/[0.1] pt-2">
+            <div className="flex min-w-0 flex-wrap items-center gap-1 text-muted-foreground">
+              {/* Add attachment */}
+              <label
+                className="flex size-7 cursor-pointer items-center justify-center rounded-md text-foreground/75 dark:text-zinc-300 transition-colors hover:bg-muted dark:hover:bg-white/[0.1] hover:text-foreground"
+                aria-label="添加附件"
+                title="添加附件"
+              >
+                <PlusIcon className="size-4" />
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  className="sr-only"
+                  multiple
+                  onChange={handleFileInputChange}
                   aria-label="添加附件"
                   title="添加附件"
+                />
+              </label>
+
+              {/* Model Selector */}
+              <ModelSelector
+                open={isModelSelectorOpen}
+                onOpenChange={setIsModelSelectorOpen}
+              >
+                <ModelSelectorTrigger asChild>
+                  <button
+                    type="button"
+                    className="flex h-7 items-center gap-1.5 rounded-md px-2 text-xs font-medium text-foreground/85 dark:text-zinc-200 transition-colors hover:bg-muted dark:hover:bg-white/[0.1] hover:text-foreground cursor-pointer"
+                  >
+                    <ModelSelectorLogo
+                      provider={selectedModel?.provider ?? "openrouter"}
+                      model={selectedModel?.name}
+                      className="size-3.5"
+                    />
+                    <ModelSelectorName className="max-w-[140px] truncate text-[12px]">
+                      {selectedModel?.label ??
+                        selectedModel?.name ??
+                        "选择模型"}
+                    </ModelSelectorName>
+                    <ChevronDown className="size-3 text-muted-foreground/70 dark:text-zinc-400 ml-0.5" />
+                  </button>
+                </ModelSelectorTrigger>
+                <ModelSelectorContent title="选择模型">
+                  <ModelSelectorInput placeholder="搜索模型..." />
+                  <ModelSelectorList>
+                    <ModelSelectorEmpty>未找到模型</ModelSelectorEmpty>
+                    <ModelSelectorGroup heading="可用模型">
+                      {modelOptions.map((m) => (
+                        <ModelSelectorItem
+                          key={m.id}
+                          onSelect={() => {
+                            onModelChange(m.id);
+                            setIsModelSelectorOpen(false);
+                          }}
+                          className="min-h-12 gap-2 py-2"
+                        >
+                          <ModelSelectorLogo
+                            provider={m.provider}
+                            model={m.name}
+                            className="mt-0.5"
+                          />
+                          <div className="min-w-0 flex-1 text-left">
+                            <ModelSelectorName className="block">
+                              {m.label ?? m.name}
+                            </ModelSelectorName>
+                            <span className="block truncate text-[11px] leading-4 text-muted-foreground">
+                              上下文长度：{formatModelContextWindow(m.contextWindow)}
+                            </span>
+                          </div>
+                        </ModelSelectorItem>
+                      ))}
+                    </ModelSelectorGroup>
+                  </ModelSelectorList>
+                </ModelSelectorContent>
+              </ModelSelector>
+
+              <div className="h-3 w-px bg-border/80 dark:bg-white/[0.15] mx-0.5" />
+
+              {/* Agent Mode */}
+              <Select
+                value={agentMode}
+                onValueChange={(value) =>
+                  onAgentModeChange(value as AgentMode)
+                }
+              >
+                <SelectTrigger
+                  size="sm"
+                  className="h-7 min-w-[70px] max-w-full gap-1 border-0 bg-transparent px-2 text-[12px] font-medium text-foreground/80 dark:text-zinc-300 shadow-none hover:bg-muted dark:hover:bg-white/[0.1] hover:text-foreground rounded-md transition-colors"
+                  aria-label="选择智能体模式"
                 >
-                  <PaperclipIcon className="w-4 h-4" />
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
-                    multiple
-                    onChange={handleFileInputChange}
-                    aria-label="添加附件"
-                    title="添加附件"
+                  {agentMode === "super" ? (
+                    <SparklesIcon className="size-3 text-amber-500" />
+                  ) : (
+                    <Code2Icon className="size-3 text-blue-500" />
+                  )}
+                  <SelectValue placeholder="模式" />
+                </SelectTrigger>
+                <SelectContent align="start">
+                  <SelectItem value="auto">自动</SelectItem>
+                  <SelectItem value="chat">聊天</SelectItem>
+                  <SelectItem value="plan">计划</SelectItem>
+                  <SelectItem value="coding">编码</SelectItem>
+                  <SelectItem value="super">超能模式</SelectItem>
+                  <SelectItem value="deploy">部署</SelectItem>
+                </SelectContent>
+              </Select>
+
+              {/* Autopilot */}
+              {agentMode === "super" && (
+                <label className="flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] font-medium text-foreground/80 dark:text-zinc-300 hover:bg-muted dark:hover:bg-white/[0.1] transition-colors cursor-pointer">
+                  <BotIcon className="size-3 text-primary" />
+                  <span className="whitespace-nowrap">托管</span>
+                  <Switch
+                    size="sm"
+                    checked={superAutopilotEnabled}
+                    onCheckedChange={onSuperAutopilotChange}
+                    aria-label="一键托管"
                   />
                 </label>
-
-                <ModelSelector
-                  open={isModelSelectorOpen}
-                  onOpenChange={setIsModelSelectorOpen}
-                >
-                  <ModelSelectorTrigger asChild>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      className="h-7 gap-1.5 px-2 text-xs font-medium text-muted-foreground hover:text-foreground"
-                    >
-                      <ModelSelectorLogo
-                        provider={selectedModel?.provider ?? "openrouter"}
-                        model={selectedModel?.name}
-                      />
-                      <ModelSelectorName>
-                        {selectedModel?.label ??
-                          selectedModel?.name ??
-                          "选择模型"}
-                      </ModelSelectorName>
-                    </Button>
-                  </ModelSelectorTrigger>
-                  <ModelSelectorContent title="选择模型">
-                    <ModelSelectorInput placeholder="搜索模型..." />
-                    <ModelSelectorList>
-                      <ModelSelectorEmpty>未找到模型</ModelSelectorEmpty>
-                      <ModelSelectorGroup heading="可用模型">
-                        {modelOptions.map((m) => (
-                          <ModelSelectorItem
-                            key={m.id}
-                            onSelect={() => {
-                              onModelChange(m.id);
-                              setIsModelSelectorOpen(false);
-                            }}
-                            className="min-h-12 gap-2 py-2"
-                          >
-                            <ModelSelectorLogo
-                              provider={m.provider}
-                              model={m.name}
-                              className="mt-0.5"
-                            />
-                            <div className="min-w-0 flex-1 text-left">
-                              <ModelSelectorName className="block">
-                                {m.label ?? m.name}
-                              </ModelSelectorName>
-                              <span className="block truncate text-[11px] leading-4 text-muted-foreground">
-                                上下文长度：{formatModelContextWindow(m.contextWindow)}
-                              </span>
-                            </div>
-                          </ModelSelectorItem>
-                        ))}
-                      </ModelSelectorGroup>
-                    </ModelSelectorList>
-                  </ModelSelectorContent>
-                </ModelSelector>
-
-                <Select
-                  value={agentMode}
-                  onValueChange={(value) =>
-                    onAgentModeChange(value as AgentMode)
-                  }
-                >
-                  <SelectTrigger
-                    size="sm"
-                    className="h-7 min-w-[96px] max-w-full gap-1.5 border-0 px-2 text-xs text-muted-foreground shadow-none"
-                    aria-label="选择智能体模式"
-                  >
-                    {agentMode === "super" ? (
-                      <SparklesIcon className="size-3.5" />
-                    ) : (
-                      <Code2Icon className="size-3.5" />
-                    )}
-                    <SelectValue placeholder="模式" />
-                  </SelectTrigger>
-                  <SelectContent align="start">
-                    <SelectItem value="auto">自动</SelectItem>
-                    <SelectItem value="chat">聊天</SelectItem>
-                    <SelectItem value="plan">计划</SelectItem>
-                    <SelectItem value="coding">编码</SelectItem>
-                    <SelectItem value="super">超能模式</SelectItem>
-                    <SelectItem value="deploy">部署</SelectItem>
-                  </SelectContent>
-                </Select>
-
-                {agentMode === "super" && (
-                  <label className="flex h-7 items-center gap-1.5 rounded-md px-1.5 text-xs text-muted-foreground">
-                    <BotIcon className="size-3.5" />
-                    <span className="whitespace-nowrap">一键托管</span>
-                    <Switch
-                      size="sm"
-                      checked={superAutopilotEnabled}
-                      onCheckedChange={onSuperAutopilotChange}
-                      aria-label="一键托管"
-                    />
-                  </label>
-                )}
-
-                <Select
-                  value={executionMode}
-                  onValueChange={(value) =>
-                    onExecutionModeChange(value as SessionExecutionMode)
-                  }
-                >
-                  <SelectTrigger
-                    size="sm"
-                    className="h-7 min-w-[104px] max-w-full gap-1.5 border-0 px-2 text-xs text-muted-foreground shadow-none"
-                    aria-label="选择运行位置"
-                  >
-                    {executionMode === "worktree" ? (
-                      <GitBranch className="size-3.5" />
-                    ) : (
-                      <FolderOpenIcon className="size-3.5" />
-                    )}
-                    <SelectValue placeholder="运行位置" />
-                  </SelectTrigger>
-                  <SelectContent align="start">
-                    <SelectItem value="local">本地</SelectItem>
-                    <SelectItem value="worktree">工作树</SelectItem>
-                  </SelectContent>
-                </Select>
-
-                <Select
-                  value={selectedReasoningEffort}
-                  onValueChange={onReasoningEffortChange}
-                >
-                  <SelectTrigger
-                    size="sm"
-                    className="hidden h-7 min-w-[108px] max-w-full gap-1.5 border-0 px-2 text-xs text-muted-foreground shadow-none"
-                    aria-label="选择思考程度"
-                  >
-                    <LightbulbIcon className="size-3.5" />
-                    <SelectValue placeholder="思考程度" />
-                  </SelectTrigger>
-                  <SelectContent align="start">
-                    <SelectItem value="default">默认</SelectItem>
-                    <SelectItem value="none">不思考</SelectItem>
-                    <SelectItem value="minimal">极低</SelectItem>
-                    <SelectItem value="low">低</SelectItem>
-                    <SelectItem value="medium">中</SelectItem>
-                    <SelectItem value="high">高</SelectItem>
-                    <SelectItem value="xhigh">超高</SelectItem>
-                  </SelectContent>
-                </Select>
-
-                <ContextViewer
-                  contextData={contextData}
-                  codeChanges={codeChanges}
-                  isLoading={isContextLoading}
-                  onOpenChange={onContextOpenChange}
-                  open={isContextOpen}
-                />
-              </div>
-              {isLoading ? (
-                <Button
-                  size="icon"
-                  variant="destructive"
-                  onClick={onStopMessage}
-                  aria-label="终止生成"
-                  title="终止生成"
-                >
-                  <Square className="w-3.5 h-3.5 fill-current" />
-                </Button>
-              ) : (
-                <Button
-                  size="icon"
-                  onClick={
-                    mainMessages.length === 0 ? handleEmptySend : submitMessage
-                  }
-                  disabled={
-                    !sessionId ||
-                    (!input.trim() &&
-                      elementAttachments.length === 0 &&
-                      attachmentFiles.length === 0)
-                  }
-                  aria-label="发送消息"
-                  title="发送消息"
-                >
-                  <ChevronRight className="w-4 h-4" />
-                </Button>
               )}
+
+              {/* Execution Mode */}
+              <Select
+                value={executionMode}
+                onValueChange={(value) =>
+                  onExecutionModeChange(value as SessionExecutionMode)
+                }
+              >
+                <SelectTrigger
+                  size="sm"
+                  className="h-7 min-w-[72px] max-w-full gap-1 border-0 bg-transparent px-2 text-[12px] font-medium text-foreground/80 dark:text-zinc-300 shadow-none hover:bg-muted dark:hover:bg-white/[0.1] hover:text-foreground rounded-md transition-colors"
+                  aria-label="选择运行位置"
+                >
+                  {executionMode === "worktree" ? (
+                    <GitBranch className="size-3 text-emerald-500" />
+                  ) : (
+                    <FolderOpenIcon className="size-3 text-blue-400" />
+                  )}
+                  <SelectValue placeholder="运行位置" />
+                </SelectTrigger>
+                <SelectContent align="start">
+                  <SelectItem value="local">本地</SelectItem>
+                  <SelectItem value="worktree">工作树</SelectItem>
+                </SelectContent>
+              </Select>
+
+              <Select
+                value={selectedReasoningEffort}
+                onValueChange={onReasoningEffortChange}
+              >
+                <SelectTrigger
+                  size="sm"
+                  className="hidden h-7 min-w-[108px] max-w-full gap-1.5 border-0 px-2 text-xs text-muted-foreground shadow-none"
+                  aria-label="选择思考程度"
+                >
+                  <LightbulbIcon className="size-3.5" />
+                  <SelectValue placeholder="思考程度" />
+                </SelectTrigger>
+                <SelectContent align="start">
+                  <SelectItem value="default">默认</SelectItem>
+                  <SelectItem value="none">不思考</SelectItem>
+                  <SelectItem value="minimal">极低</SelectItem>
+                  <SelectItem value="low">低</SelectItem>
+                  <SelectItem value="medium">中</SelectItem>
+                  <SelectItem value="high">高</SelectItem>
+                  <SelectItem value="xhigh">超高</SelectItem>
+                </SelectContent>
+              </Select>
+
+              <ContextViewer
+                contextData={contextData}
+                codeChanges={codeChanges}
+                isLoading={isContextLoading}
+                onOpenChange={onContextOpenChange}
+                open={isContextOpen}
+              />
             </div>
+
+            {/* Right send / stop action button */}
+            {isLoading ? (
+              <motion.button
+                type="button"
+                key="stop-btn"
+                whileTap={{ scale: 0.92 }}
+                onClick={onStopMessage}
+                className="flex size-7.5 items-center justify-center rounded-full bg-white/[0.12] text-foreground hover:bg-destructive hover:text-destructive-foreground transition-colors cursor-pointer"
+                aria-label="终止生成"
+                title="终止生成"
+              >
+                <Square className="size-3 fill-current" />
+              </motion.button>
+            ) : (
+              <motion.button
+                type="button"
+                key="send-btn"
+                whileTap={hasInputContent ? { scale: 0.92 } : undefined}
+                onClick={
+                  mainMessages.length === 0 ? handleEmptySend : submitMessage
+                }
+                disabled={!hasInputContent}
+                className={cn(
+                  "flex size-7.5 items-center justify-center rounded-full transition-all duration-150",
+                  hasInputContent
+                    ? "bg-[#0a84ff] text-white shadow-xs hover:bg-[#0071e3] active:scale-95 cursor-pointer"
+                    : "bg-muted dark:bg-white/[0.08] text-muted-foreground/50 dark:text-zinc-500 cursor-not-allowed",
+                )}
+                aria-label="发送消息"
+                title="发送消息 (Enter)"
+              >
+                <ArrowRight className="size-3.5 stroke-[2.4]" />
+              </motion.button>
+            )}
           </div>
         </div>
       </div>

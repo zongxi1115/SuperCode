@@ -1,10 +1,22 @@
-import { Button } from '@/components/ui/button';
 import { GitPanel } from '@/components/app/git-panel';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { AnimatePresence, motion } from 'motion/react';
 import type { PluginSummary, SessionHistoryItem } from '@/lib/app-types';
 import { cn } from '@/lib/utils';
-import { ChevronDown, ChevronRight, FileCode, FileText, FolderOpen, GitBranch, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Plus, Trash2 } from 'lucide-react';
+import {
+  ChevronRight,
+  Folder,
+  FolderOpen,
+  GitBranch,
+  LayoutDashboard,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Search,
+  Trash2,
+  X,
+  FileText,
+  SquarePen,
+} from 'lucide-react';
 import { useMemo, useState } from 'react';
 
 type SidebarProps = {
@@ -48,7 +60,7 @@ const fallbackPlugins: PluginSummary[] = [
   {
     id: 'kanban',
     name: '看板',
-    description: '工作区级任务看板',
+    description: '工作区任务看板',
     icon: 'layout-dashboard',
     navSlot: 'sidebar',
     enabled: true,
@@ -57,9 +69,9 @@ const fallbackPlugins: PluginSummary[] = [
 
 function PluginIcon({ id }: { id: string }) {
   if (id === 'project-docs') {
-    return <FileText className="w-3.5 h-3.5 shrink-0" />;
+    return <FileText className="w-4 h-4 shrink-0 text-muted-foreground/80" />;
   }
-  return <LayoutDashboard className="w-3.5 h-3.5 shrink-0" />;
+  return <LayoutDashboard className="w-4 h-4 shrink-0 text-muted-foreground/80" />;
 }
 
 export function Sidebar({
@@ -86,11 +98,29 @@ export function Sidebar({
   onActivePluginChange,
 }: SidebarProps) {
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(new Set());
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+
+  const currentProjectName = useMemo(() => {
+    const ws = selectedBaseWorkspace || selectedWorkspace;
+    return getFolderName(ws) || 'SuperCode';
+  }, [selectedBaseWorkspace, selectedWorkspace]);
+
+  const initials = useMemo(() => {
+    const clean = currentProjectName.replace(/[^a-zA-Z0-9]/g, '');
+    return (clean.slice(0, 3) || 'ZX').toUpperCase();
+  }, [currentProjectName]);
+
+  const filteredHistory = useMemo(() => {
+    if (!searchQuery.trim()) return historyItems;
+    const query = searchQuery.toLowerCase().trim();
+    return historyItems.filter((i) => i.title.toLowerCase().includes(query));
+  }, [historyItems, searchQuery]);
 
   const projectGroups = useMemo<ProjectGroup[]>(() => {
     const map = new Map<string, SessionHistoryItem[]>();
-    for (const item of historyItems) {
-      const ws = item.baseWorkspace || item.workspace || '未知项目';
+    for (const item of filteredHistory) {
+      const ws = item.baseWorkspace || item.workspace || '默认项目';
       if (!map.has(ws)) map.set(ws, []);
       map.get(ws)!.push(item);
     }
@@ -104,7 +134,7 @@ export function Sidebar({
       groups.push({ workspace: ws, name: getFolderName(ws), items });
     }
     return groups;
-  }, [historyItems, selectedBaseWorkspace, selectedWorkspace]);
+  }, [filteredHistory, selectedBaseWorkspace, selectedWorkspace]);
 
   const toggleProjectCollapse = (workspace: string) => {
     setCollapsedProjects((prev) => {
@@ -115,264 +145,399 @@ export function Sidebar({
     });
   };
 
+  const activePluginsList = (plugins.length > 0 ? plugins : fallbackPlugins).filter(
+    (plugin) => plugin.enabled && plugin.navSlot === 'sidebar'
+  );
+
   return (
-    <div
+    <aside
       style={{
-        width: isCollapsed ? 48 : width,
-        transition: isResizing ? 'none' : 'width 0.25s cubic-bezier(0.25, 0.1, 0.25, 1)',
+        width: isCollapsed ? 52 : width,
+        transition: isResizing ? 'none' : 'width 0.2s cubic-bezier(0.16, 1, 0.3, 1)',
       }}
       className={cn(
-        'border-r bg-muted/20 flex flex-col flex-shrink-0 overflow-hidden',
-        !isCollapsed && `min-w-[220px] max-w-[480px]`
+        'relative flex flex-col flex-shrink-0 h-full border-r bg-[#f9f9f9] dark:bg-[#171717] text-foreground select-none',
+        'border-black/[0.08] dark:border-white/[0.08]',
+        !isCollapsed && 'min-w-[240px] max-w-[480px]'
       )}
     >
-      <div className="flex items-center gap-1 p-2 border-b min-h-[44px]">
-        <AnimatePresence mode="wait">
-          {!isCollapsed && (
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.15 }}
-              className="flex-1 flex gap-1.5 min-w-0"
-            >
-              <Button variant="default" size="sm" className="min-w-0 flex-1 justify-start gap-1.5 h-8 text-xs" onClick={onNewSession}>
-                <Plus className="w-3.5 h-3.5" /> 新建会话
-              </Button>
-              <Button variant="outline" size="sm" className="min-w-0 flex-1 justify-start gap-1.5 h-8 text-xs" onClick={onSelectOtherProject}>
-                <FolderOpen className="w-3.5 h-3.5" /> 打开项目
-              </Button>
-            </motion.div>
-          )}
-        </AnimatePresence>
-        <Button variant="ghost" size="icon" onClick={onToggle} className="shrink-0 h-8 w-8">
-          {isCollapsed ? <PanelLeftOpen className="w-4 h-4" /> : <PanelLeftClose className="w-4 h-4" />}
-        </Button>
-      </div>
+      {/* 展开态：ChatGPT 布局 */}
+      {!isCollapsed && (
+        <div className="flex flex-col h-full w-full overflow-hidden">
+          {/* 顶部 Header：Brand 品牌名 + 搜索 + 折叠按钮 */}
+          <div className="flex items-center justify-between px-3.5 pt-3 pb-2">
+            <span className="text-[15px] font-semibold text-foreground tracking-tight select-none">
+              SuperCode
+            </span>
 
-      <AnimatePresence mode="wait">
-        {!isCollapsed && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.2 }}
-            className="flex-1 flex flex-col min-h-0"
-          >
-            <div className="px-3 pt-2.5 pb-1.5">
-              <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground truncate" title={selectedWorkspace}>
-                <FileCode className="w-3 h-3 shrink-0" />
-                <span className="truncate">{backendMode === 'agent' ? 'Agent' : 'Demo'} · {selectedWorkspace}</span>
-              </div>
-            </div>
-
-            <ScrollArea className="flex-1 px-2 py-1">
-              <div className="space-y-1">
-                {/* 插件入口 */}
-                {(plugins.length > 0 ? plugins : fallbackPlugins).length > 0 ? (
-                  <div className="space-y-0.5 mb-4">
-                    <div className="px-2 py-1.5 text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
-                      插件
-                    </div>
-                    {(plugins.length > 0 ? plugins : fallbackPlugins)
-                      .filter((plugin) => plugin.enabled && plugin.navSlot === 'sidebar')
-                      .map((plugin) => (
-                        <button
-                          key={plugin.id}
-                          type="button"
-                          onClick={() => onActivePluginChange(activePlugin === plugin.id ? null : plugin.id)}
-                          className={cn(
-                            'flex items-center gap-2 w-full px-2 py-1.5 rounded-md text-xs font-medium transition-colors',
-                            activePlugin === plugin.id ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:text-foreground hover:bg-muted/40'
-                          )}
-                          title={plugin.description}
-                        >
-                          <PluginIcon id={plugin.id} />
-                          <span className="flex-1 text-left">{plugin.id === 'kanban' ? '看板' : plugin.name}</span>
-                          {plugin.loadable ? (
-                            <span
-                              className={cn(
-                                'size-1.5 shrink-0 rounded-full',
-                                plugin.loaded ? 'bg-emerald-500' : 'bg-muted-foreground/25'
-                              )}
-                              title={plugin.loaded ? '已加载' : '未加载'}
-                            />
-                          ) : null}
-                        </button>
-                      ))}
-                  </div>
-                ) : null}
-
-                <div className="px-2 py-1.5 text-[10px] font-semibold text-muted-foreground uppercase tracking-wider border-t pt-3">
-                  会话历史
-                </div>
-
-                {isHistoryLoading ? (
-                  <div className="rounded-lg border border-dashed px-3 py-4 text-xs text-muted-foreground text-center">加载中...</div>
-                ) : null}
-
-                {!isHistoryLoading && historyItems.length === 0 ? (
-                  <div className="rounded-lg border border-dashed px-3 py-4 text-xs text-muted-foreground text-center">暂无历史记录</div>
-                ) : null}
-
-                {projectGroups.map((group) => {
-                  const isCollapsedGroup = collapsedProjects.has(group.workspace);
-                  const isCurrentProject = group.workspace === selectedWorkspace;
-                  return (
-                    <div key={group.workspace} className="space-y-0.5">
-                      <button
-                        type="button"
-                        onClick={() => toggleProjectCollapse(group.workspace)}
-                        className={cn(
-                          'flex items-center gap-1.5 w-full px-2 py-1.5 rounded-md text-xs font-medium transition-colors',
-                          isCurrentProject ? 'text-foreground' : 'text-muted-foreground hover:text-foreground',
-                          'hover:bg-muted/40'
-                        )}
-                        title={group.workspace}
-                      >
-                        <motion.span
-                          animate={{ rotate: isCollapsedGroup ? 0 : 90 }}
-                          transition={{ duration: 0.15 }}
-                          className="inline-flex shrink-0"
-                        >
-                          <ChevronRight className="w-3 h-3" />
-                        </motion.span>
-                        <FolderOpen className="w-3.5 h-3.5 shrink-0 text-muted-foreground" />
-                        <span className="truncate flex-1 text-left">{group.name}</span>
-                        <span className="text-[10px] text-muted-foreground/50 tabular-nums shrink-0">{group.items.length}</span>
-                      </button>
-
-                      <AnimatePresence initial={false}>
-                        {!isCollapsedGroup && (
-                          <motion.div
-                            initial={{ height: 0, opacity: 0 }}
-                            animate={{ height: 'auto', opacity: 1 }}
-                            exit={{ height: 0, opacity: 0 }}
-                            transition={{ duration: 0.15 }}
-                            className="overflow-hidden"
-                          >
-                            <AnimatePresence mode="popLayout" initial={false}>
-                              {group.items.map((item) => {
-                                const isActive = item.sessionId === currentSessionId;
-                                const isWorktree = item.executionMode === 'worktree';
-                                return (
-                                  <motion.div
-                                    key={item.sessionId}
-                                    layout
-                                    layoutAnimation="to-zero"
-                                    initial={{ opacity: 0 }}
-                                    animate={{ opacity: 1 }}
-                                    exit={{ opacity: 0, height: 0, marginBottom: 0, paddingTop: 0, paddingBottom: 0 }}
-                                    transition={{ duration: 0.2, ease: [0.25, 0.1, 0.25, 1] }}
-                                    className={cn(
-                                      'group flex items-center gap-1 rounded-md px-2 py-1.5 transition-colors cursor-pointer',
-                                      isActive
-                                        ? 'bg-primary/8 border border-primary/20'
-                                        : 'border border-transparent hover:bg-muted/40 hover:border-border/60'
-                                    )}
-                                    onClick={() => onSelectHistory(item.sessionId)}
-                                  >
-                                    <span className="min-w-0 flex-1 break-all text-left text-xs leading-snug">
-                                      <span>{item.title}</span>
-                                      {isWorktree ? (
-                                        <span className="ml-1 inline-flex items-center rounded border border-primary/20 bg-primary/10 px-1 text-[10px] text-primary">
-                                          Worktree{item.worktreeBranch ? ` · ${item.worktreeBranch.replace('supercode/session-', '')}` : ''}
-                                        </span>
-                                      ) : null}
-                                    </span>
-                                    <button
-                                      type="button"
-                                      onClick={(event) => {
-                                        event.stopPropagation();
-                                        onDeleteHistory(item.sessionId);
-                                      }}
-                                      className="shrink-0 rounded-md p-1 text-muted-foreground/30 hover:bg-destructive/10 hover:text-destructive transition-colors opacity-0 group-hover:opacity-100"
-                                      aria-label={`删除 ${item.title}`}
-                                      title="删除"
-                                    >
-                                      <Trash2 className="w-3 h-3" />
-                                    </button>
-                                  </motion.div>
-                                );
-                              })}
-                            </AnimatePresence>
-                          </motion.div>
-                        )}
-                      </AnimatePresence>
-                    </div>
-                  );
-                })}
-
-                {hasMoreHistory ? (
-                  <button
-                    type="button"
-                    onClick={onLoadMoreHistory}
-                    disabled={isHistoryLoading}
-                    className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-md border border-dashed px-2 py-1.5 text-xs text-muted-foreground transition-colors hover:border-border hover:bg-muted/40 hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
-                  >
-                    <ChevronDown className="size-3.5" />
-                    {isHistoryLoading ? '加载中...' : '加载更多'}
-                  </button>
-                ) : null}
-              </div>
-            </ScrollArea>
-
-            <div className="border-t">
+            <div className="flex items-center gap-1">
               <button
                 type="button"
-                onClick={onGitPanelToggle}
-                className="flex items-center gap-2 w-full px-3 py-2 text-xs text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-colors"
-              >
-                <GitBranch className="size-3.5 shrink-0" />
-                <span className="flex-1 text-left">Git</span>
-                <motion.span
-                  animate={{ rotate: isGitPanelOpen ? 180 : 0 }}
-                  transition={{ duration: 0.2 }}
-                >
-                  ▾
-                </motion.span>
-              </button>
-              <AnimatePresence>
-                {isGitPanelOpen && (
-                  <motion.div
-                    initial={{ height: 0, opacity: 0 }}
-                    animate={{ height: 320, opacity: 1 }}
-                    exit={{ height: 0, opacity: 0 }}
-                    transition={{ duration: 0.2 }}
-                    className="overflow-hidden border-t"
-                  >
-                    <GitPanel sessionId={currentSessionId} />
-                  </motion.div>
+                onClick={() => setIsSearchOpen((prev) => !prev)}
+                className={cn(
+                  'w-7 h-7 rounded-md flex items-center justify-center transition-colors',
+                  isSearchOpen
+                    ? 'bg-black/[0.08] dark:bg-white/[0.12] text-foreground'
+                    : 'text-muted-foreground hover:text-foreground hover:bg-black/[0.05] dark:hover:bg-white/[0.06]'
                 )}
-              </AnimatePresence>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+                title="搜索会话"
+              >
+                <Search className="w-4 h-4" />
+              </button>
 
-      {isCollapsed && (
-        <div className="flex-1 flex flex-col items-center pt-3 gap-2">
-          <button
-            type="button"
-            onClick={onNewSession}
-            className="w-7 h-7 rounded-md bg-primary/10 flex items-center justify-center hover:bg-primary/20 transition-colors"
-            title="新建会话"
-          >
-            <Plus className="w-3.5 h-3.5 text-primary" />
-          </button>
-          <div className="w-7 h-7 rounded-md bg-muted/80 flex items-center justify-center" title={selectedWorkspace}>
-            <FileCode className="w-3.5 h-3.5 text-muted-foreground" />
+              <button
+                type="button"
+                onClick={onToggle}
+                className="w-7 h-7 rounded-md flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-black/[0.05] dark:hover:bg-white/[0.06] transition-colors"
+                title="收起侧边栏"
+              >
+                <PanelLeftClose className="w-4 h-4" />
+              </button>
+            </div>
           </div>
-          <button
-            type="button"
-            onClick={onGitPanelToggle}
-            className="w-7 h-7 rounded-md bg-muted/80 flex items-center justify-center hover:bg-muted transition-colors"
-            title="Git"
-          >
-            <GitBranch className="w-3.5 h-3.5 text-muted-foreground" />
-          </button>
+
+          {/* 搜索框 */}
+          <AnimatePresence>
+            {isSearchOpen && (
+              <motion.div
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: 'auto', opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                transition={{ duration: 0.15 }}
+                className="overflow-hidden px-3 pb-2"
+              >
+                <div className="relative flex items-center">
+                  <Search className="absolute left-2.5 w-3.5 h-3.5 text-muted-foreground/60 pointer-events-none" />
+                  <input
+                    autoFocus
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="搜索历史会话..."
+                    className="w-full h-7.5 pl-8 pr-7 bg-black/[0.04] dark:bg-white/[0.06] border border-black/[0.08] dark:border-white/[0.08] rounded-lg text-xs placeholder:text-muted-foreground/50 focus:outline-none focus:border-ring"
+                  />
+                  {searchQuery && (
+                    <button
+                      type="button"
+                      onClick={() => setSearchQuery('')}
+                      className="absolute right-2 text-muted-foreground/60 hover:text-foreground p-0.5 rounded"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  )}
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* 顶部固定导航区（新聊天、插件、打开项目、Git） */}
+          <div className="px-2 pt-1 pb-2 space-y-0.5 border-b border-black/[0.06] dark:border-white/[0.06]">
+            {/* 新聊天 */}
+            <button
+              type="button"
+              onClick={onNewSession}
+              className="flex items-center gap-2.5 w-full px-2.5 py-2 rounded-lg text-[13px] font-medium text-foreground hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors text-left"
+            >
+              <SquarePen className="w-4 h-4 shrink-0 text-foreground" />
+              <span className="flex-1 truncate">新聊天</span>
+            </button>
+
+            {/* 插件列表 */}
+            {activePluginsList.map((plugin) => {
+              const isActive = activePlugin === plugin.id;
+              return (
+                <button
+                  key={plugin.id}
+                  type="button"
+                  onClick={() => onActivePluginChange(isActive ? null : plugin.id)}
+                  className={cn(
+                    'flex items-center gap-2.5 w-full px-2.5 py-2 rounded-lg text-[13px] transition-colors text-left',
+                    isActive
+                      ? 'bg-black/[0.08] dark:bg-white/[0.12] text-foreground font-medium'
+                      : 'text-muted-foreground hover:text-foreground hover:bg-black/[0.04] dark:hover:bg-white/[0.06]'
+                  )}
+                  title={plugin.description}
+                >
+                  <PluginIcon id={plugin.id} />
+                  <span className="flex-1 truncate">{plugin.name}</span>
+                </button>
+              );
+            })}
+
+            {/* 打开项目 */}
+            <button
+              type="button"
+              onClick={onSelectOtherProject}
+              className="flex items-center gap-2.5 w-full px-2.5 py-2 rounded-lg text-[13px] text-muted-foreground hover:text-foreground hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors text-left"
+              title="切换或打开项目工作区"
+            >
+              <FolderOpen className="w-4 h-4 shrink-0 text-muted-foreground/80" />
+              <span className="flex-1 truncate">打开项目</span>
+            </button>
+
+            {/* Git 版本控制 */}
+            <button
+              type="button"
+              onClick={onGitPanelToggle}
+              className={cn(
+                'flex items-center gap-2.5 w-full px-2.5 py-2 rounded-lg text-[13px] transition-colors text-left',
+                isGitPanelOpen
+                  ? 'bg-black/[0.08] dark:bg-white/[0.12] text-foreground font-medium'
+                  : 'text-muted-foreground hover:text-foreground hover:bg-black/[0.04] dark:hover:bg-white/[0.06]'
+              )}
+            >
+              <GitBranch className="w-4 h-4 shrink-0 text-muted-foreground/80" />
+              <span className="flex-1 truncate">Git 仓库</span>
+            </button>
+          </div>
+
+          {/* 会话历史列表区域（支持按项目文件夹折叠/展开，清晰层级，纯净文字，带完整删除交互） */}
+          <ScrollArea className="flex-1 px-2">
+            <div className="py-2 space-y-3">
+              {isHistoryLoading && historyItems.length === 0 && (
+                <div className="py-3 px-3 text-xs text-muted-foreground/60">加载中...</div>
+              )}
+
+              {!isHistoryLoading && filteredHistory.length === 0 && (
+                <div className="py-3 px-3 text-xs text-muted-foreground/60">
+                  {searchQuery ? '未找到相关会话' : '暂无历史记录'}
+                </div>
+              )}
+
+              {projectGroups.map((group) => {
+                const isCollapsed = collapsedProjects.has(group.workspace);
+                const isCurrentProject =
+                  group.workspace === selectedWorkspace || group.workspace === selectedBaseWorkspace;
+
+                return (
+                  <div key={group.workspace} className="space-y-0.5">
+                    {/* 项目文件夹分组标头（清晰展示项目名、支持点击展开/折叠、显示会话数） */}
+                    <button
+                      type="button"
+                      onClick={() => toggleProjectCollapse(group.workspace)}
+                      className={cn(
+                        'flex items-center gap-1.5 w-full min-w-0 overflow-hidden px-2 py-1.5 rounded-md text-[12px] font-medium transition-colors text-left select-none group',
+                        isCurrentProject
+                          ? 'text-foreground'
+                          : 'text-muted-foreground hover:text-foreground hover:bg-black/[0.03] dark:hover:bg-white/[0.04]'
+                      )}
+                      title={`项目路径: ${group.workspace}\n点击展开/收起`}
+                    >
+                      <ChevronRight
+                        className={cn(
+                          'w-3.5 h-3.5 text-muted-foreground/60 group-hover:text-foreground transition-transform duration-150 shrink-0',
+                          !isCollapsed && 'rotate-90'
+                        )}
+                      />
+                      <Folder className="w-3.5 h-3.5 text-muted-foreground/70 group-hover:text-foreground shrink-0" />
+                      <span className="truncate min-w-0 flex-1 font-semibold tracking-tight">
+                        {group.name}
+                      </span>
+                      <span className="text-[10px] font-mono text-muted-foreground/60 px-1.5 py-0.2 rounded-full bg-black/[0.04] dark:bg-white/[0.06] shrink-0">
+                        {group.items.length}
+                      </span>
+                    </button>
+
+                    {/* 项目下的会话列表 */}
+                    <AnimatePresence initial={false}>
+                      {!isCollapsed && (
+                        <motion.div
+                          initial={{ height: 0, opacity: 0 }}
+                          animate={{ height: 'auto', opacity: 1 }}
+                          exit={{ height: 0, opacity: 0 }}
+                          transition={{ duration: 0.15 }}
+                          className="overflow-hidden pl-3 space-y-0.5 border-l border-black/[0.06] dark:border-white/[0.06] ml-3.5 my-0.5"
+                        >
+                          {group.items.map((item) => {
+                            const isActive = item.sessionId === currentSessionId;
+                            const isWorktree = item.executionMode === 'worktree';
+
+                            return (
+                              <div
+                                key={item.sessionId}
+                                onClick={() => {
+                                  onActivePluginChange(null);
+                                  onSelectHistory(item.sessionId);
+                                }}
+                                title={item.title}
+                                className={cn(
+                                  'group relative flex items-center justify-between w-full min-w-0 overflow-hidden px-2.5 py-1.5 rounded-lg text-[13px] cursor-pointer transition-colors text-left select-none',
+                                  isActive
+                                    ? 'bg-black/[0.08] dark:bg-white/[0.12] text-foreground font-medium'
+                                    : 'text-muted-foreground hover:text-foreground hover:bg-black/[0.04] dark:hover:bg-white/[0.06]'
+                                )}
+                              >
+                                <div className="min-w-0 flex-1 flex items-center gap-1.5 overflow-hidden">
+                                  <span className="truncate block min-w-0 flex-1 leading-snug tracking-tight">
+                                    {item.title}
+                                  </span>
+                                  {isWorktree && (
+                                    <span className="shrink-0 text-[9px] font-mono px-1 py-0.2 rounded border border-blue-500/25 bg-blue-500/10 text-blue-600 dark:text-blue-400">
+                                      worktree
+                                    </span>
+                                  )}
+                                </div>
+
+                                {/* 删除按钮（支持 hover 显著出现，点击触发删除会话） */}
+                                <button
+                                  type="button"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    event.preventDefault();
+                                    onDeleteHistory(item.sessionId);
+                                  }}
+                                  className={cn(
+                                    'shrink-0 p-1 ml-1 rounded-md text-muted-foreground/40 hover:text-destructive hover:bg-destructive/10 transition-all',
+                                    isActive ? 'opacity-50 group-hover:opacity-100' : 'opacity-0 group-hover:opacity-100'
+                                  )}
+                                  aria-label={`删除会话 ${item.title}`}
+                                  title="删除会话"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            );
+                          })}
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </div>
+                );
+              })}
+
+              {hasMoreHistory && (
+                <button
+                  type="button"
+                  onClick={onLoadMoreHistory}
+                  disabled={isHistoryLoading}
+                  className="w-full text-center py-1.5 text-xs text-muted-foreground/70 hover:text-foreground transition-colors"
+                >
+                  {isHistoryLoading ? '加载中...' : '加载更多'}
+                </button>
+              )}
+            </div>
+          </ScrollArea>
+
+          {/* Git 展开内容抽屉 */}
+          <AnimatePresence>
+            {isGitPanelOpen && (
+              <motion.div
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: 280, opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                transition={{ duration: 0.2 }}
+                className="overflow-hidden border-t border-black/[0.08] dark:border-white/[0.08]"
+              >
+                <GitPanel sessionId={currentSessionId} />
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* 底部用户/工作区卡片（ChatGPT 底部样式） */}
+          <div className="p-2 border-t border-black/[0.06] dark:border-white/[0.06]">
+            <button
+              type="button"
+              onClick={onSelectOtherProject}
+              className="flex items-center justify-between w-full p-1.5 rounded-lg hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors text-left group"
+              title={`当前项目: ${selectedWorkspace}\n点击切换工作区`}
+            >
+              <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                {/* 橙红色圆形头像徽标 */}
+                <div className="w-7 h-7 rounded-full bg-[#d9534f] text-white flex items-center justify-center font-semibold text-[11px] shrink-0">
+                  {initials}
+                </div>
+                <div className="flex flex-col min-w-0 flex-1">
+                  <span className="text-[13px] font-medium text-foreground truncate leading-tight">
+                    {currentProjectName}
+                  </span>
+                  <span className="text-[11px] text-muted-foreground/70 truncate leading-tight">
+                    {backendMode === 'agent' ? 'Agent 模式' : 'Demo 模式'}
+                  </span>
+                </div>
+              </div>
+
+              <span className="text-[11px] px-2 py-0.5 rounded-full bg-black/[0.06] dark:bg-white/[0.10] text-muted-foreground group-hover:text-foreground transition-colors font-normal">
+                切换
+              </span>
+            </button>
+          </div>
         </div>
       )}
-    </div>
+
+      {/* 折叠态 (52px 极简 Rail) */}
+      {isCollapsed && (
+        <div className="flex flex-col items-center justify-between h-full py-3">
+          <div className="flex flex-col items-center gap-2.5 w-full px-1">
+            <button
+              type="button"
+              onClick={onNewSession}
+              className="w-8 h-8 rounded-lg text-foreground hover:bg-black/[0.06] dark:hover:bg-white/[0.10] flex items-center justify-center transition-colors"
+              title="新聊天"
+            >
+              <SquarePen className="w-4 h-4" />
+            </button>
+
+            <div className="w-5 h-[1px] bg-black/[0.08] dark:bg-white/[0.08] my-0.5" />
+
+            {/* 插件 */}
+            {activePluginsList.map((plugin) => {
+              const isActive = activePlugin === plugin.id;
+              return (
+                <button
+                  key={plugin.id}
+                  type="button"
+                  onClick={() => onActivePluginChange(isActive ? null : plugin.id)}
+                  className={cn(
+                    'w-8 h-8 rounded-lg flex items-center justify-center transition-colors',
+                    isActive
+                      ? 'bg-black/[0.08] dark:bg-white/[0.14] text-foreground'
+                      : 'text-muted-foreground hover:text-foreground hover:bg-black/[0.05] dark:hover:bg-white/[0.08]'
+                  )}
+                  title={plugin.name}
+                >
+                  <PluginIcon id={plugin.id} />
+                </button>
+              );
+            })}
+
+            {/* Git */}
+            <button
+              type="button"
+              onClick={onGitPanelToggle}
+              className={cn(
+                'w-8 h-8 rounded-lg flex items-center justify-center transition-colors',
+                isGitPanelOpen
+                  ? 'bg-black/[0.08] dark:bg-white/[0.14] text-foreground'
+                  : 'text-muted-foreground hover:text-foreground hover:bg-black/[0.05] dark:hover:bg-white/[0.08]'
+              )}
+              title="Git 仓库"
+            >
+              <GitBranch className="w-4 h-4" />
+            </button>
+          </div>
+
+          <div className="flex flex-col items-center gap-2 w-full px-1">
+            {/* 头像 */}
+            <div
+              className="w-7 h-7 rounded-full bg-[#d9534f] text-white flex items-center justify-center font-semibold text-[11px] shrink-0 cursor-pointer shadow-2xs"
+              onClick={onSelectOtherProject}
+              title={`当前工作区: ${currentProjectName}`}
+            >
+              {initials}
+            </div>
+
+            {/* 展开 */}
+            <button
+              type="button"
+              onClick={onToggle}
+              className="w-8 h-8 rounded-lg text-muted-foreground hover:text-foreground hover:bg-black/[0.05] dark:hover:bg-white/[0.08] flex items-center justify-center transition-colors"
+              title="展开侧边栏"
+            >
+              <PanelLeftOpen className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
+    </aside>
   );
 }

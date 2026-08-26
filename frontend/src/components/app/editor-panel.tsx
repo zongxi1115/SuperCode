@@ -13,7 +13,7 @@ import { message as appMessage } from '@/components/ui/message';
 import { getFileLanguage } from '@/lib/app-utils';
 import { apiFetch, apiUrl } from '@/lib/api-client';
 import type { FileTreeNode } from '@/lib/app-types';
-import { CircleAlert, FileCode, FolderTree, Maximize2, Minimize2, PanelsTopLeft, RefreshCw, Sparkles, SquareTerminal } from 'lucide-react';
+import { CircleAlert, FileCode, FolderTree, Maximize2, Minimize2, PanelsTopLeft, RefreshCw, SquareTerminal } from 'lucide-react';
 import type { editor as MonacoEditor } from 'monaco-editor';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
@@ -372,349 +372,331 @@ export function EditorPanel({
   return (
     <>
       <div className="flex-1 min-h-0 p-2">
-        <div className="flex h-full min-h-0 overflow-hidden rounded-xl border bg-card/70 shadow-sm">
-          <div className="flex flex-1 min-w-0 min-h-0 p-2">
-            <div className="flex h-full min-h-0 w-full overflow-hidden rounded-lg border bg-background">
-              {isWebPreviewOpen ? (
-                <EditorSidebar
-                  isOpen
-                  isFullscreen
-                  isFileTreeVisible={false}
-                  onToggle={onToggleWebPreview}
-                  onToggleFileTree={() => setIsFileTreeVisible((prev) => !prev)}
-                  url={webPreviewUrl}
-                  onUrlChange={onWebPreviewUrlChange}
-                  onSelectElement={onSelectPreviewElement}
-                />
-              ) : isPlanMode ? (
-                <div className="flex h-full min-h-0 w-full flex-col overflow-hidden">
-                  <div className="flex items-center justify-between border-b bg-muted/30 px-3 py-2 shrink-0">
-                    <div className="flex min-w-0 items-center gap-2 text-muted-foreground text-xs">
-                      <FileCode className="w-3.5 h-3.5 shrink-0" />
-                      <span className="truncate font-medium">{planData?.title || '计划草案'}</span>
-                      <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">计划</span>
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      <Button
-                        size="sm"
-                        variant="default"
-                        className="h-7 gap-1.5 text-xs bg-primary hover:bg-primary/90"
-                        onClick={() => onSubmitPlan?.(planEditContent, planAnnotationsRef.current)}
-                      >
-                        <Sparkles className="w-3.5 h-3.5" />
-                        交给 AI
-                      </Button>
-                      <Button size="sm" variant="ghost" className="h-7 gap-1.5 text-xs" onClick={onClosePlan}>
-                        返回编辑器
-                      </Button>
-                    </div>
+        <div className="flex h-full min-h-0 w-full overflow-hidden rounded-xl border border-border/70 bg-background shadow-xs">
+          {isWebPreviewOpen ? (
+            <EditorSidebar
+              isOpen
+              isFullscreen
+              isFileTreeVisible={false}
+              onToggle={onToggleWebPreview}
+              onToggleFileTree={() => setIsFileTreeVisible((prev) => !prev)}
+              url={webPreviewUrl}
+              onUrlChange={onWebPreviewUrlChange}
+              onSelectElement={onSelectPreviewElement}
+            />
+          ) : isPlanMode ? (
+            <div className="flex h-full min-h-0 w-full flex-col overflow-hidden">
+              <PlanRichTextEditor
+                value={planEditContent}
+                onChange={setPlanEditContent}
+                autoFocus
+                title={planData?.title || '计划方案草案'}
+                onAnnotationsChange={(annotations) => {
+                  planAnnotationsRef.current = annotations;
+                  onPlanAnnotationsChange?.(annotations);
+                }}
+                onSave={() => {
+                  onPlanSave?.(planEditContent, planAnnotationsRef.current);
+                }}
+                onSubmit={() => {
+                  onSubmitPlan?.(planEditContent, planAnnotationsRef.current);
+                }}
+                onClose={onClosePlan}
+                isSaving={isSaving}
+                isDarkMode={isDarkMode}
+              />
+            </div>
+          ) : (
+            <>
+              <div className="flex flex-1 min-w-0 min-h-0 flex-col overflow-hidden">
+                <div className="flex items-center justify-between border-b bg-muted/30 px-3 py-2 shrink-0">
+                  <div className="flex min-w-0 items-center gap-2 text-muted-foreground font-mono text-xs">
+                    <FileCode className="w-3.5 h-3.5 shrink-0" />
+                    <span className="truncate">{selectedFilePath || '未选择文件'}</span>
                   </div>
 
-                  <div className="flex-1 min-h-0 overflow-hidden">
-                    <PlanRichTextEditor
-                      value={planEditContent}
-                      onChange={setPlanEditContent}
-                      autoFocus
-                      onAnnotationsChange={(annotations) => {
-                        planAnnotationsRef.current = annotations;
-                        onPlanAnnotationsChange?.(annotations);
-                      }}
+                  <div className="flex items-center gap-1">
+                    <EditorTools
+                      canEdit={hasSelectedFile}
+                      isEditing={isEditing}
+                      isSaving={isSaving}
+                      isWebPreviewOpen={isWebPreviewOpen}
+                      canOpenHtmlPreview={hasSelectedFile && isSelectedHtmlFile}
+                      editorTargets={EDITORS}
+                      onStartEdit={handleStartEdit}
+                      onCancelEdit={handleCancelEdit}
+                      onSave={() => void handleSave()}
+                      onOpenInEditor={(command) => void openInEditor(command)}
+                      onOpenHtmlPreview={handleOpenHtmlPreview}
                     />
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      onClick={() => setIsEditorFullscreen((prev) => !prev)}
+                      title={isEditorFullscreen ? '退出全屏' : '全屏编辑'}
+                    >
+                      {isEditorFullscreen ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
+                    </Button>
                   </div>
                 </div>
-              ) : (
-                <>
-                  <div className="flex flex-1 min-w-0 min-h-0 flex-col overflow-hidden">
-                    <div className="flex items-center justify-between border-b bg-muted/30 px-3 py-2 shrink-0">
-                      <div className="flex min-w-0 items-center gap-2 text-muted-foreground font-mono text-xs">
-                        <FileCode className="w-3.5 h-3.5 shrink-0" />
-                        <span className="truncate">{selectedFilePath || '未选择文件'}</span>
-                      </div>
 
+                <div className="flex-1 min-w-0 min-h-0 overflow-hidden">
+                  {hasSelectedFile ? (
+                    <Editor
+                      height="100%"
+                      language={getFileLanguage(selectedFilePath)}
+                      value={isEditing ? editContent : selectedFileContent}
+                      onChange={isEditing ? ((value) => setEditContent(value ?? '')) : undefined}
+                      onMount={handleEditorMount}
+                      theme={isDarkMode ? "vs-dark" : "vs"}
+                      path={selectedFilePath}
+                      options={{
+                        readOnly: !isEditing,
+                        minimap: { enabled: false },
+                        fontSize: 13,
+                        lineNumbers: 'on',
+                        scrollBeyondLastLine: false,
+                        automaticLayout: true,
+                        padding: { top: 16 },
+                        renderLineHighlight: isEditing ? 'line' : 'none',
+                        overviewRulerBorder: false,
+                        hideCursorInOverviewRuler: true,
+                        overviewRulerLanes: 0,
+                        scrollbar: { verticalScrollbarSize: 8, horizontalScrollbarSize: 8 },
+                        domReadOnly: !isEditing,
+                      }}
+                    />
+                  ) : (
+                    <div className="flex h-full items-center justify-center text-muted-foreground">
+                      <div className="space-y-2 text-center">
+                        <FileCode className="mx-auto h-10 w-10 opacity-30" />
+                        <p className="text-xs">展开右侧文件树以选择文件</p>
+                        <div className="flex items-center justify-center gap-2">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="mt-2 gap-1.5 text-xs"
+                            onClick={() => setIsFileTreeVisible(true)}
+                          >
+                            <PanelsTopLeft className="h-3.5 w-3.5" />
+                            打开文件树
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="mt-2 gap-1.5 text-xs"
+                            onClick={onToggleWebPreview}
+                          >
+                            <PanelsTopLeft className="h-3.5 w-3.5" />
+                            打开浏览器预览
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {shouldShowFileTree ? (
+                <>
+                  <ResizableHandle
+                    side="right"
+                    onResize={handleFileTreeResize}
+                    onResizeStateChange={setIsFileTreeResizing}
+                    className="border-l border-border/60 bg-background/40 hover:bg-primary/15"
+                  />
+
+                  <div
+                    style={{
+                      width: fileTreeWidth,
+                      transition: isFileTreeResizing ? 'none' : 'width 0.2s cubic-bezier(0.25, 0.1, 0.25, 1)',
+                    }}
+                    className="flex shrink-0 flex-col overflow-hidden border-l bg-muted/10"
+                  >
+                    <div className="flex items-center border-b px-3 py-2">
+                      <span className="flex-1 text-xs font-semibold text-muted-foreground">项目结构</span>
                       <div className="flex items-center gap-1">
-                        <EditorTools
-                          canEdit={hasSelectedFile}
-                          isEditing={isEditing}
-                          isSaving={isSaving}
-                          isWebPreviewOpen={isWebPreviewOpen}
-                          canOpenHtmlPreview={hasSelectedFile && isSelectedHtmlFile}
-                          editorTargets={EDITORS}
-                          onStartEdit={handleStartEdit}
-                          onCancelEdit={handleCancelEdit}
-                          onSave={() => void handleSave()}
-                          onOpenInEditor={(command) => void openInEditor(command)}
-                          onOpenHtmlPreview={handleOpenHtmlPreview}
-                        />
                         <Button
                           variant="ghost"
                           size="icon"
                           className="h-7 w-7"
-                          onClick={() => setIsEditorFullscreen((prev) => !prev)}
-                          title={isEditorFullscreen ? '退出全屏' : '全屏编辑'}
+                          onClick={() => void handleRefreshFileTree()}
+                          disabled={isRefreshingFileTree}
+                          title="刷新文件树"
                         >
-                          {isEditorFullscreen ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
+                          <RefreshCw className={`h-3.5 w-3.5 ${isRefreshingFileTree ? 'animate-spin' : ''}`} />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7"
+                          onClick={() => setIsFileTreeVisible(false)}
+                          title="收起文件树"
+                        >
+                          <FolderTree className="h-3.5 w-3.5" />
                         </Button>
                       </div>
                     </div>
-
-                    <div className="flex-1 min-w-0 min-h-0 overflow-hidden">
-                      {hasSelectedFile ? (
-                        <Editor
-                          height="100%"
-                          language={getFileLanguage(selectedFilePath)}
-                          value={isEditing ? editContent : selectedFileContent}
-                          onChange={isEditing ? ((value) => setEditContent(value ?? '')) : undefined}
-                          onMount={handleEditorMount}
-                          theme={isDarkMode ? "vs-dark" : "vs"}
-                          path={selectedFilePath}
-                          options={{
-                            readOnly: !isEditing,
-                            minimap: { enabled: false },
-                            fontSize: 13,
-                            lineNumbers: 'on',
-                            scrollBeyondLastLine: false,
-                            automaticLayout: true,
-                            padding: { top: 16 },
-                            renderLineHighlight: isEditing ? 'line' : 'none',
-                            overviewRulerBorder: false,
-                            hideCursorInOverviewRuler: true,
-                            overviewRulerLanes: 0,
-                            scrollbar: { verticalScrollbarSize: 8, horizontalScrollbarSize: 8 },
-                            domReadOnly: !isEditing,
-                          }}
-                        />
-                      ) : (
-                        <div className="flex h-full items-center justify-center text-muted-foreground">
-                          <div className="space-y-2 text-center">
-                            <FileCode className="mx-auto h-10 w-10 opacity-30" />
-                            <p className="text-xs">展开右侧文件树以选择文件</p>
-                            <div className="flex items-center justify-center gap-2">
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                className="mt-2 gap-1.5 text-xs"
-                                onClick={() => setIsFileTreeVisible(true)}
-                              >
-                                <PanelsTopLeft className="h-3.5 w-3.5" />
-                                打开文件树
-                              </Button>
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                className="mt-2 gap-1.5 text-xs"
-                                onClick={onToggleWebPreview}
-                              >
-                                <PanelsTopLeft className="h-3.5 w-3.5" />
-                                打开浏览器预览
-                              </Button>
-                            </div>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-
-                  {shouldShowFileTree ? (
-                    <>
-                      <ResizableHandle
-                        side="right"
-                        onResize={handleFileTreeResize}
-                        onResizeStateChange={setIsFileTreeResizing}
-                        className="border-l border-border/60 bg-background/40 hover:bg-primary/15"
-                      />
-
-                      <div
-                        style={{
-                          width: fileTreeWidth,
-                          transition: isFileTreeResizing ? 'none' : 'width 0.2s cubic-bezier(0.25, 0.1, 0.25, 1)',
-                        }}
-                        className="flex shrink-0 flex-col overflow-hidden border-l bg-muted/10"
-                      >
-                        <div className="flex items-center border-b px-3 py-2">
-                          <span className="flex-1 text-xs font-semibold text-muted-foreground">项目结构</span>
-                          <div className="flex items-center gap-1">
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-7 w-7"
-                              onClick={() => void handleRefreshFileTree()}
-                              disabled={isRefreshingFileTree}
-                              title="刷新文件树"
-                            >
-                              <RefreshCw className={`h-3.5 w-3.5 ${isRefreshingFileTree ? 'animate-spin' : ''}`} />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-7 w-7"
-                              onClick={() => setIsFileTreeVisible(false)}
-                              title="收起文件树"
-                            >
-                              <FolderTree className="h-3.5 w-3.5" />
-                            </Button>
-                          </div>
-                        </div>
-                        <div className="flex-1 overflow-auto">
-                          <div className="p-2">
-                            {fileTree.length > 0 ? (
-                              <FileTree
-                                selectedPath={selectedFilePath}
-                                onSelect={onLoadFile}
-                                onFolderToggle={(path, expanded) => {
-                                  if (expanded) {
-                                    void onLoadDirectory?.(path);
-                                  }
-                                }}
-                              >
-                                {renderFileTreeNodes(fileTree)}
-                              </FileTree>
-                            ) : (
-                              <div className="py-4 text-center text-xs text-muted-foreground">暂无文件结构</div>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    </>
-                  ) : null}
-
-                  <EditorSidebar
-                    isOpen={false}
-                    isFileTreeVisible={shouldShowFileTree}
-                    onToggle={onToggleWebPreview}
-                    onToggleFileTree={() => setIsFileTreeVisible((prev) => !prev)}
-                    url={webPreviewUrl}
-                    onUrlChange={onWebPreviewUrlChange}
-                    onSelectElement={onSelectPreviewElement}
-                  />
-
-                  {isEditorFullscreen && (
-                    <div className="fixed inset-0 z-50 flex flex-col bg-background">
-                      <div className="flex items-center justify-between border-b bg-muted/30 px-4 py-2 shrink-0">
-                        <div className="flex min-w-0 items-center gap-2 text-muted-foreground font-mono text-xs">
-                          <FileCode className="w-3.5 h-3.5 shrink-0" />
-                          <span className="truncate">{selectedFilePath || '未选择文件'}</span>
-                        </div>
-                        <div className="flex items-center gap-1">
-                          <EditorTools
-                            canEdit={hasSelectedFile}
-                            isEditing={isEditing}
-                            isSaving={isSaving}
-                            isWebPreviewOpen={isWebPreviewOpen}
-                            canOpenHtmlPreview={hasSelectedFile && isSelectedHtmlFile}
-                            editorTargets={EDITORS}
-                            onStartEdit={handleStartEdit}
-                            onCancelEdit={handleCancelEdit}
-                            onSave={() => void handleSave()}
-                            onOpenInEditor={(command) => void openInEditor(command)}
-                            onOpenHtmlPreview={handleOpenHtmlPreview}
-                          />
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-7 w-7"
-                            onClick={() => setIsEditorFullscreen(false)}
-                            title="退出全屏"
-                          >
-                            <Minimize2 className="h-3.5 w-3.5" />
-                          </Button>
-                        </div>
-                      </div>
-                      <div className="flex flex-1 min-h-0 overflow-hidden">
-                        <div className="flex flex-1 min-w-0 min-h-0 overflow-hidden">
-                          <Editor
-                            height="100%"
-                            language={getFileLanguage(selectedFilePath)}
-                            value={isEditing ? editContent : selectedFileContent}
-                            onChange={isEditing ? ((value) => setEditContent(value ?? '')) : undefined}
-                            onMount={(editor, monaco) => handleEditorMount(editor, monaco, true)}
-                            theme={isDarkMode ? "vs-dark" : "vs"}
-                            path={`fullscreen-${selectedFilePath}`}
-                            options={{
-                              readOnly: !isEditing,
-                              minimap: { enabled: false },
-                              fontSize: 13,
-                              lineNumbers: 'on',
-                              scrollBeyondLastLine: false,
-                              automaticLayout: true,
-                              padding: { top: 16 },
-                              renderLineHighlight: isEditing ? 'line' : 'none',
-                              overviewRulerBorder: false,
-                              hideCursorInOverviewRuler: true,
-                              overviewRulerLanes: 0,
-                              scrollbar: { verticalScrollbarSize: 8, horizontalScrollbarSize: 8 },
-                              domReadOnly: !isEditing,
+                    <div className="flex-1 overflow-auto">
+                      <div className="p-2">
+                        {fileTree.length > 0 ? (
+                          <FileTree
+                            selectedPath={selectedFilePath}
+                            onSelect={onLoadFile}
+                            onFolderToggle={(path, expanded) => {
+                              if (expanded) {
+                                void onLoadDirectory?.(path);
+                              }
                             }}
-                          />
-                        </div>
-
-                        {shouldShowFileTree && (
-                          <>
-                            <ResizableHandle
-                              side="right"
-                              onResize={handleFileTreeResize}
-                              onResizeStateChange={setIsFileTreeResizing}
-                              className="border-l border-border/60 bg-background/40 hover:bg-primary/15"
-                            />
-                            <div
-                              style={{
-                                width: fileTreeWidth,
-                                transition: isFileTreeResizing ? 'none' : 'width 0.2s cubic-bezier(0.25, 0.1, 0.25, 1)',
-                              }}
-                              className="flex shrink-0 flex-col overflow-hidden border-l bg-muted/10"
-                            >
-                              <div className="flex items-center border-b px-3 py-2">
-                                <span className="flex-1 text-xs font-semibold text-muted-foreground">项目结构</span>
-                                <div className="flex items-center gap-1">
-                                  <Button
-                                    variant="ghost"
-                                    size="icon"
-                                    className="h-7 w-7"
-                                    onClick={() => void handleRefreshFileTree()}
-                                    disabled={isRefreshingFileTree}
-                                    title="刷新文件树"
-                                  >
-                                    <RefreshCw className={`h-3.5 w-3.5 ${isRefreshingFileTree ? 'animate-spin' : ''}`} />
-                                  </Button>
-                                  <Button
-                                    variant="ghost"
-                                    size="icon"
-                                    className="h-7 w-7"
-                                    onClick={() => setIsFileTreeVisible(false)}
-                                    title="收起文件树"
-                                  >
-                                    <FolderTree className="h-3.5 w-3.5" />
-                                  </Button>
-                                </div>
-                              </div>
-                              <div className="flex-1 overflow-auto">
-                                <div className="p-2">
-                                  {fileTree.length > 0 ? (
-                                    <FileTree
-                                      selectedPath={selectedFilePath}
-                                      onSelect={onLoadFile}
-                                      onFolderToggle={(path, expanded) => {
-                                        if (expanded) {
-                                          void onLoadDirectory?.(path);
-                                        }
-                                      }}
-                                    >
-                                      {renderFileTreeNodes(fileTree)}
-                                    </FileTree>
-                                  ) : (
-                                    <div className="py-4 text-center text-xs text-muted-foreground">暂无文件结构</div>
-                                  )}
-                                </div>
-                              </div>
-                            </div>
-                          </>
+                          >
+                            {renderFileTreeNodes(fileTree)}
+                          </FileTree>
+                        ) : (
+                          <div className="py-4 text-center text-xs text-muted-foreground">暂无文件结构</div>
                         )}
                       </div>
                     </div>
-                  )}
+                  </div>
                 </>
+              ) : null}
+
+              <EditorSidebar
+                isOpen={false}
+                isFileTreeVisible={shouldShowFileTree}
+                onToggle={onToggleWebPreview}
+                onToggleFileTree={() => setIsFileTreeVisible((prev) => !prev)}
+                url={webPreviewUrl}
+                onUrlChange={onWebPreviewUrlChange}
+                onSelectElement={onSelectPreviewElement}
+              />
+
+              {isEditorFullscreen && (
+                <div className="fixed inset-0 z-50 flex flex-col bg-background">
+                  <div className="flex items-center justify-between border-b bg-muted/30 px-4 py-2 shrink-0">
+                    <div className="flex min-w-0 items-center gap-2 text-muted-foreground font-mono text-xs">
+                      <FileCode className="w-3.5 h-3.5 shrink-0" />
+                      <span className="truncate">{selectedFilePath || '未选择文件'}</span>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <EditorTools
+                        canEdit={hasSelectedFile}
+                        isEditing={isEditing}
+                        isSaving={isSaving}
+                        isWebPreviewOpen={isWebPreviewOpen}
+                        canOpenHtmlPreview={hasSelectedFile && isSelectedHtmlFile}
+                        editorTargets={EDITORS}
+                        onStartEdit={handleStartEdit}
+                        onCancelEdit={handleCancelEdit}
+                        onSave={() => void handleSave()}
+                        onOpenInEditor={(command) => void openInEditor(command)}
+                        onOpenHtmlPreview={handleOpenHtmlPreview}
+                      />
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7"
+                        onClick={() => setIsEditorFullscreen(false)}
+                        title="退出全屏"
+                      >
+                        <Minimize2 className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="flex flex-1 min-h-0 overflow-hidden">
+                    <div className="flex flex-1 min-w-0 min-h-0 overflow-hidden">
+                      <Editor
+                        height="100%"
+                        language={getFileLanguage(selectedFilePath)}
+                        value={isEditing ? editContent : selectedFileContent}
+                        onChange={isEditing ? ((value) => setEditContent(value ?? '')) : undefined}
+                        onMount={(editor, monaco) => handleEditorMount(editor, monaco, true)}
+                        theme={isDarkMode ? "vs-dark" : "vs"}
+                        path={`fullscreen-${selectedFilePath}`}
+                        options={{
+                          readOnly: !isEditing,
+                          minimap: { enabled: false },
+                          fontSize: 13,
+                          lineNumbers: 'on',
+                          scrollBeyondLastLine: false,
+                          automaticLayout: true,
+                          padding: { top: 16 },
+                          renderLineHighlight: isEditing ? 'line' : 'none',
+                          overviewRulerBorder: false,
+                          hideCursorInOverviewRuler: true,
+                          overviewRulerLanes: 0,
+                          scrollbar: { verticalScrollbarSize: 8, horizontalScrollbarSize: 8 },
+                          domReadOnly: !isEditing,
+                        }}
+                      />
+                    </div>
+
+                    {shouldShowFileTree && (
+                      <>
+                        <ResizableHandle
+                          side="right"
+                          onResize={handleFileTreeResize}
+                          onResizeStateChange={setIsFileTreeResizing}
+                          className="border-l border-border/60 bg-background/40 hover:bg-primary/15"
+                        />
+                        <div
+                          style={{
+                            width: fileTreeWidth,
+                            transition: isFileTreeResizing ? 'none' : 'width 0.2s cubic-bezier(0.25, 0.1, 0.25, 1)',
+                          }}
+                          className="flex shrink-0 flex-col overflow-hidden border-l bg-muted/10"
+                        >
+                          <div className="flex items-center border-b px-3 py-2">
+                            <span className="flex-1 text-xs font-semibold text-muted-foreground">项目结构</span>
+                            <div className="flex items-center gap-1">
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-7 w-7"
+                                onClick={() => void handleRefreshFileTree()}
+                                disabled={isRefreshingFileTree}
+                                title="刷新文件树"
+                              >
+                                <RefreshCw className={`h-3.5 w-3.5 ${isRefreshingFileTree ? 'animate-spin' : ''}`} />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-7 w-7"
+                                onClick={() => setIsFileTreeVisible(false)}
+                                title="收起文件树"
+                              >
+                                <FolderTree className="h-3.5 w-3.5" />
+                              </Button>
+                            </div>
+                          </div>
+                          <div className="flex-1 overflow-auto">
+                            <div className="p-2">
+                              {fileTree.length > 0 ? (
+                                <FileTree
+                                  selectedPath={selectedFilePath}
+                                  onSelect={onLoadFile}
+                                  onFolderToggle={(path, expanded) => {
+                                    if (expanded) {
+                                      void onLoadDirectory?.(path);
+                                    }
+                                  }}
+                                >
+                                  {renderFileTreeNodes(fileTree)}
+                                </FileTree>
+                              ) : (
+                                <div className="py-4 text-center text-xs text-muted-foreground">暂无文件结构</div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                </div>
               )}
-            </div>
-          </div>
+            </>
+          )}
         </div>
       </div>
 
